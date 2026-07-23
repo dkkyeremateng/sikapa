@@ -137,6 +137,15 @@ offline deterministic fake mode, and a generic eval harness.
 >   default to sensible values — stage-1 growth is derived from the historical FCF
 >   CAGR. It's a *model, not a price target*, presented with its assumptions, and it
 >   declines for banks/insurers (no meaningful capex) and pre-FCF companies.
+> - **`explain_option`** — turns an options contract into plain-language economics
+>   over the live (keyless) Yahoo option chain. Pass a ticker and optionally an
+>   `expiry`, `strike`, and `option_type` ('call'/'put'); the tool works out the
+>   premium and per-contract cost, bid/ask/last, implied volatility and the
+>   IV-implied move, the split of the premium into **intrinsic vs. time value**,
+>   moneyness, and — for buying it — the **breakeven** (and % move to reach it),
+>   **max loss** (the premium), and **max profit**, plus the short-side max loss.
+>   Omit the strike to get a near-the-money slice of the chain to choose from. A
+>   single-leg estimate at expiry, not advice or a spread builder.
 >
 > `sec_filing_excerpt` and `filing_summary` rank passages by keyword by default;
 > set **`SEC_EDGAR_SEMANTIC=1`** (needs an embeddings endpoint) to re-rank the
@@ -284,6 +293,7 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── factors.py     # Fama-French factor exposure (market/size/value, alpha, R²)
 │   ├── edgar.py       # SEC EDGAR filing intelligence (financials/filings/full-text search, keyless)
 │   ├── valuation.py   # deterministic two-stage DCF intrinsic valuation (dcf_valuation)
+│   ├── options.py     # keyless options explainer — single-leg payoff economics (explain_option)
 │   ├── screener.py    # stock screener over a candidate universe (screen_stocks, S&P 500)
 │   ├── subagents.py   # parallel/sequence research subagent dispatch (dispatch_subagent[s])
 │   ├── research.py    # deep-research report (parallel gather → synthesize) + --research

@@ -997,6 +997,7 @@ from .screener import SCREENER_TOOLS  # noqa: E402
 from .subagents import SUBAGENT_TOOLS  # noqa: E402
 from .edgar import EDGAR_TOOLS  # noqa: E402
 from .valuation import VALUATION_TOOLS  # noqa: E402
+from .options import OPTIONS_TOOLS  # noqa: E402
 
 TOOLS += FUNDAMENTALS_TOOLS
 TOOLS += MONITOR_TOOLS
@@ -1007,6 +1008,7 @@ TOOLS += SCREENER_TOOLS
 TOOLS += SUBAGENT_TOOLS
 TOOLS += EDGAR_TOOLS
 TOOLS += VALUATION_TOOLS
+TOOLS += OPTIONS_TOOLS
 
 
 # --- IBKR MCP tools (read-only) --------------------------------------------
