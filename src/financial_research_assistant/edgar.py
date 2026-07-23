@@ -586,6 +586,68 @@ def sec_filing_excerpt(symbol: str, query: str, form_type: str = "10-K",
     return "\n".join(lines).rstrip()
 
 
+# --- Structured filing summary (fixed-slot tearsheet) ----------------------
+
+# The fixed slots of a filing tearsheet, each with the query terms that locate the
+# relevant passages in the document. A predictable schema (not free-form) is what
+# makes summaries comparable and skimmable — the Bloomberg/AlphaSense pattern.
+_SUMMARY_TOPICS: list[tuple[str, str]] = [
+    ("Business & segments", "business segment products services markets operations"),
+    ("Revenue & growth drivers", "revenue net sales growth increased driver demand"),
+    ("Margins & profitability", "gross margin operating margin cost of sales profitability"),
+    ("Outlook / guidance", "outlook expect future anticipate believe guidance fiscal"),
+    ("Capital allocation", "dividend repurchase buyback capital expenditures returned shareholders"),
+    ("Key risks", "risk adversely affect could harm uncertainty depend"),
+]
+
+
+def filing_summary(symbol: str, form_type: str = "10-K") -> str:
+    """Build a structured **tearsheet** of a company's latest filing (default
+    10-K): the relevant verbatim passages grouped under fixed slots — Business &
+    segments, Revenue & growth drivers, Margins & profitability, Outlook/guidance,
+    Capital allocation, Key risks — for you to synthesize into a fixed-slot summary
+    (fill each slot from its passages, cite them, and write 'not disclosed' for a
+    slot with no evidence). Keyless via SEC EDGAR. Use for 'summarize X's 10-K /
+    give me a tearsheet on X's filing / what are the key points of their annual
+    report'. For the raw numbers use `sec_financials`; for one specific topic use
+    `sec_filing_excerpt`."""
+    sym = symbol.strip().upper()
+    cik = _cik_for(sym)
+    if not cik:
+        return _no_cik(sym)
+    name, filings = _submission_recent(cik)
+    ft = form_type.strip().upper() or "10-K"
+    match = next((f for f in filings if f["form"].upper().startswith(ft)), None)
+    if not match:
+        return f"No recent {ft} filing found for {name or sym} ({sym})."
+    url = _filing_url(cik, match["accession"], match["doc"])
+    text = _html_to_text(_fetch_text(url))
+    if not text:
+        return f"Couldn't fetch the {ft} document for {sym}. Filing: {url}"
+    lines = [
+        f"Structured summary · {name or sym} ({sym}) {ft} filed {match['date']} — "
+        f"synthesize a tearsheet: fill EACH slot below from its passages, cite them, "
+        f"and write 'not disclosed' for any slot with no evidence. Delayed as-filed "
+        f"data, not advice.",
+        f"  {url}",
+    ]
+    found_any = False
+    for slot, terms in _SUMMARY_TOPICS:
+        passages = _passages(text, terms, 2)
+        lines.append(f"\n## {slot}")
+        if passages:
+            found_any = True
+            for p in passages:
+                lines.append(f"- {p[:600].strip()}" + ("…" if len(p) > 600 else ""))
+        else:
+            lines.append("- (no matching passage found in this filing)")
+    if not found_any:
+        return (f"Fetched {sym}'s {ft} ({match['date']}) but couldn't locate the "
+                f"usual sections in it. Filing: {url}")
+    lines.append("\n(Source: SEC EDGAR filing text — quote verbatim and cite the filing + date.)")
+    return "\n".join(lines)
+
+
 # SEC EDGAR filing-intelligence tools, appended to tools.TOOLS.
 EDGAR_TOOLS = [
     sec_filings,
@@ -593,4 +655,5 @@ EDGAR_TOOLS = [
     sec_financials,
     sec_filing_search,
     sec_filing_excerpt,
+    filing_summary,
 ]

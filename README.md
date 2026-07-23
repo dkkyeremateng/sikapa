@@ -111,6 +111,10 @@ offline deterministic fake mode, and a generic eval harness.
 >   and returns the **verbatim passages** that match a topic — the exact language
 >   to quote and cite (the grounding step after `sec_filing_search`), keyword-based
 >   and keyless (no embeddings).
+> - **`filing_summary`** — a structured **tearsheet** of a company's latest filing:
+>   the relevant passages grouped under fixed slots (business & segments, revenue
+>   drivers, margins, outlook/guidance, capital allocation, key risks) for a
+>   predictable, comparable summary rather than free-form prose.
 >
 > These cover US-listed filers (identified by ticker → CIK). SEC asks callers to
 > send a descriptive `User-Agent` with a contact email and to stay under ~10

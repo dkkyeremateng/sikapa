@@ -184,7 +184,41 @@ def test_sec_filing_excerpt_extracts_matching_passages(monkeypatch):
     assert "topic/phrase" in edgar.sec_filing_excerpt("AAPL", "")   # empty query
 
 
+def test_filing_summary_builds_fixed_slot_tearsheet(monkeypatch):
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["10-K"], "filingDate": ["2025-11-01"],
+        "accessionNumber": ["0000320193-25-000100"], "primaryDocument": ["aapl-10k.htm"],
+        "primaryDocDescription": ["10-K"], "items": [""],
+    }}}
+    doc = (
+        "<html><body>"
+        "<p>The Company operates in one business segment and sells products and "
+        "services across its markets and operations worldwide to a broad base of "
+        "customers through several distribution channels and partners globally.</p>"
+        "<p>Net sales revenue increased in the period, driven by higher demand and "
+        "growth in services, with continued momentum across the product lineup and "
+        "installed base expansion over the prior fiscal year comparison window.</p>"
+        "<p>The Company repurchased shares and paid a dividend, returning capital to "
+        "shareholders alongside ongoing capital expenditures for its facilities, "
+        "reflecting its capital allocation priorities for the fiscal year.</p>"
+        "</body></html>"
+    )
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs})
+    monkeypatch.setattr(edgar, "_fetch_text", lambda url, **kw: doc)
+    out = edgar.filing_summary("AAPL")
+    assert "Structured summary" in out and "10-K filed 2025-11-01" in out
+    # fixed slots present
+    for slot in ("## Business & segments", "## Revenue & growth drivers",
+                 "## Capital allocation", "## Key risks"):
+        assert slot in out
+    assert "one business segment" in out            # business passage matched
+    assert "Net sales revenue increased" in out     # revenue passage matched
+    assert "returning capital to" in out            # capital allocation passage matched
+    # a slot with no evidence renders the placeholder, not a fabricated summary
+    assert "no matching passage found" in out
+
+
 def test_edgar_tools_registered():
     names = {getattr(t, "name", getattr(t, "__name__", "")) for t in tools.TOOLS}
     assert {"sec_filings", "sec_material_events", "sec_financials",
-            "sec_filing_search", "sec_filing_excerpt"} <= names
+            "sec_filing_search", "sec_filing_excerpt", "filing_summary"} <= names
