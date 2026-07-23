@@ -41,6 +41,10 @@ groq = ["langchain-groq>=1.0"]
 # Schwab, most banks) alongside the built-in IBKR CSV importer. Off by default;
 # `import_ibkr_statement` returns a friendly install hint when absent.
 ofx = ["ofxtools>=0.9"]
+# Document-upload RAG PDF support: `ingest_document` reads .txt/.md/.html without
+# this; the extra adds PDF text extraction. `ingest_document` returns a friendly
+# install hint when a PDF is given and pypdf is absent.
+documents = ["pypdf>=4.0"]
 
 [project.scripts]
 financial-research-assistant = "financial_research_assistant.main:cli"

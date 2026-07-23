@@ -46,6 +46,21 @@ def embed_query(text: str) -> list[float] | None:
         return None
 
 
+def embed_texts(texts: list[str]) -> list[list[float]] | None:
+    """Embed many strings in one round-trip (``embed_documents``), or None if
+    embeddings are unavailable/failed. Used by document ingest so a multi-chunk file
+    doesn't make one request per chunk."""
+    if not texts:
+        return []
+    client = _client()
+    if client is None:
+        return None
+    try:
+        return client.embed_documents(texts)
+    except Exception:
+        return None
+
+
 def cosine(a: list[float], b: list[float]) -> float:
     """Cosine similarity of two equal-length vectors (0.0 if either is degenerate)."""
     dot = sum(x * y for x, y in zip(a, b))

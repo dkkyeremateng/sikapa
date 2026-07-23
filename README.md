@@ -146,6 +146,15 @@ offline deterministic fake mode, and a generic eval harness.
 >   **max loss** (the premium), and **max profit**, plus the short-side max loss.
 >   Omit the strike to get a near-the-money slice of the chain to choose from. A
 >   single-leg estimate at expiry, not advice or a spread builder.
+> - **`ingest_document`** / **`ask_document`** / **`list_documents`** /
+>   **`forget_document`** — bring your own file. Point `ingest_document` at a local
+>   **.txt / .md / .html / .pdf** and it's chunked and stored locally (PDF needs the
+>   optional `[documents]` extra); `ask_document` then retrieves the most relevant
+>   passages **with `[doc · p.N]` citations** so the answer is grounded in *your*
+>   document, not the model's memory. Semantic search when an embeddings endpoint is
+>   configured (same `OPENAI_API_BASE`/`OPENAI_API_KEY` as the model), keyword
+>   otherwise — so it works with zero config. This is for user-provided files; SEC
+>   filings are fetched directly by the `sec_*` tools.
 >
 > `sec_filing_excerpt` and `filing_summary` rank passages by keyword by default;
 > set **`SEC_EDGAR_SEMANTIC=1`** (needs an embeddings endpoint) to re-rank the
@@ -294,6 +303,7 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── edgar.py       # SEC EDGAR filing intelligence (financials/filings/full-text search, keyless)
 │   ├── valuation.py   # deterministic two-stage DCF intrinsic valuation (dcf_valuation)
 │   ├── options.py     # keyless options explainer — single-leg payoff economics (explain_option)
+│   ├── documents.py   # document-upload RAG — ingest/ask local files with cited passages
 │   ├── screener.py    # stock screener over a candidate universe (screen_stocks, S&P 500)
 │   ├── subagents.py   # parallel/sequence research subagent dispatch (dispatch_subagent[s])
 │   ├── research.py    # deep-research report (parallel gather → synthesize) + --research
