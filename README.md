@@ -203,6 +203,8 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── fundamentals.py# yfinance reference tools (valuation/ratings/earnings/dividends/etf)
 │   ├── analytics.py   # tax-loss-harvest + correlation matrix + ETF look-through aggregate
 │   ├── factors.py     # Fama-French factor exposure (market/size/value, alpha, R²)
+│   ├── screener.py    # stock screener over a candidate universe (screen_stocks, S&P 500)
+│   ├── subagents.py   # parallel/sequence research subagent dispatch (dispatch_subagent[s])
 │   ├── research.py    # deep-research report (parallel gather → synthesize) + --research
 │   ├── monitor.py     # portfolio monitoring digest (movers/earnings/ex-divs) + --digest
 │   ├── flex.py        # IBKR Flex Web Service pull (--flex-sync); XML parser is a seam
@@ -609,7 +611,11 @@ AGENT_TRACING=1 OTEL_EXPORTER_OTLP_ENDPOINT=<collector>/v1/traces \
 ```
 
 `tracing.py` emits OpenTelemetry GenAI spans (agent turn + per-tool) — no-op
-unless enabled. See `references/observability-guide.md`.
+unless enabled. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at any OTLP collector
+(Langfuse, LangSmith, Arize Phoenix, …); `OTEL_EXPORTER_OTLP_HEADERS` carries
+auth. As an alternative, `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` uses
+LangGraph's native LangSmith auto-instrumentation. See `.env.example` for the
+full set of tracing variables.
 
 ## Deploy
 
