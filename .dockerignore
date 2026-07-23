@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.git/
+.gitignore
+.DS_Store
+tests/
+eval/results.jsonl
+Dockerfile
+.dockerignore

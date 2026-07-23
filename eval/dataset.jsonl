@@ -1,0 +1,10 @@
+{"query": "hi", "eval_type": "contains", "criteria": [{"answer": "FAKE-OK", "weight": 1.0}]}
+{"query": "Report the latest available price for AAPL", "eval_type": "contains", "criteria": [{"answer": "AAPL", "weight": 1.0}]}
+{"query": "Get a quote for MSFT and note the as-of date", "eval_type": "regex", "criteria": [{"pattern": "MSFT", "weight": 1.0}]}
+{"query": "In one sentence, explain what a P/E ratio measures", "eval_type": "llm_judge", "criteria": [{"answer": "Correctly explains that P/E is price divided by earnings per share", "weight": 1.0}]}
+{"query": "What are my realized capital gains for last year, split short vs long term?", "eval_type": "trajectory", "criteria": [{"tool": "realized_gains", "weight": 1.0}]}
+{"query": "How much dividend income did I receive?", "eval_type": "trajectory", "criteria": [{"tool": "income_summary", "weight": 1.0}]}
+{"query": "What's my portfolio allocation and biggest position?", "eval_type": "trajectory", "criteria": [{"tool": "allocation", "weight": 1.0}]}
+{"query": "Compare AAPL, MSFT and SPY price performance over the last 6 months", "eval_type": "trajectory", "criteria": [{"tool": "compare_prices", "weight": 1.0}]}
+{"query": "How volatile is NVDA and what's its beta and max drawdown?", "eval_type": "trajectory", "criteria": [{"tool": "risk_metrics", "weight": 1.0}]}
+{"query": "Am I beating the S&P 500?", "eval_type": "trajectory", "criteria": [{"tool": "portfolio_vs_benchmark", "weight": 1.0}]}

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "financial-research-assistant"
+version = "0.1.0"
+description = "LangGraph financial research assistant over read-only IBKR MCP market-data tools, with a Textual chat TUI, headless CLI, and offline eval harness"
+requires-python = ">=3.10"
+dependencies = [
+    "langgraph>=1.0,<2.0",
+    "langgraph-checkpoint-sqlite>=2.0",
+    "langchain>=1.0,<2.0",
+    "langchain-openai>=1.0",
+    "langchain-mcp-adapters>=0.1",
+    "textual>=1.0",
+    "python-dotenv>=1.0",
+    "plotext>=5.2",
+    "ddgs>=9.0",
+    "yfinance>=0.2.40",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+# Optional OpenTelemetry export (Langfuse / LangSmith / Phoenix / any OTLP
+# collector). Enable at runtime with AGENT_TRACING=1 or OTEL_EXPORTER_OTLP_*.
+tracing = [
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+]
+# Non-OpenAI model providers (select with MODEL_PROVIDER). Each pulls the
+# LangChain integration package init_chat_model needs for that provider.
+anthropic = ["langchain-anthropic>=1.0"]
+google = ["langchain-google-genai>=2.0"]
+groq = ["langchain-groq>=1.0"]
+# Cross-broker statement import: parse OFX/QFX exports (Vanguard, E*TRADE,
+# Schwab, most banks) alongside the built-in IBKR CSV importer. Off by default;
+# `import_ibkr_statement` returns a friendly install hint when absent.
+ofx = ["ofxtools>=0.9"]
+
+[project.scripts]
+financial-research-assistant = "financial_research_assistant.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/financial_research_assistant"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -1,0 +1,60 @@
+# Sample eval-regression gate. The offline job needs no secrets and runs on
+# every PR; the live job is opt-in (only when an OPENAI_API_KEY secret exists).
+name: eval
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  offline:
+    name: offline plumbing gate (--fake)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install
+        run: pip install -e '.[dev]'
+      - name: smoke tests
+        run: pytest -q
+      - name: eval harness plumbing (offline; fake can't answer content evals)
+        working-directory: eval
+        run: python evaluate.py --fake
+
+  live:
+    name: live quality gate
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install
+        run: pip install -e '.'
+      - name: eval gate (live)
+        working-directory: eval
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+          EVAL_JUDGE_MODEL: gpt-4.1
+          EVAL_MIN_SCORE: "0.8"
+          # On a regression the gate diagnoses the misses and writes a proposed
+          # prompt addendum here (see eval-driven self-improvement in the README).
+          FINANCIAL_RESEARCH_EVAL_DIR: ${{ github.workspace }}/eval-out
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "no OPENAI_API_KEY secret — skipping live gate"; exit 0
+          fi
+          python ci_gate.py
+
+      - name: upload eval diagnosis (on regression)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-diagnosis
+          path: ${{ github.workspace }}/eval-out
+          if-no-files-found: ignore
