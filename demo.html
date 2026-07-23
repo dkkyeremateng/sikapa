@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Financial Research Assistant — Guided Demo</title>
+<style>*{margin:0;box-sizing:border-box}html,body{height:100%}</style>
+</head>
+<body>
+<style>
+  :root {
+    --accent: #b8721a; --accent-bright: #ffb000;
+    --bg: #efebe2; --panel: #f7f4ee; --ink: #23201a; --ink-soft: #5f584c;
+    --line: #ddd6c8; --gain: #1c8a67; --loss: #c03a2f;
+    /* terminal device — constant across themes */
+    --term-bg: #100d08; --term-fg: #e7dcc2; --term-amber: #ffb000;
+    --term-amber-dim: #cf9b34; --term-muted: #8b7f66;
+    --term-gain: #57c99f; --term-loss: #e8635a; --term-line: #2a2318;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Cascadia Code", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --accent: #f5a623; --bg: #0e0d0b; --panel: #17140f; --ink: #ece7db;
+      --ink-soft: #a49b88; --line: #29241c; --gain: #4ec9a3; --loss: #e6584d;
+    }
+  }
+  :root[data-theme="light"] {
+    --accent: #b8721a; --bg: #efebe2; --panel: #f7f4ee; --ink: #23201a;
+    --ink-soft: #5f584c; --line: #ddd6c8; --gain: #1c8a67; --loss: #c03a2f;
+  }
+  :root[data-theme="dark"] {
+    --accent: #f5a623; --bg: #0e0d0b; --panel: #17140f; --ink: #ece7db;
+    --ink-soft: #a49b88; --line: #29241c; --gain: #4ec9a3; --loss: #e6584d;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  .wrap {
+    font-family: var(--sans); background: var(--bg); color: var(--ink);
+    min-height: 100vh; padding: clamp(20px, 5vw, 56px) 20px 48px;
+    display: flex; flex-direction: column; align-items: center; gap: 30px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .stage { width: 100%; max-width: 860px; }
+
+  /* ---- header ---- */
+  header { text-align: center; display: flex; flex-direction: column; gap: 12px; align-items: center; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .22em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600;
+  }
+  h1 {
+    margin: 0; font-size: clamp(28px, 5.4vw, 46px); line-height: 1.05; letter-spacing: -.02em;
+    font-weight: 680; text-wrap: balance; max-width: 16ch;
+  }
+  .lede { margin: 0; color: var(--ink-soft); font-size: clamp(15px, 2.2vw, 17px); max-width: 54ch; line-height: 1.55; text-wrap: balance; }
+  .stats { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 6px; }
+  .stat {
+    font-family: var(--mono); font-size: 12px; color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; background: var(--panel);
+  }
+  .stat b { color: var(--accent); font-weight: 600; }
+
+  /* ---- terminal ---- */
+  .term {
+    margin-top: 30px; background: var(--term-bg); border-radius: 12px;
+    border: 1px solid #322a1c; overflow: hidden;
+    box-shadow: 0 24px 60px -30px rgba(0,0,0,.7), 0 0 0 1px rgba(255,176,0,.05);
+    position: relative;
+  }
+  .titlebar {
+    display: flex; align-items: center; gap: 12px; padding: 11px 14px;
+    background: linear-gradient(#1b160d, #141009); border-bottom: 1px solid var(--term-line);
+  }
+  .dots { display: flex; gap: 7px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #3a3122; }
+  .dot.amber { background: #d9962a; }
+  .tb-title { font-family: var(--mono); font-size: 12px; color: var(--term-muted); letter-spacing: .04em; }
+  .tb-pill {
+    margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--term-amber);
+    border: 1px solid #4a3c1d; border-radius: 5px; padding: 3px 9px; background: rgba(255,176,0,.06);
+    white-space: nowrap; max-width: 42%; overflow: hidden; text-overflow: ellipsis;
+  }
+  .screen {
+    position: relative; padding: 20px clamp(16px, 3vw, 26px) 22px; min-height: 340px;
+    font-family: var(--mono); font-size: 13.5px; line-height: 1.62; color: var(--term-fg);
+    overflow-x: auto;
+  }
+  .screen::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(rgba(255,176,0,.025) 0 1px, transparent 1px 3px);
+    mix-blend-mode: screen;
+  }
+  .body-lines { position: relative; z-index: 1; display: flex; flex-direction: column; }
+
+  .cmd { color: var(--term-fg); white-space: pre-wrap; word-break: break-word; }
+  .mark { color: var(--term-amber); text-shadow: 0 0 7px rgba(255,176,0,.4); font-weight: 700; }
+  .caret {
+    display: inline-block; width: 8px; height: 1.05em; vertical-align: text-bottom;
+    background: var(--term-amber); box-shadow: 0 0 8px rgba(255,176,0,.5); margin-left: 2px;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .tool { margin-top: 12px; color: var(--term-amber-dim); }
+  .tool .tn { color: var(--term-amber); }
+  .spin { color: var(--term-amber); }
+  .out { margin-top: 12px; white-space: pre; display: flex; flex-direction: column; }
+  .out .ln { white-space: pre; }
+  .reveal { opacity: 0; transform: translateY(3px); animation: rise .34s ease forwards; }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+  .g { color: var(--term-gain); } .r { color: var(--term-loss); }
+  .a { color: var(--term-amber); } .m { color: var(--term-muted); }
+  .q { color: #d7cdb4; font-style: italic; }
+  .cite { color: var(--term-amber-dim); }
+
+  /* ---- caption + rail ---- */
+  .caption { margin-top: 22px; text-align: center; min-height: 46px; }
+  .cap-title { font-family: var(--mono); font-size: 14px; color: var(--accent); font-weight: 600; letter-spacing: .02em; }
+  .cap-blurb { margin: 5px auto 0; color: var(--ink-soft); font-size: 14px; max-width: 52ch; line-height: 1.5; }
+
+  .controls { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+  .rail { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .chip {
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink-soft);
+    border: 1px solid var(--line); background: var(--panel); border-radius: 7px;
+    padding: 6px 10px; cursor: pointer; transition: all .18s ease; display: inline-flex; gap: 7px; align-items: center;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--ink); }
+  .chip .n { color: var(--accent); font-weight: 700; }
+  .chip[aria-current="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--ink); }
+  .btn {
+    font-family: var(--mono); font-size: 12px; color: var(--ink); cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 7px 14px;
+    display: inline-flex; align-items: center; gap: 7px; transition: all .18s ease;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:focus-visible, .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn .ic { color: var(--accent); font-weight: 700; }
+
+  /* ---- feature grid ---- */
+  .section-h { margin: 8px 0 0; text-align: center; }
+  .section-h h2 { margin: 0; font-size: clamp(20px, 3.4vw, 27px); letter-spacing: -.01em; font-weight: 640; text-wrap: balance; }
+  .section-h p { margin: 8px auto 0; color: var(--ink-soft); max-width: 50ch; font-size: 14.5px; line-height: 1.55; }
+  .grid {
+    margin-top: 26px; display: grid; grid-template-columns: repeat(auto-fill, minmax(238px, 1fr)); gap: 12px;
+  }
+  .card {
+    border: 1px solid var(--line); background: var(--panel); border-radius: 11px; padding: 16px 17px;
+    display: flex; flex-direction: column; gap: 7px;
+  }
+  .card .top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .card h3 { margin: 0; font-size: 14.5px; font-weight: 620; letter-spacing: -.01em; }
+  .card .count { font-family: var(--mono); font-size: 11px; color: var(--accent); border: 1px solid var(--line); border-radius: 5px; padding: 2px 7px; white-space: nowrap; }
+  .card p { margin: 0; font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+  .card .tools { font-family: var(--mono); font-size: 11.5px; color: var(--ink-soft); opacity: .85; margin-top: 2px; line-height: 1.5; }
+
+  footer { margin-top: 40px; text-align: center; color: var(--ink-soft); font-size: 12.5px; max-width: 60ch; line-height: 1.6; }
+  footer code { font-family: var(--mono); color: var(--accent); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { animation: none; opacity: 1; transform: none; }
+    .caret { animation: none; }
+  }
+  @media (max-width: 520px) { .screen { font-size: 12px; } }
+</style>
+
+<div class="wrap">
+  <div class="stage">
+    <header>
+      <div class="eyebrow">Financial Research Assistant</div>
+      <h1>A research desk that lives in your terminal.</h1>
+      <p class="lede">A local AI analyst with 51 tools — as-reported SEC filings, DCF valuation, options,
+        portfolio analytics, and your own documents. Mostly keyless. Watch it work.</p>
+      <div class="stats">
+        <span class="stat"><b>51</b> tools</span>
+        <span class="stat"><b>keyless</b> by default</span>
+        <span class="stat">SEC EDGAR · Yahoo · Ken French</span>
+        <span class="stat">read-only, cited, offline-first</span>
+      </div>
+    </header>
+
+    <div class="term" role="img" aria-label="Animated terminal demo of the financial research assistant">
+      <div class="titlebar">
+        <div class="dots"><span class="dot amber"></span><span class="dot"></span><span class="dot"></span></div>
+        <span class="tb-title">fra — research session</span>
+        <span class="tb-pill" id="pill">idle</span>
+      </div>
+      <div class="screen"><div class="body-lines" id="term"></div></div>
+    </div>
+
+    <div class="caption">
+      <div class="cap-title" id="capTitle">Loading…</div>
+      <p class="cap-blurb" id="capBlurb"></p>
+    </div>
+
+    <div class="controls">
+      <button class="btn" id="playBtn"><span class="ic" id="playIc">❚❚</span> <span id="playTx">Pause</span></button>
+      <button class="btn" id="restartBtn"><span class="ic">↺</span> Restart</button>
+    </div>
+    <div class="controls"><div class="rail" id="rail"></div></div>
+  </div>
+
+  <div class="stage">
+    <div class="section-h">
+      <h2>Everything it can do</h2>
+      <p>The demo shows six moments. Under the hood the agent routes across eleven areas — the full list lives in <code>Tools.md</code>.</p>
+    </div>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <footer>
+    An illustrative recorded demo — figures are drawn from real verified runs (Apple's DCF, the options math,
+    the quoted 10-K passage) and are for demonstration, not live quotes or investment advice. The assistant is
+    read-only and never places trades.
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ---- scene data (outputs authored as HTML; spans carry color) ----
+  var scenes = [
+    {
+      feat: "Compare companies", blurb: "One normalized table across a few names — valuation, growth, margins, consensus.",
+      prompt: "Compare AAPL, MSFT and NVDA — which is cheaper and growing faster?",
+      tool: 'compare_stocks("AAPL, MSFT, NVDA")',
+      out: [
+        '<span class="m">                  AAPL       MSFT       NVDA</span>',
+        'Price           <span class="a">$258.40</span>    <span class="a">$517.20</span>    <span class="a">$184.60</span>',
+        'Market cap        3.84T      3.84T      <span class="a">4.51T</span>',
+        'Fwd P/E            29.1       33.4       <span class="r">38.9</span>',
+        'Rev growth        <span class="g">+6.1%</span>     <span class="g">+15.7%</span>     <span class="g">+55.6%</span>',
+        'Net margin         24.9%      35.8%      <span class="g">55.9%</span>',
+        'Consensus           Buy  Strong Buy Strong Buy',
+        '',
+        '<span class="m">› NVDA is the growth + margin leader but priciest (38.9× fwd).</span>',
+        '<span class="m">  AAPL is the cheapest; MSFT balances both. [Yahoo, delayed]</span>'
+      ]
+    },
+    {
+      feat: "Intrinsic value (DCF)", blurb: "A deterministic two-stage DCF on as-reported 10-K cash flows — the tool does the math.",
+      prompt: "Run a DCF on Apple — is it over- or undervalued?",
+      tool: 'dcf_valuation("AAPL")',
+      out: [
+        '<span class="a">DCF · Apple Inc. (AAPL) — two-stage FCF model</span>',
+        '<span class="m">stage-1 growth 6.1% (from 6y FCF CAGR) · disc 9% · term 2.5%</span>',
+        '',
+        'FCF base (FY2025, as-reported 10-K)     <span class="a">$98.5B</span>',
+        'Enterprise value                        <span class="a">$1.82T</span>',
+        'Intrinsic value / share               <span class="a">$122.74</span>',
+        'Current price                         $258.40',
+        'Upside / (downside)                     <span class="r">-52%</span>  → <span class="r">overvalued*</span>',
+        '',
+        '<span class="m">*On these conservative assumptions. A model, not a price</span>',
+        '<span class="m"> target — read the sensitivity grid before concluding.</span>'
+      ]
+    },
+    {
+      feat: "Cited answers from filings", blurb: "Pulls the exact language from the primary SEC filing and cites it — no paraphrase from memory.",
+      prompt: "What does Apple's 10-K say about share buybacks? Quote it.",
+      tool: 'sec_filing_excerpt("AAPL", "share repurchases", "10-K")',
+      out: [
+        '<span class="q">"…the Company\'s share repurchase program does not</span>',
+        '<span class="q">obligate it to acquire any specific number of shares.</span>',
+        '<span class="q">Future dividends are subject to declaration by the</span>',
+        '<span class="q">Company\'s Board of Directors…"</span>',
+        '',
+        '<span class="cite">        — Apple Inc. Form 10-K, filed 2025-10-31  [aapl-10k]</span>',
+        '',
+        '<span class="m">Every claim traces to the source document and date.</span>'
+      ]
+    },
+    {
+      feat: "Options, explained", blurb: "Turns a contract into plain-language economics: premium, breakeven, time value, max loss.",
+      prompt: "Explain the Apple $260 call expiring next month — breakeven and max loss?",
+      tool: 'explain_option("AAPL", strike=260, option_type="call")',
+      out: [
+        '<span class="a">AAPL $260.00 CALL</span>  ·  exp 2026-08-21  ·  29 days',
+        '',
+        'Premium (mid)        $6.40  → <span class="a">$640</span> per contract',
+        'Intrinsic / time     $0.00 / <span class="a">$6.40</span>   (all time value)',
+        'Implied vol          28.4%   (±$14.9 by expiry)',
+        'Breakeven           <span class="a">$266.40</span>   (<span class="g">+3.1%</span> move)',
+        'Max loss             <span class="r">$640</span>  (the premium — capped)',
+        'Max profit           unlimited',
+        '',
+        '<span class="m">Single-leg estimate at expiry, not advice.</span>'
+      ]
+    },
+    {
+      feat: "Ask your own documents", blurb: "Ingest a PDF or report and answer from it, quoted with a page-level citation.",
+      prompt: "Read acme-fy25.pdf and tell me the free cash flow.",
+      tool: 'ingest_document(…)  →  ask_document("free cash flow")',
+      out: [
+        '<span class="g">✓</span> Ingested <span class="a">\'acme-fy25\'</span> — 42 chunks · 18 pages · semantic',
+        '',
+        '<span class="q">"Free cash flow reached a record $900 million, up 24%</span>',
+        '<span class="q">year over year, driven by margin expansion and</span>',
+        '<span class="q">disciplined capital expenditure."</span>',
+        '',
+        '<span class="cite">                                   [acme-fy25 · p.7]</span>',
+        '',
+        '<span class="m">Grounded in your file — not the model\'s memory.</span>'
+      ]
+    },
+    {
+      feat: "Delegates in parallel", blurb: "Fans research out to independent subagents, then synthesizes — read-only, over public data.",
+      prompt: "Research AAPL, MSFT and NVDA in parallel and rank them for a growth investor.",
+      tool: 'dispatch_subagents(3 tasks, mode="parallel")',
+      out: [
+        '<span class="a">⇢ 3 subagents dispatched (parallel)</span>',
+        '  <span class="g">✓</span> AAPL   fundamentals · outlook · risks',
+        '  <span class="g">✓</span> MSFT   fundamentals · outlook · risks',
+        '  <span class="g">✓</span> NVDA   fundamentals · outlook · risks',
+        '',
+        '<span class="m">Synthesis — for a growth mandate:</span>',
+        '  <span class="a">#1 NVDA</span>  accelerating data-center revenue',
+        '  <span class="a">#2 MSFT</span>  durable cloud + AI, strong margin',
+        '  <span class="a">#3 AAPL</span>  slower growth, best capital return',
+        '<span class="m">Illustrative, not investment advice.</span>'
+      ]
+    }
+  ];
+
+  var features = [
+    ["Market data & charts", "5", "Price charts, normalized comparisons, risk metrics, news.", "price_history_chart · compare_prices · risk_metrics"],
+    ["Fundamentals", "6", "Snapshots, analyst ratings, earnings, dividends, ETF look-through.", "stock_fundamentals · compare_stocks · etf_exposure"],
+    ["Valuation & options", "2", "Two-stage DCF intrinsic value and a single-leg options explainer.", "dcf_valuation · explain_option"],
+    ["Deep research", "3", "Broad gather → synthesis: reports, move-explainers, bull/bear debate.", "research_report · explain_stock_move · bull_bear_debate"],
+    ["SEC EDGAR", "9", "As-reported financials, filings, 8-Ks, cited excerpts, tone, rank.", "sec_financials · sec_filing_excerpt · compare_sec_financials"],
+    ["Stock screener", "1", "Screen a universe (incl. S&P 500) on cap, highs, EPS-beat streaks.", "screen_stocks"],
+    ["Portfolio & statements", "10", "Import a broker statement; positions, gains, income, benchmarks.", "import_ibkr_statement · realized_gains · allocation"],
+    ["Advanced analytics", "5", "Tax-loss harvest, correlation, look-through, factor exposure, digest.", "tax_loss_harvest · portfolio_lookthrough · factor_exposure"],
+    ["Document RAG", "4", "Ingest your files; answer with page-level citations.", "ingest_document · ask_document · list_documents"],
+    ["Subagents", "2", "Delegate focused research in parallel or in sequence.", "dispatch_subagent · dispatch_subagents"],
+    ["Calculators & FX", "4", "Percent change, CAGR, position weight, currency conversion.", "cagr · pct_change · convert_currency"]
+  ];
+
+  // ---- build static UI ----
+  var termEl = document.getElementById("term");
+  var pill = document.getElementById("pill");
+  var capTitle = document.getElementById("capTitle");
+  var capBlurb = document.getElementById("capBlurb");
+  var rail = document.getElementById("rail");
+  var grid = document.getElementById("grid");
+  var playBtn = document.getElementById("playBtn");
+  var playIc = document.getElementById("playIc");
+  var playTx = document.getElementById("playTx");
+
+  features.forEach(function (f) {
+    var c = document.createElement("div"); c.className = "card";
+    c.innerHTML = '<div class="top"><h3></h3><span class="count"></span></div><p></p><div class="tools"></div>';
+    c.querySelector("h3").textContent = f[0];
+    c.querySelector(".count").textContent = f[1] + " tool" + (f[1] === "1" ? "" : "s");
+    c.querySelector("p").textContent = f[2];
+    c.querySelector(".tools").textContent = f[3];
+    grid.appendChild(c);
+  });
+
+  scenes.forEach(function (s, i) {
+    var b = document.createElement("button");
+    b.className = "chip"; b.type = "button";
+    b.innerHTML = '<span class="n">' + String(i + 1).padStart(2, "0") + '</span> ' + s.feat;
+    b.addEventListener("click", function () { jump(i); });
+    s.chip = b; rail.appendChild(b);
+  });
+
+  // ---- player ----
+  var state = { i: 0, token: 0, playing: !reduce, paused: reduce };
+  var CANCEL = {};
+  function sleep(ms, tok) {
+    return new Promise(function (res, rej) {
+      var t = setTimeout(function () { tok === state.token ? res() : rej(CANCEL); }, ms);
+      if (tok !== state.token) { clearTimeout(t); rej(CANCEL); }
+    });
+  }
+  function setActive(i) {
+    scenes.forEach(function (s, k) { s.chip.setAttribute("aria-current", k === i ? "true" : "false"); });
+    capTitle.textContent = scenes[i].feat;
+    capBlurb.textContent = scenes[i].blurb;
+  }
+  function esc(t) { return t.replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+
+  function renderStatic(i) {
+    var s = scenes[i]; setActive(i); pill.textContent = s.tool.split("(")[0] + "()";
+    var html = '<div class="cmd"><span class="mark">›</span> ' + esc(s.prompt) + '</div>' +
+      '<div class="tool">▸ calling <span class="tn">' + esc(s.tool) + '</span> <span class="g">✓</span></div>' +
+      '<div class="out">' + s.out.map(function (l) { return '<div class="ln">' + (l || "&nbsp;") + '</div>'; }).join("") + '</div>';
+    termEl.innerHTML = html;
+  }
+
+  async function typeText(el, text, tok) {
+    for (var n = 0; n <= text.length; n++) {
+      if (tok !== state.token) throw CANCEL;
+      el.textContent = text.slice(0, n);
+      await sleep(text.length > 60 ? 14 : 22, tok);
+    }
+  }
+
+  async function runScene(i, tok) {
+    var s = scenes[i]; setActive(i);
+    pill.textContent = "routing…";
+    termEl.innerHTML = '<div class="cmd"><span class="mark">›</span> <span class="typed"></span><span class="caret"></span></div>';
+    var typed = termEl.querySelector(".typed");
+    await typeText(typed, s.prompt, tok);
+    var caret = termEl.querySelector(".caret"); if (caret) caret.remove();
+    await sleep(340, tok);
+
+    pill.textContent = s.tool.split("(")[0] + "()";
+    var tool = document.createElement("div");
+    tool.className = "tool"; tool.innerHTML = '▸ calling <span class="tn">' + esc(s.tool) + '</span> <span class="spin">⠋</span>';
+    termEl.appendChild(tool);
+    var frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", fi = 0, spin = tool.querySelector(".spin");
+    for (var k = 0; k < 9; k++) { spin.textContent = frames[fi = (fi + 1) % frames.length]; await sleep(70, tok); }
+    spin.outerHTML = '<span class="g">✓</span>';
+    await sleep(180, tok);
+
+    var out = document.createElement("div"); out.className = "out"; termEl.appendChild(out);
+    for (var j = 0; j < s.out.length; j++) {
+      if (tok !== state.token) throw CANCEL;
+      var ln = document.createElement("div");
+      ln.className = "ln reveal"; ln.innerHTML = s.out[j] || "&nbsp;";
+      out.appendChild(ln);
+      await sleep(s.out[j] ? 90 : 40, tok);
+    }
+    await sleep(3200, tok);
+  }
+
+  async function loop(start) {
+    var tok = ++state.token; state.i = start;
+    while (state.playing) {
+      try { await runScene(state.i, tok); }
+      catch (e) { if (e === CANCEL) return; throw e; }
+      if (tok !== state.token) return;
+      state.i = (state.i + 1) % scenes.length;
+    }
+  }
+
+  function jump(i) {
+    state.token++;
+    state.i = i;
+    if (state.playing && !reduce) { loop(i); }
+    else { renderStatic(i); }
+  }
+  function setPlaying(p) {
+    state.playing = p; state.paused = !p;
+    playIc.textContent = p ? "❚❚" : "▶";
+    playTx.textContent = p ? "Pause" : "Play";
+    if (p) { loop(state.i); } else { state.token++; renderStatic(state.i); }
+  }
+
+  playBtn.addEventListener("click", function () { setPlaying(!state.playing); });
+  document.getElementById("restartBtn").addEventListener("click", function () {
+    if (reduce) { renderStatic(0); return; }
+    state.playing = true; playIc.textContent = "❚❚"; playTx.textContent = "Pause"; loop(0);
+  });
+
+  // ---- start ----
+  if (reduce) { renderStatic(0); playIc.textContent = "▶"; playTx.textContent = "Play"; }
+  else { loop(0); }
+})();
+</script>
+
+</body>
+</html>

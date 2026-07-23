@@ -8,6 +8,12 @@ analyst calculators, a **price-history charting** tool, and a **web-search**
 tool for stock/market news. It ships a Textual chat TUI, a headless CLI, an
 offline deterministic fake mode, and a generic eval harness.
 
+> ### ▶ [Watch the guided demo](https://claude.ai/code/artifact/b39ec2f9-1b91-4af5-996c-a351aa3c62a0)
+> A self-playing terminal walkthrough of six features — company comparison, DCF
+> valuation, cited SEC-filing answers, the options explainer, document Q&A, and
+> parallel subagents — plus a map of all 51 tools. Source: [`demo.html`](demo.html)
+> (open it locally in any browser). See also the full [`Tools.md`](Tools.md) reference.
+
 > **The broker is pluggable — two registry-driven seams.** A different broker's
 > **live read-only MCP server** plugs into the
 > [broker-provider registry](#pluggable-brokers) (`brokers.py`), and a different
