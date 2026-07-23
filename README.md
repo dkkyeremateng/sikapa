@@ -119,6 +119,20 @@ offline deterministic fake mode, and a generic eval harness.
 >   side** in one matrix (companies × metrics) from 10-K XBRL — the as-reported
 >   peer comparison, distinct from the Yahoo-snapshot `compare_stocks`. Pass a
 >   `concept` for one metric across companies over several years.
+> - **`filing_tone_trend`** — tracks the **tone** of a company's recent 10-Ks over
+>   time: the negative-word density (a Loughran-McDonald finance-sentiment
+>   heuristic) per filing, so you can see whether management's language is growing
+>   more cautious. A lexicon signal, not a judgment — pair with `sec_filing_excerpt`.
+> - **`sec_metric_rank`** — where a company **ranks** on a metric among *all* SEC
+>   filers (e.g. "AAPL's net income is #4 of ~6,000"), with its value and the peer
+>   median. Reports a rank/percentile — robust to the occasional filer error — not
+>   a raw "biggest companies" leaderboard (whose extremes can be mis-scaled filings).
+>
+> `sec_filing_excerpt` and `filing_summary` rank passages by keyword by default;
+> set **`SEC_EDGAR_SEMANTIC=1`** (needs an embeddings endpoint) to re-rank the
+> keyword shortlist by embedding similarity, catching paraphrases keyword matching
+> misses. It degrades to keyword if embeddings are unavailable, so the keyless path
+> always works.
 >
 > These cover US-listed filers (identified by ticker → CIK). SEC asks callers to
 > send a descriptive `User-Agent` with a contact email and to stay under ~10

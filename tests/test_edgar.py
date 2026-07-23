@@ -286,8 +286,99 @@ def test_annual_facts_keys_by_end_year_merges_tags_excludes_quarters():
     assert [r["fy"] for r in rows] == [2026, 2025, 2022]   # newest first
 
 
+def test_tone_score_negative_density():
+    assert edgar._tone_score("")[0] is None
+    # 10 words; 2 are LM-negative (risk, adverse) -> 20%
+    score, n = edgar._tone_score("the risk of adverse events among the many good things")
+    assert n == 10 and round(score, 1) == 20.0
+
+
+def test_filing_tone_trend_scores_each_10k(monkeypatch):
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["10-K", "10-Q", "10-K"],
+        "filingDate": ["2025-11-01", "2025-08-01", "2024-11-01"],
+        "accessionNumber": ["0000320193-25-000100", "q", "0000320193-24-000090"],
+        "primaryDocument": ["k25.htm", "q.htm", "k24.htm"],
+        "primaryDocDescription": ["10-K", "10-Q", "10-K"], "items": ["", "", ""],
+    }}}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs})
+    # newest 10-K reads more negative than the older one
+    docs = {"k25.htm": "<p>" + ("risk adverse litigation " * 5 + "growth ") + "</p>",
+            "k24.htm": "<p>" + ("growth strong revenue " * 5 + "risk ") + "</p>"}
+    monkeypatch.setattr(edgar, "_fetch_text",
+                        lambda url, **kw: next(v for k, v in docs.items() if k in url))
+    out = edgar.filing_tone_trend("AAPL", years=3)
+    assert "Filing tone trend" in out
+    assert "2025-11-01" in out and "2024-11-01" in out
+    assert "10-Q" not in out                      # only 10-Ks scored
+    assert "MORE negative/cautious" in out        # newest > oldest density
+
+
+def test_sec_metric_rank_from_frame(monkeypatch):
+    edgar._TICKER_CIK.clear()
+    tickers = {"0": {"cik_str": 1, "ticker": "MID", "title": "Mid Co"}}
+    frame = {"data": [
+        {"entityName": "Mid Co", "cik": 1, "val": 400e9, "end": "2024-12-31"},
+        {"entityName": "Huge Co", "cik": 2, "val": 900e9, "end": "2024-12-31"},
+        {"entityName": "Small Co", "cik": 3, "val": 50e9, "end": "2024-12-31"},
+    ]}
+
+    def fetch(url, **kw):
+        if "company_tickers.json" in url:
+            return tickers
+        if "frames/us-gaap" in url:
+            return frame
+        return {}
+
+    monkeypatch.setattr(edgar, "_fetch_json", fetch)
+    out = edgar.sec_metric_rank("MID", concept="Revenue", year=2024)
+    assert "Mid Co" in out and "CY2024" in out
+    assert "400.00B" in out                       # the company's own value
+    assert "#2 of 3" in out                       # one filer (900B) ranks higher
+    assert "top 66.7%" in out                     # 2/3
+    assert "peer median" in out and "400.00B" in out
+
+    # a company absent from the frame -> friendly note, not a crash
+    tickers["1"] = {"cik_str": 99, "ticker": "GONE", "title": "Gone Co"}
+    edgar._TICKER_CIK.clear()
+    assert "didn't report" in edgar.sec_metric_rank("GONE", concept="Revenue", year=2024)
+
+
+def test_passages_semantic_optin(monkeypatch):
+    """Default keyword ranking is unchanged; when SEC_EDGAR_SEMANTIC is on, the
+    keyword shortlist is re-ranked by embedding similarity (mocked here). Both
+    paragraphs mention the query, so keyword-matching ties and insertion order
+    holds — the embedding rerank is what flips them."""
+    text = "\n".join([
+        "Alpha paragraph on supply chain logistics and distribution networks worldwide "
+        "that clearly exceeds the minimum passage length threshold used by the ranker.",
+        "Beta paragraph on supply chain resilience and supplier risk that also clearly "
+        "exceeds the minimum passage length threshold used by the ranker for inclusion.",
+    ])
+    monkeypatch.delenv("SEC_EDGAR_SEMANTIC", raising=False)
+    kw = edgar._passages(text, "supply chain", 2)
+    assert "logistics" in kw[0].lower()          # keyword tie -> insertion order (Alpha first)
+
+    # Semantic on: mock embeddings so Beta ("resilience") is closest to the query.
+    monkeypatch.setenv("SEC_EDGAR_SEMANTIC", "1")
+    import financial_research_assistant.embeddings as emb
+
+    def fake_embed(t):
+        tl = t.lower()
+        if "resilience" in tl:
+            return [0.9, 0.1]      # Beta — closest to the query vector
+        if "logistics" in tl:
+            return [0.3, 0.7]      # Alpha — farther
+        return [1.0, 0.0]          # the query itself
+
+    monkeypatch.setattr(emb, "embed_query", fake_embed)
+    monkeypatch.setattr(emb, "cosine", lambda a, b: a[0] * b[0] + a[1] * b[1])
+    ranked = edgar._passages(text, "supply chain", 2)
+    assert len(ranked) == 2 and "resilience" in ranked[0].lower()   # rerank flipped order
+
+
 def test_edgar_tools_registered():
     names = {getattr(t, "name", getattr(t, "__name__", "")) for t in tools.TOOLS}
     assert {"sec_filings", "sec_material_events", "sec_financials",
             "sec_filing_search", "sec_filing_excerpt", "filing_summary",
-            "compare_sec_financials"} <= names
+            "compare_sec_financials", "filing_tone_trend", "sec_metric_rank"} <= names

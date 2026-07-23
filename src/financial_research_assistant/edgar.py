@@ -558,7 +558,7 @@ def _html_to_text(raw: str) -> str:
     return "\n".join(ln for ln in lines if ln)
 
 
-def _passages(text: str, query: str, top: int) -> list[str]:
+def _keyword_passages(text: str, query: str, top: int) -> list[str]:
     """Rank the document's paragraphs by how many distinct query terms they contain
     (ties broken by total occurrences); return the best ``top`` substantive ones."""
     terms = set(re.findall(r"[a-z0-9]{3,}", query.lower()))
@@ -575,6 +575,45 @@ def _passages(text: str, query: str, top: int) -> list[str]:
             scored.append((matched, occ, para))
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return [p for _, _, p in scored[:top]]
+
+
+def _semantic_on() -> bool:
+    """Semantic passage re-ranking is opt-in (needs an embeddings endpoint): keyword
+    matching is the keyless default. Enable with SEC_EDGAR_SEMANTIC=1."""
+    return os.environ.get("SEC_EDGAR_SEMANTIC", "").strip().lower() not in ("", "0", "false", "no")
+
+
+def _semantic_rerank(query: str, candidates: list[str]) -> list[str]:
+    """Re-order keyword candidates by embedding cosine similarity to the query.
+    Degrades to the input order if embeddings are unavailable (no endpoint/key, or
+    any failure), so this never breaks the keyless path."""
+    try:
+        from .embeddings import cosine, embed_query
+    except Exception:  # noqa: BLE001
+        return candidates
+    qv = embed_query(query)
+    if qv is None:
+        return candidates
+    scored = []
+    for p in candidates:
+        pv = embed_query(p[:1200])
+        if pv is None:
+            return candidates  # endpoint went away mid-loop — keep keyword order
+        scored.append((cosine(qv, pv), p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored]
+
+
+def _passages(text: str, query: str, top: int) -> list[str]:
+    """Best ``top`` passages matching a query. Keyword-ranked by default; when
+    SEC_EDGAR_SEMANTIC is set, a wider keyword shortlist is re-ranked by embedding
+    similarity (a hybrid that catches paraphrases keyword matching misses)."""
+    if not _semantic_on():
+        return _keyword_passages(text, query, top)
+    shortlist = _keyword_passages(text, query, max(top * 4, top))
+    if len(shortlist) <= 1:
+        return shortlist[:top]
+    return _semantic_rerank(query, shortlist)[:top]
 
 
 def sec_filing_excerpt(symbol: str, query: str, form_type: str = "10-K",
@@ -831,6 +870,151 @@ def compare_sec_financials(symbols: str, concept: str = "", years: int = 3) -> s
     return "\n".join(lines)
 
 
+# --- Filing-tone trend (Loughran-McDonald negative-word density) -----------
+
+# A curated subset of the Loughran-McDonald finance negative-sentiment lexicon —
+# the recognized way to gauge 10-K tone (generic sentiment lists mis-score finance
+# text). Negative-word *density* is the standard signal; a rising density means a
+# more cautious/negative filing. This is a heuristic, not a model.
+_LM_NEGATIVE = frozenset("""
+adverse adversely against aggravate alleging allegation allegations breach
+breaches challenge challenges challenged claims closure closures complaint
+complaints concern concerns concession contingencies contingency contraction
+counterfeit crisis critical damage damages decline declined declines declining
+default defaults defendant deficiencies deficiency deficit delay delayed delays
+deteriorate deteriorated deterioration difficult difficulties difficulty
+diminished disciplinary disclose disclosed disclosure dispute disputes disrupt
+disrupted disruption disruptions downgrade downgraded downturn doubt doubtful
+erroneous erosion error errors exposed exposure fail failed failing fails
+failure failures fine fined fluctuate fluctuation fluctuations forced fraud
+fraudulent harm harmed harmful hazardous impair impaired impairment impairments
+impede imposed impossible inability inadequate incident incidents insolvency
+instability investigation investigations lawsuit lawsuits liabilities liable
+limitation limitations litigation lose losing loss losses lost material
+misconduct misstatement negative negatively obsolescence obsolete penalties
+penalty poor pressure pressures problem problems prosecution recall recalls
+recession restated restatement restrictions risk risks sanctions serious
+severe shortage shortages shortfall shutdown slowdown slower squeeze
+susceptible suspended termination terminate terminated threat threats
+threatened turmoil unable unavailable uncertain uncertainties uncertainty
+unexpected unfavorable unfavorably unforeseen unpaid unprofitable unresolved
+unstable violate violated violation violations volatile volatility warn warned
+warning weak weaken weakened weakness weaknesses worse worsen writedown
+writeoff wrongful
+""".split())
+
+
+def _tone_score(text: str) -> tuple[float | None, int]:
+    """Negative-word density (% of words that are LM-negative) and the word count;
+    ``(None, 0)`` for empty text. Higher density = more cautious/negative tone."""
+    words = re.findall(r"[a-z]+", text.lower())
+    if not words:
+        return None, 0
+    neg = sum(1 for w in words if w in _LM_NEGATIVE)
+    return neg / len(words) * 100.0, len(words)
+
+
+def filing_tone_trend(symbol: str, years: int = 3) -> str:
+    """Track the **tone** of a company's recent annual reports (10-Ks) over time —
+    the negative-word density (a Loughran-McDonald finance-sentiment heuristic) of
+    each filing, so you can see whether management's language is getting more
+    cautious/negative or more confident. Keyless via SEC EDGAR. ``years`` = how many
+    recent 10-Ks (default 3, max 4; each is a separate multi-MB fetch, so this is
+    slower than the other tools). Use for 'is X's filing tone getting more negative
+    / has their risk language increased / sentiment trend in their 10-Ks'. It's a
+    lexicon heuristic, not a judgment — pair it with `sec_filing_excerpt` to read
+    what actually changed."""
+    sym = symbol.strip().upper()
+    cik = _cik_for(sym)
+    if not cik:
+        return _no_cik(sym)
+    name, filings = _submission_recent(cik)
+    years = max(1, min(int(years or 3), 4))
+    tenks = [f for f in filings if f["form"].upper().startswith("10-K")][:years]
+    if not tenks:
+        return f"No recent 10-K filings found for {name or sym} ({sym})."
+    rows = []
+    for f in tenks:
+        url = _filing_url(cik, f["accession"], f["doc"])
+        score, n = _tone_score(_html_to_text(_fetch_text(url)))
+        if score is not None:
+            rows.append((f["date"], score, n, url))
+    if not rows:
+        return f"Couldn't fetch/parse {sym}'s 10-K documents to score tone."
+    lines = [f"Filing tone trend · {name or sym} ({sym}) — negative-word density "
+             f"per 10-K (higher = more cautious/negative; Loughran-McDonald heuristic)"]
+    for date, score, n, url in rows:  # newest first
+        lines.append(f"  {date}  {score:.2f}%  ({n:,} words)\n      {url}")
+    if len(rows) >= 2:
+        newest, oldest = rows[0][1], rows[-1][1]
+        direction = "MORE negative/cautious" if newest > oldest else "LESS negative (more confident)"
+        lines.append(f"Trend: {oldest:.2f}% → {newest:.2f}% ({newest - oldest:+.2f} pts) — "
+                     f"latest filing reads {direction} than the oldest shown.")
+    lines.append("(Heuristic lexicon score over the full filing text, not a judgment. "
+                 "Read the passages with `sec_filing_excerpt` to see what changed.)")
+    return "\n".join(lines)
+
+
+# --- Market-wide metric leaders (XBRL frames) ------------------------------
+
+def _fetch_frame(tag: str, unit: str, year: int) -> list[dict]:
+    """One us-gaap concept across ALL filers for a period, via the XBRL frames API.
+    Tries the duration frame (CY{year}) first, then the instantaneous one
+    (CY{year}Q4I) for balance-sheet concepts; returns the raw fact list."""
+    base = "https://data.sec.gov/api/xbrl/frames/us-gaap/{tag}/{unit}/{frame}.json"
+    for frame in (f"CY{year}", f"CY{year}Q4I"):
+        data = _fetch_json(base.format(tag=tag, unit=unit, frame=frame))
+        facts = data.get("data") or []
+        if facts:
+            return facts
+    return []
+
+
+def sec_metric_rank(symbol: str, concept: str = "Revenue", year: int = 0) -> str:
+    """Where a company RANKS on a financial metric among all SEC filers, straight
+    from XBRL filings (keyless) — e.g. 'AAPL's revenue is #3 of ~6,000 filers'.
+    Gives the company's as-reported value, its rank and percentile across everyone
+    who reported that line, and the peer median for scale. ``concept`` is a key item
+    ('Revenue', 'Net income', 'Total assets') or a us-gaap tag; ``year`` is the
+    calendar year (default: the most recent complete one). Use for 'how big is X vs
+    everyone / where does X rank on <metric> / what percentile is X's revenue'. A
+    rank/percentile is robust to the occasional filer reporting error in the raw
+    data — unlike a raw 'biggest companies' list, whose extremes can be mis-scaled
+    filings — so this reports a rank, not a leaderboard."""
+    sym = symbol.strip().upper()
+    cik = _cik_for(sym)
+    if not cik:
+        return _no_cik(sym)
+    from datetime import date
+    tags, unit = _resolve_matrix_concept(concept)
+    tag = tags[0]
+    year = int(year) or (date.today().year - 1)
+    facts = _fetch_frame(tag, unit, year)
+    if not facts:
+        return (f"No XBRL frame data for {concept!r} (tag {tag}) in CY{year}. Try a "
+                f"different year, or a us-gaap tag like Revenues / NetIncomeLoss / Assets.")
+    mine = next((e for e in facts if e.get("cik") == int(cik)), None)
+    if mine is None:
+        return (f"{sym} didn't report us-gaap:{tag} for CY{year} (it may use a different "
+                f"tag or a non-calendar fiscal period). Try another year or concept/tag.")
+    myval = _num(mine.get("val"))
+    vals = sorted((v for v in (_num(e.get("val")) for e in facts) if v is not None), reverse=True)
+    total = len(vals)
+    rank = sum(1 for v in vals if v > myval) + 1
+    lines = [
+        f"SEC metric rank · {mine.get('entityName') or sym} ({sym}) · {concept} "
+        f"CY{year} (us-gaap:{tag})",
+        f"  value: {_fmt_val(myval, unit)}",
+        f"  rank: #{rank:,} of {total:,} filers (top {rank / total * 100:.1f}%)",
+    ]
+    if total:
+        lines.append(f"  peer median: {_fmt_val(vals[total // 2], unit)}")
+    lines.append("(Source: SEC EDGAR XBRL frames — filers reporting this exact tag/period; "
+                 "extreme outliers can be filer reporting errors but barely move a "
+                 "percentile. As-reported; not advice.)")
+    return "\n".join(lines)
+
+
 # SEC EDGAR filing-intelligence tools, appended to tools.TOOLS.
 EDGAR_TOOLS = [
     sec_filings,
@@ -840,4 +1024,6 @@ EDGAR_TOOLS = [
     sec_filing_excerpt,
     filing_summary,
     compare_sec_financials,
+    filing_tone_trend,
+    sec_metric_rank,
 ]
