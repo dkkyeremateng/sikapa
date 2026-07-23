@@ -995,6 +995,7 @@ from .research import RESEARCH_TOOLS  # noqa: E402
 from .factors import FACTOR_TOOLS  # noqa: E402
 from .screener import SCREENER_TOOLS  # noqa: E402
 from .subagents import SUBAGENT_TOOLS  # noqa: E402
+from .edgar import EDGAR_TOOLS  # noqa: E402
 
 TOOLS += FUNDAMENTALS_TOOLS
 TOOLS += MONITOR_TOOLS
@@ -1003,6 +1004,7 @@ TOOLS += RESEARCH_TOOLS
 TOOLS += FACTOR_TOOLS
 TOOLS += SCREENER_TOOLS
 TOOLS += SUBAGENT_TOOLS
+TOOLS += EDGAR_TOOLS
 
 
 # --- IBKR MCP tools (read-only) --------------------------------------------

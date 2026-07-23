@@ -82,9 +82,56 @@ offline deterministic fake mode, and a generic eval harness.
 >   imported positions (share count × current declared rate), with per-holding
 >   yield-on-cost and current yield, totaled in the base currency. Distinct from
 >   `income_summary`, which reports dividends already *received*.
+> - **`compare_stocks`** — 2–4 tickers side by side in one normalized metric table
+>   (price, market cap, trailing/forward P/E, PEG, P/S, revenue growth, profit
+>   margin, EPS, dividend yield, beta) plus the analyst consensus and mean target
+>   with implied upside. For "AAPL vs MSFT", "which is cheaper / growing faster".
 >
 > These are delayed reference figures (verify before acting), and gracefully
 > return "no data" on an unknown ticker or a Yahoo outage rather than failing.
+
+> **SEC filing intelligence (`sec_financials`, `sec_filings`, `sec_filing_search`).**
+> Primary-source company data straight from **SEC EDGAR** — keyless, free, and the
+> audited numbers rather than a third-party snapshot:
+> - **`sec_financials`** — as-reported annual financials from a company's **10-K
+>   XBRL** data (revenue, gross/operating/net income, diluted EPS, assets,
+>   liabilities, equity, cash) across recent fiscal years, with computed gross/net
+>   margins and revenue growth. More authoritative than the Yahoo
+>   `stock_fundamentals` snapshot — cite it to the 10-K. Pass a us-gaap `concept`
+>   tag (e.g. `NetIncomeLoss`) for a single line's history.
+> - **`sec_filings`** — a company's recent filings (10-K/10-Q/8-K/insider Form 4)
+>   with the filing date, description, and a direct link to each document.
+> - **`sec_material_events`** — recent **8-K** filings with the event type decoded
+>   from the SEC item codes (earnings releases, M&A, executive departures, material
+>   agreements, impairments) — a catalyst monitor with a link to each disclosure.
+> - **`sec_filing_search`** — full-text search across **all filings since 2001**
+>   for a phrase or topic, returning the exact matching filings (company, form,
+>   date, link) so a claim can be **cited to a primary document**.
+> - **`sec_filing_excerpt`** — fetches a company's latest filing (10-K/10-Q/8-K)
+>   and returns the **verbatim passages** that match a topic — the exact language
+>   to quote and cite (the grounding step after `sec_filing_search`), keyword-based
+>   and keyless (no embeddings).
+>
+> These cover US-listed filers (identified by ticker → CIK). SEC asks callers to
+> send a descriptive `User-Agent` with a contact email and to stay under ~10
+> requests/second — a working default is used; set **`SEC_EDGAR_UA`** (e.g.
+> `"Your Name you@domain.com"`) so heavy use is attributable to you. What EDGAR
+> does *not* carry cheaply — verbatim earnings-call transcripts and sell-side
+> research — stays out of scope (those need a paid feed).
+
+> **Move attribution & bull-vs-bear (`explain_stock_move`, `bull_bear_debate`).**
+> Two narrative research tools that gather evidence and hand it back for the agent
+> to synthesize (no nested model call):
+> - **`explain_stock_move`** — answers *"why is TICKER up/down today?"* by fusing
+>   the measured price move (last session + over the last N sessions), recent
+>   analyst upgrades/downgrades, and recent news into a short **attributed**
+>   explanation — citing the news items by number, and saying plainly when the
+>   evidence *doesn't* explain the move rather than inventing a catalyst.
+> - **`bull_bear_debate`** — for *"should I buy X / make the case for and against
+>   X"*: gathers the full research findings and frames them for a steel-manned
+>   **Bull case**, **Bear case**, and a **Verdict** (which side the evidence better
+>   supports, a lean with rough confidence, and what would change it). An
+>   adversarial pass borrowed from multi-agent trading frameworks, kept advisory.
 
 > **Stock screening (`screen_stocks`).** Find stocks meeting a set of conditions —
 > e.g. *"large caps near their all-time highs that keep beating earnings, that held
@@ -203,6 +250,7 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── fundamentals.py# yfinance reference tools (valuation/ratings/earnings/dividends/etf)
 │   ├── analytics.py   # tax-loss-harvest + correlation matrix + ETF look-through aggregate
 │   ├── factors.py     # Fama-French factor exposure (market/size/value, alpha, R²)
+│   ├── edgar.py       # SEC EDGAR filing intelligence (financials/filings/full-text search, keyless)
 │   ├── screener.py    # stock screener over a candidate universe (screen_stocks, S&P 500)
 │   ├── subagents.py   # parallel/sequence research subagent dispatch (dispatch_subagent[s])
 │   ├── research.py    # deep-research report (parallel gather → synthesize) + --research
@@ -249,6 +297,15 @@ Copy `.env.example` to `.env` and fill in (loaded via python-dotenv):
   so `MODEL_PROVIDER` alone is enough. The default/`openai` path is unchanged.
 - **No model at all:** pass `--fake` — a deterministic in-process graph replies
   with a `FAKE-OK` marker, fully offline (no model, no IBKR).
+
+**Quick / deep model tiering (optional).** Summarization is cheap work that
+doesn't need the primary reasoning model, so set `QUICK_MODEL` (with optional
+`QUICK_API_BASE` / `QUICK_API_KEY` / `QUICK_MODEL_PROVIDER`, same shape as the
+`SUBAGENT_*` and primary vars) to route **context compaction summaries** to a
+cheaper/faster model while the agent itself stays on the primary. Unset = the
+primary model does it (unchanged). Subagents have their own `SUBAGENT_MODEL`
+tier, so you can run the agent on a strong model, subagents on a mid one, and
+summarization on a small one.
 
 ## Connect IBKR market data (MCP)
 
