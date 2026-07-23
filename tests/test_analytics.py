@@ -35,6 +35,66 @@ def test_stock_fundamentals_formats_and_empty(monkeypatch):
     assert "No fundamental data" in f.stock_fundamentals("NOPE")
 
 
+def test_parse_symbols_dedupes_and_caps():
+    from financial_research_assistant.fundamentals import _parse_symbols
+
+    assert _parse_symbols("aapl, msft nvda|goog") == ["AAPL", "MSFT", "NVDA", "GOOG"]
+    assert _parse_symbols("AAPL AAPL aapl") == ["AAPL"]        # de-duped
+    assert _parse_symbols("a b c d e f", limit=4) == ["A", "B", "C", "D"]  # capped
+
+
+def test_compare_stocks_builds_normalized_table(monkeypatch):
+    import financial_research_assistant.fundamentals as f
+
+    data = {
+        "AAPL": {
+            "longName": "Apple Inc.", "currency": "USD", "currentPrice": 314.86,
+            "marketCap": 4_624_460_808_192, "trailingPE": 38.4, "forwardPE": 32.7,
+            "priceToSalesTrailing12Months": 9.1, "revenueGrowth": 0.096,
+            "profitMargins": 0.243, "trailingEps": 8.19, "beta": 1.10,
+            "recommendationKey": "buy", "numberOfAnalystOpinions": 42,
+            "targetMeanPrice": 346.35,  # +10% vs 314.86
+        },
+        "MSFT": {
+            "shortName": "Microsoft", "currency": "USD", "currentPrice": 500.0,
+            "marketCap": 3_700_000_000_000, "trailingPE": 34.0, "forwardPE": 29.0,
+            "priceToSalesTrailing12Months": 12.0, "revenueGrowth": 0.15,
+            "profitMargins": 0.36, "trailingEps": 12.0, "beta": 0.9,
+            "dividendRate": 3.0,  # 0.60% yield at 500
+            "recommendationKey": "strong_buy", "numberOfAnalystOpinions": 50,
+            "targetMeanPrice": 550.0,
+        },
+    }
+    monkeypatch.setattr(f, "_fetch_info", lambda s: data.get(s.upper(), {}))
+    out = f.compare_stocks("aapl, msft")
+    assert "COMPARE · AAPL vs MSFT" in out
+    assert "4.62T" in out and "3.70T" in out          # market caps compacted
+    assert "9.6" in out and "15.0" in out             # revenue growth % (0.096 -> 9.6)
+    assert "0.60" in out                              # MSFT div yield 3/500
+    assert "strong buy" in out                        # consensus key humanized
+    assert "+10.0% upside" in out                     # AAPL target vs price
+
+
+def test_compare_stocks_needs_two_and_reports_missing(monkeypatch):
+    import financial_research_assistant.fundamentals as f
+
+    # Fewer than two resolvable tickers -> guidance, not a crash.
+    monkeypatch.setattr(f, "_fetch_info", lambda s: {})
+    assert "2–4 tickers" in f.compare_stocks("AAPL")
+    assert "Couldn't find fundamentals" in f.compare_stocks("NOPE, ALSONOPE")
+
+    # One good, one bad: still compares the good ones AND names the missing.
+    good = {"longName": "Apple Inc.", "currency": "USD", "currentPrice": 100.0,
+            "marketCap": 1e12, "trailingEps": 5.0}
+    monkeypatch.setattr(f, "_fetch_info", lambda s: good if s.upper() == "AAPL" else {})
+    # need >=2 found for a table, so give two good + one missing
+    monkeypatch.setattr(f, "_fetch_info",
+                        lambda s: good if s.upper() in ("AAPL", "MSFT") else {})
+    out = f.compare_stocks("AAPL, MSFT, BOGUS")
+    assert "AAPL vs MSFT" in out
+    assert "No data for: BOGUS" in out
+
+
 def test_analyst_ratings_formats(monkeypatch):
     import financial_research_assistant.fundamentals as f
 
@@ -157,6 +217,67 @@ def test_research_report_tool_returns_labeled_findings(monkeypatch):
     assert "synthesize" in out.lower() and "MSFT" in out
     assert "## Fundamentals" in out and "MSFT P/E 30" in out
     assert "## Recent news" in out
+
+
+def test_bull_bear_debate_frames_findings(monkeypatch):
+    from financial_research_assistant import research
+
+    monkeypatch.setattr(research, "_section_fns", lambda sym: {
+        "Fundamentals": lambda: f"{sym} forward P/E 25",
+        "Recent news": lambda: f"{sym} guidance raised",
+    })
+    # recall_lessons returns [] with long-term memory off (default), so no monkeypatch.
+    out = research.bull_bear_debate("NVDA")
+    assert "Bull case" in out and "Bear case" in out and "Verdict" in out
+    assert "NVDA" in out
+    assert "## Fundamentals" in out and "NVDA forward P/E 25" in out
+    assert "## Recent news" in out
+
+
+def test_recent_move_summarizes_window_and_last_session(monkeypatch):
+    from financial_research_assistant import research
+    import financial_research_assistant.tools as tools
+
+    # oldest -> newest; last session +2% (100->102), window (95->102) +7.37%
+    series = [("2026-07-14", 95.0), ("2026-07-15", 97.0), ("2026-07-16", 99.0),
+              ("2026-07-17", 100.0), ("2026-07-18", 102.0)]
+    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d: series)
+    out = research._recent_move("AAPL", days=4)
+    assert "AAPL last close 102.00 on 2026-07-18" in out
+    assert "+2.00% vs prior session" in out
+    assert "+7.37%" in out                       # 95 -> 102 over the 4-session window
+
+    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d: [])
+    assert research._recent_move("NOPE", days=4) is None
+
+
+def test_explain_stock_move_gathers_move_ratings_news(monkeypatch):
+    from financial_research_assistant import research
+    import financial_research_assistant.tools as tools
+    import financial_research_assistant.fundamentals as f
+
+    series = [("2026-07-16", 99.0), ("2026-07-17", 100.0), ("2026-07-18", 110.0)]
+    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d: series)
+    monkeypatch.setattr(tools, "web_search",
+                        lambda q, max_results=5: "1. Big beat (Reuters · 2026-07-18)\n   url")
+    monkeypatch.setattr(f, "_fetch_rating_changes", lambda s, limit=5: [
+        {"date": "2026-07-18", "firm": "Big Bank", "from": "Hold", "to": "Buy", "action": "up"},
+    ])
+    out = research.explain_stock_move("AAPL", days=5)
+    # directive to attribute + cite by number, and the three labeled sections
+    assert "cite news items by their number" in out or "cite" in out.lower()
+    assert "## Price move" in out and "+10.00% vs prior session" in out
+    assert "## Recent analyst rating changes" in out and "Big Bank" in out
+    assert "## Recent news" in out and "Big beat" in out
+
+
+def test_explain_stock_move_no_price_data(monkeypatch):
+    from financial_research_assistant import research
+    import financial_research_assistant.tools as tools
+
+    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d: [])
+    out = research.explain_stock_move("NOPE")
+    assert "No recent price data" in out
 
 
 def test_digest_empty_store(monkeypatch, tmp_path):

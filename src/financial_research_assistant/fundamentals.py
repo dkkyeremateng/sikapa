@@ -359,6 +359,122 @@ def dividend_projection(account: str = "") -> str:
     return "\n".join(lines)
 
 
+def _parse_symbols(symbols: str, limit: int = 4) -> list[str]:
+    """Split a user-supplied ticker string (comma/space/pipe-separated) into an
+    upper-cased, de-duplicated, order-preserving list capped at ``limit``."""
+    raw = symbols.replace(",", " ").replace("|", " ").split()
+    seen: list[str] = []
+    for s in raw:
+        t = s.strip().upper()
+        if t and t not in seen:
+            seen.append(t)
+    return seen[:limit]
+
+
+# The metric rows of the comparison table, each: (label, extractor(info)->value,
+# format spec). The extractor pulls from a ticker's yfinance ``.info`` dict; a
+# missing field renders "n/a" via ``_fmt``/``_money``. Kept declarative so the
+# row set is easy to extend without touching the render loop.
+def _pe_fwd(info: dict):
+    return _num(info.get("forwardPE"))
+
+
+def _peg(info: dict):
+    # yfinance moved PEG under different keys across versions; try both.
+    return _num(info.get("trailingPegRatio")) or _num(info.get("pegRatio"))
+
+
+def _rev_growth(info: dict):
+    g = _num(info.get("revenueGrowth"))
+    return g * 100.0 if g is not None else None
+
+
+def _margin(info: dict):
+    m = _num(info.get("profitMargins"))
+    return m * 100.0 if m is not None else None
+
+
+def _div_yield(info: dict):
+    rate, price = _num(info.get("dividendRate")), _price(info)
+    return (rate / price * 100.0) if (rate and price) else None
+
+
+_COMPARE_ROWS = [
+    ("Price", lambda i: _price(i), ".2f"),
+    ("Market cap", lambda i: i.get("marketCap"), "money"),
+    ("P/E (ttm)", lambda i: _num(i.get("trailingPE")), ".1f"),
+    ("P/E (fwd)", _pe_fwd, ".1f"),
+    ("PEG", _peg, ".2f"),
+    ("P/S", lambda i: _num(i.get("priceToSalesTrailing12Months")), ".2f"),
+    ("Rev growth %", _rev_growth, ".1f"),
+    ("Profit margin %", _margin, ".1f"),
+    ("EPS (ttm)", lambda i: _num(i.get("trailingEps")), ".2f"),
+    ("Div yield %", _div_yield, ".2f"),
+    ("Beta", lambda i: _num(i.get("beta")), ".2f"),
+]
+
+
+def _compare_cell(info: dict, extract, spec: str) -> str:
+    """Render one table cell: the extracted value formatted per ``spec`` (``money``
+    uses the compact T/B/M scale), or 'n/a' when missing."""
+    val = extract(info)
+    if spec == "money":
+        return _money(val)
+    return _fmt(val, spec)
+
+
+def compare_stocks(symbols: str) -> str:
+    """Compare 2–4 stocks side by side in one normalized metric table: price,
+    market cap, trailing/forward P/E, PEG, P/S, revenue growth, profit margin,
+    EPS, dividend yield, beta, plus the analyst consensus and mean price target
+    with implied upside. Pass the tickers in one string (e.g. ``"AAPL, MSFT,
+    NVDA"`` — comma/space separated). Data source: Yahoo Finance (yfinance,
+    keyless), reference data (not real-time IBKR quotes). Use for 'compare X vs
+    Y', 'which is cheaper/growing faster', 'X or Y' questions across a few names."""
+    syms = _parse_symbols(symbols)
+    if len(syms) < 2:
+        return (
+            "Give 2–4 tickers to compare, e.g. `compare_stocks(\"AAPL, MSFT, NVDA\")`."
+        )
+    infos = {s: _fetch_info(s) for s in syms}
+    found = [s for s in syms if infos[s] and (infos[s].get("longName") or infos[s].get("shortName"))]
+    missing = [s for s in syms if s not in found]
+    if len(found) < 2:
+        got = f" (only found {', '.join(found)})" if found else ""
+        return (
+            f"Couldn't find fundamentals for enough of {', '.join(syms)}{got}. "
+            f"Check the tickers (US symbols, or Yahoo suffixes like VOD.L)."
+        )
+    col = max(12, max(len(s) for s in found) + 2)
+    label_w = max(len(lbl) for lbl, _, _ in _COMPARE_ROWS) + 2
+    header = " " * label_w + "".join(f"{s:>{col}}" for s in found)
+    lines = [f"COMPARE · {' vs '.join(found)}", header]
+    for label, extract, spec in _COMPARE_ROWS:
+        row = f"{label:<{label_w}}" + "".join(
+            f"{_compare_cell(infos[s], extract, spec):>{col}}" for s in found
+        )
+        lines.append(row)
+    # Analyst consensus + mean target with implied upside — a separate block since
+    # the "upside" needs both the target and the current price.
+    lines.append("")
+    lines.append("Analyst view:")
+    for s in found:
+        info = infos[s]
+        price = _price(info)
+        rec = (info.get("recommendationKey") or "n/a").replace("_", " ")
+        tgt = _num(info.get("targetMeanPrice"))
+        up = f", {(tgt - price) / price * 100.0:+.1f}% upside" if (tgt and price) else ""
+        tgt_txt = f"mean target {tgt:.2f}{up}" if tgt else "no target"
+        n_an = _num(info.get("numberOfAnalystOpinions"))
+        who = f" ({int(n_an)} analysts)" if n_an else ""
+        lines.append(f"  {s:<6} {rec}{who} · {tgt_txt}")
+    if missing:
+        lines.append("")
+        lines.append(f"(No data for: {', '.join(missing)}.)")
+    lines.append("(Yahoo reference data — can be delayed; verify before acting. Not advice.)")
+    return "\n".join(lines)
+
+
 def _fetch_fund_data(symbol: str) -> dict:
     """ETF/fund sector weights + top holdings via yfinance ``funds_data``, as
     ``{sectors: {name: weight}, holdings: [(symbol, name, weight), …]}``; ``{}`` for
@@ -415,4 +531,5 @@ FUNDAMENTALS_TOOLS = [
     earnings_calendar,
     dividend_projection,
     etf_exposure,
+    compare_stocks,
 ]

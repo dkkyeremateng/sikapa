@@ -260,4 +260,110 @@ def research_report(symbol: str) -> str:
     return header + "\n\n".join(f"## {label}\n{text}" for label, text in sections)
 
 
-RESEARCH_TOOLS = [research_report]
+def _recent_move(symbol: str, days: int) -> str | None:
+    """Deterministic price-move summary for the last ``days`` sessions from Yahoo
+    daily closes: the window change (first→last), the most recent single-session
+    change, and the closing level. ``None`` when no price data is available."""
+    from . import tools
+
+    sym = symbol.strip().upper()
+    series = tools._fetch_daily(sym, max(days + 5, 15))  # a little context beyond the window
+    if not series or len(series) < 2:
+        return None
+    window = series[-(days + 1):] if len(series) > days else series
+    (first_d, first_c), (last_d, last_c) = window[0], window[-1]
+    win_chg = (last_c - first_c) / first_c * 100.0 if first_c else 0.0
+    prev_c = series[-2][1]
+    day_chg = (last_c - prev_c) / prev_c * 100.0 if prev_c else 0.0
+    return (
+        f"{sym} last close {last_c:.2f} on {last_d} "
+        f"({day_chg:+.2f}% vs prior session). "
+        f"Over the window {first_d} → {last_d} ({len(window) - 1} session(s)): "
+        f"{win_chg:+.2f}% (from {first_c:.2f})."
+    )
+
+
+def explain_stock_move(symbol: str, days: int = 5) -> str:
+    """Gather the evidence to explain WHY a stock moved recently — the measured
+    price move (last session + over the last ``days`` sessions, from Yahoo daily
+    closes), recent analyst upgrades/downgrades, and recent news headlines — and
+    return them as labeled sections for you to synthesize into a SHORT, attributed
+    explanation in your answer. Use for 'why is TICKER up/down (today)?', 'what's
+    moving X', 'what happened to X' questions. Attribute the move to specific news
+    items (cite them by their number) and rating changes; if the evidence doesn't
+    clearly explain the move, say so rather than inventing a reason. Delayed
+    Yahoo/web data — cite sources and 'as of' dates; not investment advice."""
+    from . import tools
+    from . import fundamentals
+
+    sym = symbol.strip().upper()
+    days = max(1, min(int(days or 5), 30))
+    move = _recent_move(sym, days)
+    if move is None:
+        return (
+            f"No recent price data for {sym!r}, so there's no measured move to "
+            f"explain. Check the ticker (US symbols, or Yahoo suffixes like VOD.L)."
+        )
+    changes = fundamentals._fetch_rating_changes(sym, limit=5)
+    if changes:
+        change_lines = "\n".join(
+            f"  {c['date']}  {c['firm'] or '(firm n/a)'}: "
+            f"{(c['from'] + ' → ' + c['to']) if (c['from'] or c['to']) else c['action']}"
+            f"  ({c['action']})"
+            for c in changes
+        )
+    else:
+        change_lines = "  (no recent analyst rating changes found)"
+    news = tools.web_search(f"{sym} stock news why moving today", max_results=5)
+    header = (
+        f"Explain the recent move in {sym}. Using ONLY the findings below, write a "
+        f"SHORT paragraph attributing the move to specific drivers — cite news "
+        f"items by their number [n] and name any rating changes. If the news and "
+        f"rating changes do NOT clearly explain the move, say the move isn't "
+        f"clearly explained by the available evidence (do not invent a catalyst). "
+        f"State the 'as of' dates and that it's delayed data, not advice.\n"
+    )
+    return (
+        f"{header}\n## Price move\n{move}\n\n"
+        f"## Recent analyst rating changes\n{change_lines}\n\n"
+        f"## Recent news\n{news}"
+    )
+
+
+def bull_bear_debate(symbol: str) -> str:
+    """Gather research findings on a stock ``symbol`` (price, fundamentals, analyst
+    ratings, earnings, risk, ETF look-through, news) and return them framed for an
+    adversarial **bull-vs-bear debate** — for you to write a steel-manned Bull case,
+    a steel-manned Bear case, and a Verdict (which side the evidence better
+    supports, a lean with rough confidence, the open questions, and what would
+    change the conclusion). Use when the user wants the case for AND against a stock
+    — 'bull vs bear', 'should I buy X', 'make the case for and against X', 'is X a
+    buy or a trap'. Cite each claim to its section; don't invent figures; delayed
+    data, not investment advice."""
+    from .reflection import recall_lessons
+
+    sym = symbol.strip().upper()
+    sections = gather_sections_sync(symbol)
+    header = (
+        f"Construct an adversarial bull-vs-bear analysis of {sym} using ONLY the "
+        f"findings below. Write THREE parts:\n"
+        f"1. **Bull case** — the strongest, steel-manned reasons to be positive, "
+        f"each citing its source section.\n"
+        f"2. **Bear case** — the strongest, steel-manned reasons to be cautious or "
+        f"negative, each citing its source section.\n"
+        f"3. **Verdict** — which case the evidence better supports, a lean "
+        f"(bullish / neutral / bearish) with a rough confidence, the key open "
+        f"questions, and what specific evidence would change the conclusion.\n"
+        f"Do not invent figures beyond the findings; state 'as of' dates where "
+        f"given; end with a one-line 'delayed data, research only, not advice' note.\n"
+    )
+    prior = recall_lessons(sym)
+    if prior:
+        header += (
+            "\nLessons from prior research on this ticker — address these gaps or "
+            "note them explicitly:\n" + "\n".join(f"- {ln}" for ln in prior) + "\n"
+        )
+    return header + "\n" + "\n\n".join(f"## {label}\n{text}" for label, text in sections)
+
+
+RESEARCH_TOOLS = [research_report, explain_stock_move, bull_bear_debate]

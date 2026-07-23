@@ -133,6 +133,60 @@ async def test_run_turn_auto_compacts_over_threshold(monkeypatch):
     assert compacted[0].context_tokens == 0
 
 
+def test_quick_llm_tier_resolution(monkeypatch):
+    """quick_llm uses QUICK_MODEL (+ QUICK_* endpoint overrides) when set — the
+    cheap tier for summarization — and falls back to the passed/primary model when
+    unset, so behavior is unchanged by default."""
+    from financial_research_assistant import graph
+
+    captured = {}
+
+    def fake_make_llm(model=None, **kw):
+        captured.clear()
+        captured["model"] = model
+        captured.update(kw)
+        return object()
+
+    monkeypatch.setattr(graph, "_make_llm", fake_make_llm)
+
+    # Unset: falls back to the passed model, no endpoint overrides.
+    for v in ("QUICK_MODEL", "QUICK_API_BASE", "QUICK_API_KEY", "QUICK_MODEL_PROVIDER"):
+        monkeypatch.delenv(v, raising=False)
+    graph.quick_llm("primary-model")
+    assert captured == {"model": "primary-model", "provider": None,
+                        "base_url": None, "api_key": None}
+
+    # Set: QUICK_MODEL wins over the passed model, overrides are forwarded.
+    monkeypatch.setenv("QUICK_MODEL", "cheap-mini")
+    monkeypatch.setenv("QUICK_API_BASE", "http://localhost:11434/v1")
+    monkeypatch.setenv("QUICK_MODEL_PROVIDER", "openai")
+    graph.quick_llm("primary-model")
+    assert captured["model"] == "cheap-mini"                 # quick tier wins
+    assert captured["base_url"] == "http://localhost:11434/v1"
+    assert captured["provider"] == "openai"
+
+
+async def test_summarize_messages_uses_quick_tier(monkeypatch):
+    """compaction summarization routes through the quick tier (quick_llm), so
+    QUICK_MODEL offloads the summary to the cheap model."""
+    from financial_research_assistant import graph
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    seen = {}
+
+    class _FakeLLM:
+        async def ainvoke(self, messages):
+            seen["called"] = True
+            return AIMessage(content="recap")
+
+    monkeypatch.setattr(graph, "quick_llm", lambda model=None: seen.update(arg=model) or _FakeLLM())
+    out = await graph.summarize_messages(
+        [HumanMessage(content="hi"), AIMessage(content="hello")], model="primary"
+    )
+    assert out == "recap"
+    assert seen["called"] and seen["arg"] == "primary"  # went through quick_llm, not _make_llm
+
+
 async def test_final_usage_event_carries_context_snapshot():
     """The final (reconciling) usage event carries a context_tokens snapshot — the
     turn's total input — so a UI can size ctx% to the CURRENT context rather than
