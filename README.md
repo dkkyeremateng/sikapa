@@ -115,6 +115,10 @@ offline deterministic fake mode, and a generic eval harness.
 >   the relevant passages grouped under fixed slots (business & segments, revenue
 >   drivers, margins, outlook/guidance, capital allocation, key risks) for a
 >   predictable, comparable summary rather than free-form prose.
+> - **`compare_sec_financials`** — several companies' **audited financials side by
+>   side** in one matrix (companies × metrics) from 10-K XBRL — the as-reported
+>   peer comparison, distinct from the Yahoo-snapshot `compare_stocks`. Pass a
+>   `concept` for one metric across companies over several years.
 >
 > These cover US-listed filers (identified by ticker → CIK). SEC asks callers to
 > send a descriptive `User-Agent` with a contact email and to stay under ~10

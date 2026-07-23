@@ -284,12 +284,16 @@ def sec_material_events(symbol: str, limit: int = 10) -> str:
 
 # Curated key line items, each a fallback list of us-gaap XBRL tags (the same
 # concept is tagged differently across filers/years — try each in order).
+_REVENUE = "Revenue"
+_GROSS_PROFIT = "Gross profit"
+_NET_INCOME = "Net income"
+
 _KEY_CONCEPTS: list[tuple[str, list[str], str]] = [
-    ("Revenue", ["RevenueFromContractWithCustomerExcludingAssessedTax",
-                 "Revenues", "SalesRevenueNet"], "USD"),
-    ("Gross profit", ["GrossProfit"], "USD"),
+    (_REVENUE, ["RevenueFromContractWithCustomerExcludingAssessedTax",
+                "Revenues", "SalesRevenueNet"], "USD"),
+    (_GROSS_PROFIT, ["GrossProfit"], "USD"),
     ("Operating income", ["OperatingIncomeLoss"], "USD"),
-    ("Net income", ["NetIncomeLoss"], "USD"),
+    (_NET_INCOME, ["NetIncomeLoss"], "USD"),
     ("Diluted EPS", ["EarningsPerShareDiluted"], _PER_SHARE),
     ("Total assets", ["Assets"], "USD"),
     ("Total liabilities", ["Liabilities"], "USD"),
@@ -302,35 +306,62 @@ def _fetch_company_facts(cik: str) -> dict:
     return _fetch_json(_COMPANY_FACTS_URL.format(cik=cik))
 
 
-def _concept_units(facts: dict, tags: list[str], unit: str) -> list[dict] | None:
-    """Return the raw unit entries for the first matching us-gaap tag, or None."""
+def _duration_days(start: str, end: str) -> int | None:
+    """Days between two ISO dates, or None if unparseable."""
+    from datetime import date
+    try:
+        y1, m1, d1 = (int(x) for x in start.split("-"))
+        y2, m2, d2 = (int(x) for x in end.split("-"))
+        return (date(y2, m2, d2) - date(y1, m1, d1)).days
+    except (ValueError, AttributeError):
+        return None
+
+
+def _is_annual_period(e: dict) -> bool:
+    """True for a 10-K full-year flow period (~365 days) or an instantaneous
+    balance-sheet value (no period start). Excludes quarters and odd spans, which
+    is what keeps a same-year quarter out of the annual series."""
+    if not str(e.get("form") or "").startswith("10-K"):
+        return False
+    start = e.get("start")
+    if not start:
+        return True  # instantaneous (balance sheet)
+    dur = _duration_days(start, str(e.get("end") or ""))
+    return dur is not None and 320 <= dur <= 400
+
+
+def _annual_facts(facts: dict, tags: list[str], unit: str) -> list[dict]:
+    """Annual values for a concept as ``[{fy, val, end}]`` newest-first. Merges the
+    fallback tags (a company can switch tags across years, e.g. NVDA's revenue
+    ``RevenueFromContractWithCustomerExcludingAssessedTax`` → ``Revenues``), keys by
+    the **period-end year** — NOT the XBRL ``fy`` field, which is the *filing's*
+    year and so is shared by every comparative period in a 10-K — and keeps the
+    most-recently-filed value per year (so restatements win)."""
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
+    raw: list[dict] = []
     for tag in tags:
         node = gaap.get(tag)
         if node:
-            units = (node.get("units") or {}).get(unit)
-            if units:
-                return units
-    return None
+            raw += (node.get("units") or {}).get(unit) or []
+    by_year = _bucket_annual(raw)
+    return [{"fy": int(y), "val": _num(by_year[y].get("val")), "end": by_year[y].get("end")}
+            for y in sorted(by_year, reverse=True)]
 
 
-def _annual(entries: list[dict]) -> list[dict]:
-    """The latest annual (10-K, full-year) value per fiscal year, newest first.
-    Keeps one entry per fiscal year (the one with the latest period end), so a
-    concept restated in a later filing doesn't produce duplicate years."""
-    by_fy: dict = {}
-    for e in entries:
-        if not str(e.get("form") or "").startswith("10-K"):
+def _bucket_annual(raw: list[dict]) -> dict[str, dict]:
+    """Bucket raw XBRL entries by period-end year, keeping the annual (10-K,
+    full-year) value most recently filed for each year."""
+    by_year: dict[str, dict] = {}
+    for e in raw:
+        if not _is_annual_period(e):
             continue
-        if e.get("fp") not in (None, "FY"):
+        year = str(e.get("end") or "")[:4]
+        if not year.isdigit():
             continue
-        fy = e.get("fy")
-        if fy is None:
-            continue
-        cur = by_fy.get(fy)
-        if cur is None or str(e.get("end") or "") > str(cur.get("end") or ""):
-            by_fy[fy] = e
-    return [by_fy[k] for k in sorted(by_fy, reverse=True)]
+        cur = by_year.get(year)
+        if cur is None or str(e.get("filed") or "") > str(cur.get("filed") or ""):
+            by_year[year] = e
+    return by_year
 
 
 def _fmt_val(val, unit: str) -> str:
@@ -346,8 +377,7 @@ def _annual_series(facts: dict, years: int) -> tuple[dict, list]:
     series: dict[str, dict] = {}
     fys: list = []
     for label, tags, unit in _KEY_CONCEPTS:
-        units = _concept_units(facts, tags, unit)
-        rows = {r.get("fy"): r for r in (_annual(units)[:years] if units else [])}
+        rows = {r["fy"]: r for r in _annual_facts(facts, tags, unit)[:years]}
         series[label] = rows
         for fy in rows:
             if fy not in fys:
@@ -378,9 +408,9 @@ def _financials_summary(facts: dict, sym: str, name: str, cik: str, years: int) 
 
 
 def _margin_line(series: dict, fy) -> str:
-    rev = _num((series["Revenue"].get(fy) or {}).get("val"))
-    gp = _num((series["Gross profit"].get(fy) or {}).get("val"))
-    ni = _num((series["Net income"].get(fy) or {}).get("val"))
+    rev = _num((series[_REVENUE].get(fy) or {}).get("val"))
+    gp = _num((series[_GROSS_PROFIT].get(fy) or {}).get("val"))
+    ni = _num((series[_NET_INCOME].get(fy) or {}).get("val"))
     parts = []
     if rev and gp is not None:
         parts.append(f"gross {gp / rev * 100:.1f}%")
@@ -390,7 +420,7 @@ def _margin_line(series: dict, fy) -> str:
 
 
 def _margin_lines(series: dict, fys: list) -> list[str]:
-    rev_rows = series["Revenue"]
+    rev_rows = series[_REVENUE]
     out = [_margin_line(series, fy) for fy in fys]
     ordered = [fy for fy in fys if fy in rev_rows]
     for newer, older in zip(ordered, ordered[1:]):
@@ -437,13 +467,13 @@ def _one_concept(facts: dict, sym: str, name: str, concept: str, years: int) -> 
         )
     units = node.get("units") or {}
     unit_key = _PER_SHARE if _PER_SHARE in units else next(iter(units), "USD")
-    rows = _annual(units.get(unit_key) or [])[:years]
+    rows = _annual_facts(facts, [concept], unit_key)[:years]
     if not rows:
         return f"No annual (10-K) values for {concept} on {sym}."
     lines = [f"{name} ({sym}) · {concept} ({unit_key}), annual:"]
     for r in rows:
-        lines.append(f"  FY{r.get('fy')} (ended {r.get('end')}): "
-                     f"{_fmt_val(r.get('val'), unit_key)}")
+        lines.append(f"  FY{r['fy']} (ended {r['end']}): "
+                     f"{_fmt_val(r['val'], unit_key)}")
     lines.append("(Source: SEC EDGAR XBRL company facts.)")
     return "\n".join(lines)
 
@@ -631,7 +661,19 @@ def filing_summary(symbol: str, form_type: str = "10-K") -> str:
         f"data, not advice.",
         f"  {url}",
     ]
-    found_any = False
+    slot_lines, found_any = _summary_slots(text)
+    if not found_any:
+        return (f"Fetched {sym}'s {ft} ({match['date']}) but couldn't locate the "
+                f"usual sections in it. Filing: {url}")
+    lines.extend(slot_lines)
+    lines.append("\n(Source: SEC EDGAR filing text — quote verbatim and cite the filing + date.)")
+    return "\n".join(lines)
+
+
+def _summary_slots(text: str) -> tuple[list[str], bool]:
+    """Passages grouped under each fixed tearsheet slot, and whether any slot
+    matched at all."""
+    lines, found_any = [], False
     for slot, terms in _SUMMARY_TOPICS:
         passages = _passages(text, terms, 2)
         lines.append(f"\n## {slot}")
@@ -641,10 +683,151 @@ def filing_summary(symbol: str, form_type: str = "10-K") -> str:
                 lines.append(f"- {p[:600].strip()}" + ("…" if len(p) > 600 else ""))
         else:
             lines.append("- (no matching passage found in this filing)")
-    if not found_any:
-        return (f"Fetched {sym}'s {ft} ({match['date']}) but couldn't locate the "
-                f"usual sections in it. Filing: {url}")
-    lines.append("\n(Source: SEC EDGAR filing text — quote verbatim and cite the filing + date.)")
+    return lines, found_any
+
+
+# --- Cross-company financials matrix (companies × metrics from XBRL) -------
+
+def _parse_symbols(symbols: str, limit: int = 6) -> list[str]:
+    """Split a comma/space/pipe-separated ticker string into an upper-cased,
+    de-duplicated, order-preserving list capped at ``limit``."""
+    seen: list[str] = []
+    for s in symbols.replace(",", " ").replace("|", " ").split():
+        t = s.strip().upper()
+        if t and t not in seen:
+            seen.append(t)
+    return seen[:limit]
+
+
+def _latest_annuals(facts: dict) -> tuple[dict, int | None]:
+    """{concept label: (fy, value, unit)} for each key line item's most recent
+    annual (10-K) value, plus the company's latest fiscal year."""
+    out: dict = {}
+    latest_fy = None
+    for label, tags, unit in _KEY_CONCEPTS:
+        rows = _annual_facts(facts, tags, unit)
+        if rows:
+            r = rows[0]
+            fy = r["fy"]
+            out[label] = (fy, r["val"], unit)
+            if latest_fy is None or fy > latest_fy:
+                latest_fy = fy
+    return out, latest_fy
+
+
+def _resolve_matrix_concept(concept: str) -> tuple[list[str], str]:
+    """Map a concept name (a key-item label like 'Net income', or a raw us-gaap
+    tag) to (tags, unit)."""
+    key = concept.strip().lower()
+    for label, tags, unit in _KEY_CONCEPTS:
+        if key == label.lower():
+            return tags, unit
+    return [concept.strip()], "USD"
+
+
+def _company_facts_map(syms: list[str]) -> tuple[dict, list[str]]:
+    """Fetch XBRL facts for each resolvable ticker; return (sym→facts, missing)."""
+    facts_by_sym, missing = {}, []
+    for s in syms:
+        cik = _cik_for(s)
+        facts = _fetch_company_facts(cik) if cik else {}
+        if facts and facts.get("facts"):
+            facts_by_sym[s] = facts
+        else:
+            missing.append(s)
+    return facts_by_sym, missing
+
+
+def _margin_row(label: str, num_key: str, per: dict, resolved: list, col: int) -> str:
+    cells = []
+    for s in resolved:
+        vals = per[s][0]
+        rev = (vals.get(_REVENUE) or (None, None, None))[1]
+        num = (vals.get(num_key) or (None, None, None))[1]
+        cells.append(f"{(f'{num / rev * 100:.1f}%' if (rev and num is not None) else '—'):>{col}}")
+    return f"{label:<20}" + "".join(cells)
+
+
+def _matrix_default(per: dict, resolved: list) -> list[str]:
+    col = 15
+    header = f"{'':<20}" + "".join(
+        f"{(s + ' FY' + str(per[s][1] or '?')):>{col}}" for s in resolved
+    )
+    lines = [header]
+    for label, _, unit in _KEY_CONCEPTS:
+        cells = "".join(
+            f"{_fmt_val((per[s][0].get(label) or (None, None, None))[1], unit):>{col}}"
+            for s in resolved
+        )
+        lines.append(f"{label:<20}{cells}")
+    lines.append(_margin_row("Gross margin %", _GROSS_PROFIT, per, resolved, col))
+    lines.append(_margin_row("Net margin %", _NET_INCOME, per, resolved, col))
+    return lines
+
+
+def _matrix_concept(facts_by_sym: dict, resolved: list, concept: str, years: int) -> list[str]:
+    tags, unit = _resolve_matrix_concept(concept)
+    series = {
+        s: {r["fy"]: r["val"] for r in _annual_facts(facts_by_sym[s], tags, unit)}
+        for s in resolved
+    }
+    fys = sorted({fy for m in series.values() for fy in m if fy is not None}, reverse=True)[:years]
+    if not fys:
+        return [f"No annual (10-K) data for concept {concept!r} across these companies."]
+    col = 15
+    lines = [f"{'':<8}" + "".join(f"{s:>{col}}" for s in resolved)]
+    for fy in fys:
+        cells = "".join(f"{_fmt_val(series[s].get(fy), unit):>{col}}" for s in resolved)
+        lines.append(f"FY{fy:<6}{cells}")
+    return lines
+
+
+def _prepare_matrix(symbols: str) -> tuple[dict, list, list, str | None]:
+    """Resolve tickers to XBRL facts. Returns (facts_by_sym, resolved, missing,
+    error) — ``error`` is a friendly message when fewer than two companies resolve,
+    else None."""
+    syms = _parse_symbols(symbols)
+    if len(syms) < 2:
+        return {}, [], [], (
+            "Give 2–6 tickers to compare, e.g. "
+            "`compare_sec_financials(\"AAPL, MSFT, NVDA\")`."
+        )
+    facts_by_sym, missing = _company_facts_map(syms)
+    resolved = [s for s in syms if s in facts_by_sym]
+    if len(resolved) < 2:
+        return {}, [], missing, (
+            f"Couldn't get SEC XBRL financials for enough of {', '.join(syms)} "
+            f"(missing: {', '.join(missing) or 'none'}). US-listed filers only."
+        )
+    return facts_by_sym, resolved, missing, None
+
+
+def compare_sec_financials(symbols: str, concept: str = "", years: int = 3) -> str:
+    """Compare several companies' **as-reported SEC financials** side by side in one
+    matrix (companies × metrics) from 10-K XBRL data — audited filing figures, not
+    the Yahoo snapshot `compare_stocks` uses. Pass 2–6 tickers in one string (e.g.
+    ``"AAPL, MSFT, NVDA"``). With no ``concept``, each column is a company's latest
+    fiscal year and rows are revenue, gross/operating/net income, EPS, balance-sheet
+    items, and computed gross/net margins. Pass a ``concept`` (a key line like
+    ``"Net income"`` or a us-gaap tag) to get that one metric across companies over
+    the last ``years`` fiscal years. Use for 'compare the financials/revenue/margins
+    of X, Y and Z from their filings', peer benchmarking on audited numbers."""
+    facts_by_sym, resolved, missing, err = _prepare_matrix(symbols)
+    if err:
+        return err
+    years = max(1, min(int(years or 3), 6))
+    if concept.strip():
+        title = f"SEC financials matrix · {concept.strip()} · {' vs '.join(resolved)} (10-K XBRL)"
+        body = _matrix_concept(facts_by_sym, resolved, concept.strip(), years)
+    else:
+        per = {s: _latest_annuals(facts_by_sym[s]) for s in resolved}
+        title = f"SEC financials matrix · {' vs '.join(resolved)} (latest annual 10-K)"
+        body = _matrix_default(per, resolved)
+    lines = [title, *body]
+    if missing:
+        lines.append(f"(No SEC data for: {', '.join(missing)}.)")
+    lines.append("(Source: SEC EDGAR XBRL — audited as-reported figures; fiscal years "
+                 "may differ across companies. Not advice.)")
     return "\n".join(lines)
 
 
@@ -656,4 +839,5 @@ EDGAR_TOOLS = [
     sec_filing_search,
     sec_filing_excerpt,
     filing_summary,
+    compare_sec_financials,
 ]

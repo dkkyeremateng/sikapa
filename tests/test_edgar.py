@@ -218,7 +218,76 @@ def test_filing_summary_builds_fixed_slot_tearsheet(monkeypatch):
     assert "no matching passage found" in out
 
 
+def _facts(entity, rev, ni, gp, fy):
+    return {"entityName": entity, "facts": {"us-gaap": {
+        "Revenues": {"units": {"USD": [
+            {"fy": fy, "fp": "FY", "form": "10-K", "end": f"{fy}-12-31", "val": rev}]}},
+        "NetIncomeLoss": {"units": {"USD": [
+            {"fy": fy, "fp": "FY", "form": "10-K", "end": f"{fy}-12-31", "val": ni}]}},
+        "GrossProfit": {"units": {"USD": [
+            {"fy": fy, "fp": "FY", "form": "10-K", "end": f"{fy}-12-31", "val": gp}]}},
+    }}}
+
+
+def test_compare_sec_financials_builds_matrix(monkeypatch):
+    edgar._TICKER_CIK.clear()
+    tickers = {"0": {"cik_str": 1, "ticker": "AAA", "title": "Aaa"},
+               "1": {"cik_str": 2, "ticker": "BBB", "title": "Bbb"}}
+    payloads = {
+        "company_tickers.json": tickers,
+        "companyfacts/CIK0000000001": _facts("Aaa Corp", 1000e9, 250e9, 500e9, 2024),
+        "companyfacts/CIK0000000002": _facts("Bbb Corp", 400e9, 40e9, 120e9, 2024),
+    }
+    monkeypatch.setattr(edgar, "_fetch_json", _router(payloads))
+
+    out = edgar.compare_sec_financials("AAA, BBB")
+    assert "AAA vs BBB" in out and "AAA FY2024" in out and "BBB FY2024" in out
+    assert "1.00T" in out and "400.00B" in out          # revenues
+    assert "Net margin %" in out and "25.0%" in out      # AAA 250/1000
+    assert "10.0%" in out                                # BBB 40/400
+
+    # concept mode: one metric across companies
+    conc = edgar.compare_sec_financials("AAA, BBB", concept="Net income")
+    assert "Net income" in conc and "FY2024" in conc
+    assert "250.00B" in conc and "40.00B" in conc
+
+    # fewer than two resolvable -> guidance
+    assert "2–6 tickers" in edgar.compare_sec_financials("AAA")
+
+
+def test_annual_facts_keys_by_end_year_merges_tags_excludes_quarters():
+    """Regression: the XBRL 'fy' field is the FILING's year (shared by every
+    comparative period in a 10-K), so annual values must be keyed by the period-END
+    year; fallback tags must be merged (a company can switch revenue tags); and a
+    same-year quarter must never displace the full-year value."""
+    facts = {"facts": {"us-gaap": {
+        # old tag: data only through FY2022
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+            {"fy": 2022, "fp": "FY", "form": "10-K", "start": "2021-01-31",
+             "end": "2022-01-30", "val": 26_914e6, "filed": "2022-02-18"},
+        ]}},
+        # new tag: FY2025 + FY2026 comparatives, all carrying filing-year fy=2026
+        "Revenues": {"units": {"USD": [
+            {"fy": 2026, "fp": "FY", "form": "10-K", "start": "2025-01-27",
+             "end": "2026-01-25", "val": 215_938e6, "filed": "2026-02-20"},
+            {"fy": 2026, "fp": "FY", "form": "10-K", "start": "2024-01-29",
+             "end": "2025-01-26", "val": 130_497e6, "filed": "2026-02-20"},
+            # a same-end-year QUARTER (~90 days) — must be excluded
+            {"fy": 2026, "fp": "FY", "form": "10-K", "start": "2025-10-27",
+             "end": "2026-01-25", "val": 57_000e6, "filed": "2026-02-20"},
+        ]}},
+    }}}
+    rows = edgar._annual_facts(
+        facts, ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"], "USD")
+    by_fy = {r["fy"]: r["val"] for r in rows}
+    assert by_fy[2026] == 215_938e6   # full-year, NOT the 90-day quarter (57B)
+    assert by_fy[2025] == 130_497e6
+    assert by_fy[2022] == 26_914e6    # merged in from the old tag
+    assert [r["fy"] for r in rows] == [2026, 2025, 2022]   # newest first
+
+
 def test_edgar_tools_registered():
     names = {getattr(t, "name", getattr(t, "__name__", "")) for t in tools.TOOLS}
     assert {"sec_filings", "sec_material_events", "sec_financials",
-            "sec_filing_search", "sec_filing_excerpt", "filing_summary"} <= names
+            "sec_filing_search", "sec_filing_excerpt", "filing_summary",
+            "compare_sec_financials"} <= names
