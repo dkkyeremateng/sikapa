@@ -127,6 +127,16 @@ offline deterministic fake mode, and a generic eval harness.
 >   filers (e.g. "AAPL's net income is #4 of ~6,000"), with its value and the peer
 >   median. Reports a rank/percentile — robust to the occasional filer error — not
 >   a raw "biggest companies" leaderboard (whose extremes can be mis-scaled filings).
+> - **`dcf_valuation`** — a deterministic two-stage **discounted-cash-flow** estimate
+>   of intrinsic value. Free-cash-flow history is pulled *as-reported* from the 10-K
+>   (XBRL operating cash flow − capex); net debt, shares and price come from Yahoo.
+>   The tool does all the arithmetic and returns the projected cash flows and their
+>   present values, the terminal value, intrinsic value per share, upside/(downside)
+>   vs the current price, and a discount-rate × terminal-growth **sensitivity grid**.
+>   Assumption knobs (`growth_rate`, `discount_rate`, `terminal_growth`, `years`)
+>   default to sensible values — stage-1 growth is derived from the historical FCF
+>   CAGR. It's a *model, not a price target*, presented with its assumptions, and it
+>   declines for banks/insurers (no meaningful capex) and pre-FCF companies.
 >
 > `sec_filing_excerpt` and `filing_summary` rank passages by keyword by default;
 > set **`SEC_EDGAR_SEMANTIC=1`** (needs an embeddings endpoint) to re-rank the
@@ -273,6 +283,7 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── analytics.py   # tax-loss-harvest + correlation matrix + ETF look-through aggregate
 │   ├── factors.py     # Fama-French factor exposure (market/size/value, alpha, R²)
 │   ├── edgar.py       # SEC EDGAR filing intelligence (financials/filings/full-text search, keyless)
+│   ├── valuation.py   # deterministic two-stage DCF intrinsic valuation (dcf_valuation)
 │   ├── screener.py    # stock screener over a candidate universe (screen_stocks, S&P 500)
 │   ├── subagents.py   # parallel/sequence research subagent dispatch (dispatch_subagent[s])
 │   ├── research.py    # deep-research report (parallel gather → synthesize) + --research
