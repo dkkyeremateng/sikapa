@@ -166,8 +166,9 @@ async def test_tui_config_shows_configured_model(monkeypatch, tmp_path):
 
 
 async def test_tui_import_command_imports_statement(monkeypatch, tmp_path):
-    """/import PATH parses a statement straight into the store (no model call)
-    and prints the summary; a bad path is reported, not raised."""
+    """/import PATH parses a statement straight into the store (no model call;
+    runs on a background thread worker) and prints the summary; a bad path is
+    reported, not raised."""
     monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
     monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
     csv_path = tmp_path / "stmt.csv"
@@ -178,6 +179,7 @@ async def test_tui_import_command_imports_statement(monkeypatch, tmp_path):
         box = app.query_one(CommandInput)
         box.value = f"/import {csv_path}"
         await pilot.press("enter")
+        await app.workers.wait_for_complete()  # parse runs off the UI thread
         await pilot.pause()
         text = log_text(app)
         assert "U1111111" in text and "2 trade(s)" in text
@@ -189,6 +191,7 @@ async def test_tui_import_command_imports_statement(monkeypatch, tmp_path):
         # A missing path is reported inline, never raised.
         box.value = f"/import {tmp_path / 'nope.csv'}"
         await pilot.press("enter")
+        await app.workers.wait_for_complete()
         await pilot.pause()
         assert "No file found" in log_text(app)
 
@@ -1100,6 +1103,317 @@ async def test_tui_memory_command_lists_and_prunes(monkeypatch, tmp_path):
         await pilot.pause()
     remaining = [e["text"] for e in get_memory().all()]
     assert remaining == ["My base currency is USD"]
+# -- busy guards + session integrity ----------------------------------------
+
+
+async def test_session_commands_refused_while_busy(monkeypatch, tmp_path):
+    """/new, /clear and /resume while a turn is running are refused (like
+    /compact): they mutate the session/log the running turn is streaming into —
+    worst case its transcript entry would land in the WRONG session."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    sessions.log_turn("elsewhere", "q", "a")
+    app = AgentApp(fake=True, session_id="busy-guard")
+    async with app.run_test() as pilot:
+        app._busy = True  # a turn is (notionally) running
+        box = app.query_one(CommandInput)
+        for cmd in ("/new", "/clear", "/resume elsewhere"):
+            box.value = cmd
+            await pilot.press("enter")
+            await pilot.pause()
+        assert app.session_id == "busy-guard"        # /new and /resume refused
+        text = log_text(app)
+        assert text.count("busy — wait") == 3        # each command told the user
+        assert text.count(_READY) == 1               # /clear refused: log intact
+
+
+async def test_turn_logs_to_the_session_it_started_in(monkeypatch, tmp_path):
+    """The transcript entry goes to the session that STARTED the turn, even if
+    self.session_id changes mid-turn (belt-and-braces under the busy guard)."""
+    import asyncio
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    gate = asyncio.Event()
+
+    async def streaming(*args, **kwargs):
+        await gate.wait()
+        yield AgentEvent("final", "late answer")
+
+    monkeypatch.setattr("financial_research_assistant.tui.run_turn", streaming)
+    app = AgentApp(fake=True, session_id="origin")
+    async with app.run_test() as pilot:
+        app.query_one(CommandInput).value = "slow question"
+        await pilot.press("enter")
+        await pilot.pause()
+        app.session_id = "hijacked"  # simulate any future mid-turn switch
+        gate.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    assert [t["answer"] for t in sessions.read_transcript("origin")] == ["late answer"]
+    assert sessions.read_transcript("hijacked") == []
+
+
+async def test_cancel_during_compaction_cancels_nothing(monkeypatch, tmp_path):
+    """Esc during /compact must not claim '⏹ turn cancelled' (compaction runs on
+    its own worker; _turn_worker may be a stale handle from a finished turn) —
+    it notes that compaction can't be cancelled and cancels nothing."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="compact-esc")
+    async with app.run_test() as pilot:
+        worker = RecordingWorker()
+        app._busy = True
+        app._compacting = True
+        app._turn_worker = cast(Worker, worker)  # stale handle from an old turn
+        app.action_cancel_turn()
+        await pilot.pause()
+        assert worker.cancelled is False
+        assert "turn cancelled" not in log_text(app)
+        assert "compacting" in log_text(app)
+
+
+async def test_turn_worker_cleared_when_turn_ends(monkeypatch, tmp_path):
+    """The worker handle is dropped at turn end so a later Esc can never
+    'cancel' a finished worker."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="worker-clear")
+    async with app.run_test() as pilot:
+        app.query_one(CommandInput).value = "hi"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app._turn_worker is None
+
+
+async def test_exit_code_resets_after_a_clean_turn(monkeypatch, tmp_path):
+    """One errored turn must not make /quit exit non-zero forever: a later
+    clean turn resets the exit code."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+
+    async def erroring(*args, **kwargs):
+        yield AgentEvent("error", "boom")
+
+    monkeypatch.setattr("financial_research_assistant.tui.run_turn", erroring)
+    app = AgentApp(fake=True, session_id="exit-reset")
+    async with app.run_test() as pilot:
+        app.query_one(CommandInput).value = "fail"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app._exit_code == 1
+
+        async def fine(*args, **kwargs):
+            yield AgentEvent("final", "all good")
+
+        monkeypatch.setattr("financial_research_assistant.tui.run_turn", fine)
+        app.query_one(CommandInput).value = "succeed"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app._exit_code == 0
+
+
+# -- /resume state restoration ----------------------------------------------
+
+
+async def test_resume_resets_tokens_and_restores_rating_state(monkeypatch, tmp_path):
+    """/resume starts the resumed conversation with fresh token/cost counters
+    (like /new) and points /copy·/good·/bad at the replayed last exchange."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    sessions.log_turn("beta", "hello from beta", "beta answer 42")
+    app = AgentApp(fake=True, session_id="alpha2")
+    async with app.run_test() as pilot:
+        app._tok_in, app._tok_out, app._tok_cache = 500, 60, 7
+        box = app.query_one(CommandInput)
+        box.value = "/resume beta"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert (app._tok_in, app._tok_out, app._tok_cache) == (0, 0, 0)
+        assert app._last_user == "hello from beta"
+        assert app._last_answer == "beta answer 42"
+
+
+# -- feedback + import styling ----------------------------------------------
+
+
+async def test_tui_bad_command_reports_thumbs_down(monkeypatch, tmp_path):
+    """/bad acknowledges with 👎/'avoid' — not the /good 👍 message."""
+    monkeypatch.setenv("MEMORY_BACKEND", "local")
+    monkeypatch.setenv("MEMORY_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMORY_USER", "tuibad")
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path / "sess"))
+
+    app = AgentApp(fake=True, session_id="fb-bad")
+    async with app.run_test() as pilot:
+        app.query_one(CommandInput).value = "how risky is my portfolio?"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        app.query_one(CommandInput).value = "/bad too vague"
+        await pilot.press("enter")
+        await pilot.pause()
+        text = log_text(app)
+        assert "noted 👎" in text and "avoid" in text
+        assert "noted 👍" not in text
+
+
+async def test_import_missing_dep_hint_styled_as_error(monkeypatch, tmp_path):
+    """The OFX missing-dependency hint renders in the error style like the other
+    import failures (it starts with neither 'No file' nor 'Could not')."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="imp-ofx")
+    async with app.run_test():
+        seen: list[tuple[str, str]] = []
+        app._line = lambda text, style="", indent=0: seen.append((text, style))
+
+        app._show_import_result(
+            "OFX/QFX import needs the optional 'ofxtools' package. Install it "
+            "with: pip install 'financial-research-assistant[ofx]'"
+        )
+        assert seen and all(style == "dim red" for _, style in seen)
+        assert any("ofxtools" in text for text, _ in seen)
+
+        seen.clear()
+        app._show_import_result("Imported 2 trade(s) for U123")  # success stays dim
+        assert seen and all(style == "dim" for _, style in seen)
+
+
+# -- late tool_end fallback ---------------------------------------------------
+
+
+async def test_late_tool_end_panel_honors_expand_all(monkeypatch, tmp_path):
+    """A tool_end with no matching tool_start (fallback panel) still honors the
+    Ctrl+O expand-all preference instead of always mounting collapsed."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+
+    async def streaming(*args, **kwargs):
+        yield AgentEvent("tool_end", "Agent · x", tool="x", detail="ok",
+                        call_id="ghost", ok=True, duration=0.1)
+        yield AgentEvent("final", "done")
+
+    monkeypatch.setattr("financial_research_assistant.tui.run_turn", streaming)
+    app = AgentApp(fake=True, session_id="late-end")
+    async with app.run_test() as pilot:
+        app._tools_collapsed = False  # user pressed Ctrl+O: expand all
+        app.query_one(CommandInput).value = "go"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        panels = list(app.query(ToolPanel))
+        assert len(panels) == 1
+        assert panels[0].collapsed is False
+
+
+# -- /model override clearing -------------------------------------------------
+
+
+async def test_model_default_clears_override(monkeypatch, tmp_path):
+    """/model default resets the override back to the configured model."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="model-clear")
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        box.value = "/model gpt-4o-custom"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.model_override == "gpt-4o-custom"
+
+        box.value = "/model default"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.model_override is None
+        assert "override cleared" in log_text(app)
+
+
+# -- follow-aware autoscroll + render throttle + log cap ----------------------
+
+
+async def test_autoscroll_pauses_when_scrolled_up_and_resumes_at_bottom(
+    monkeypatch, tmp_path
+):
+    """Scrolling away from the bottom pauses streaming auto-follow; scrolling
+    back to the bottom resumes it. A scroll gesture that never leaves the bottom
+    (nothing to scroll yet) must NOT pause following."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="follow")
+    async with app.run_test() as pilot:
+        assert app._follow is True
+        app.action_scroll_log_page_up()   # log fits on screen: still pinned
+        await pilot.pause()               # (offset lands on the next refresh)
+        assert app._follow is True
+
+        for i in range(120):              # overflow the viewport
+            app._line(f"line {i}")
+        await pilot.pause()
+        app.action_scroll_log_page_up()
+        await pilot.pause()
+        assert app._follow is False       # user moved away from the bottom
+        app.action_scroll_log_end()
+        assert app._follow is True        # back at the bottom → follow again
+
+
+async def test_live_bubble_throttles_render_but_text_is_immediate(
+    monkeypatch, tmp_path
+):
+    """A live bubble defers re-renders to its ~10 Hz flush timer (O(n²) guard)
+    while .text updates immediately; finalize/set_duration stop the timer. A
+    non-live (replayed) bubble renders synchronously and never ticks."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="throttle")
+    async with app.run_test() as pilot:
+        log = app.query_one("#log", VerticalScroll)
+        w = AgentMessageWidget("", live=True)
+        await log.mount(w)
+        await pilot.pause()
+        w.append_text("hello")
+        assert w.text == "hello"          # data immediate…
+        assert w._dirty is True           # …render deferred to the throttle
+        await pilot.pause(0.25)           # ≥ one 0.1s flush tick
+        assert w._dirty is False          # flushed
+        w.set_duration(1.2)
+        assert w._render_timer is None    # finalized: no more ticking
+
+        w2 = AgentMessageWidget("replay answer")
+        await log.mount(w2)
+        await pilot.pause()
+        assert w2._render_timer is None   # replayed bubbles never tick
+
+
+async def test_log_trims_oldest_widgets_past_cap(monkeypatch, tmp_path):
+    """The log keeps at most _LOG_CAP widgets — the oldest are dropped (the
+    transcript file keeps full history)."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setattr("financial_research_assistant.tui._LOG_CAP", 20)
+    app = AgentApp(fake=True, session_id="trim")
+    async with app.run_test() as pilot:
+        for i in range(30):
+            app._line(f"row {i}")
+        await pilot.pause()
+        log = app.query_one("#log", VerticalScroll)
+        assert len(log.children) <= 21
+        text = log_text(app)
+        assert "row 29" in text           # newest kept
+        assert "row 0" not in text        # oldest trimmed
+
+
+async def test_export_accepts_full_path(monkeypatch, tmp_path):
+    """/export with a full path writes there (parents created) instead of the
+    session store."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path / "store"))
+    app = AgentApp(fake=True, session_id="exp-path")
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        box.value = "capture me"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        dest = tmp_path / "elsewhere" / "deep" / "out.html"
+        box.value = f"/export {dest}"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert dest.exists()
+        assert "capture me" in dest.read_text(encoding="utf-8")
+
+
 def test_reply_markdown_code_block_has_no_background():
     """Agent-reply code blocks (where a monospace table is pasted) render with NO
     background box, so the table sits flush on the app background — while the table

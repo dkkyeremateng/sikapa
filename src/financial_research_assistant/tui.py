@@ -14,10 +14,12 @@ Layout (modeled on modern agent consoles):
   queued-message count. The ``thinking`` indicator updates live on toggle.
 - Footer: key hints.
 
-Features: live token streaming into the answer bubble (with a run duration),
-prompt history (↑/↓), Esc cancels the running turn, a message queue (Enter while
-busy queues; Alt+↑ restores), Ctrl+O/Ctrl+T collapse all tool/thinking panels
-(click a collapsed panel to expand it), PgUp/PgDn·Shift+↑/↓·wheel scroll the log,
+Features: live token streaming into the answer bubble (with a run duration;
+re-renders are throttled to ~10 Hz so long replies stay cheap), prompt history
+(↑/↓), Esc cancels the running turn, a message queue (Enter while busy queues;
+Alt+↑ restores), Ctrl+O/Ctrl+T collapse all tool/thinking panels (click a
+collapsed panel to expand it), PgUp/PgDn·Shift+↑/↓·wheel scroll the log —
+streaming auto-follow pauses while you're scrolled up and resumes at the bottom —
 modal ``/resume`` and ``/model`` pickers, and ``/copy``, ``/export``,
 ``/hotkeys``, ``/theme`` commands. This scaffold is single-agent
 and conversational (no workspace), so ``/new`` starts a *new conversation* — a
@@ -65,16 +67,16 @@ _COMMANDS: list[tuple[str, str]] = [
     ("/clear", "clear the transcript view"),
     ("/sessions", "list saved sessions"),
     ("/resume", "resume a saved session (/resume NAME, or pick from a list)"),
-    ("/model", "switch the model for the next query (/model NAME, or a picker)"),
+    ("/model", "switch the model for the next query (/model NAME, or a picker; /model default clears)"),
     ("/config", "show endpoint, model, mode"),
-    ("/import", "import an IBKR statement CSV into the store (/import PATH)"),
+    ("/import", "import a broker statement — IBKR CSV or OFX/QFX — into the store (/import PATH)"),
     ("/toggle_thinking", "enable/disable the reasoning trace (💭 panels)"),
     ("/thinking", "turn reasoning on or off (/thinking on|off, or toggle)"),
     ("/copy", "copy the last answer to the clipboard"),
     ("/good", "rate the last answer good — learn from it (/good [note]; needs memory on)"),
     ("/bad", "rate the last answer poor — avoid it (/bad [note]; needs memory on)"),
     ("/memory", "review or prune long-term memory (/memory, or /memory forget TEXT)"),
-    ("/export", "export the transcript (/export NAME.html|NAME.jsonl)"),
+    ("/export", "export the transcript (/export NAME.html|NAME.jsonl, or a full path)"),
     ("/hotkeys", "list keyboard shortcuts"),
     ("/theme", "toggle light / dark theme"),
     ("/help", "list commands"),
@@ -98,6 +100,10 @@ _HOTKEYS: list[tuple[str, str]] = [
 ]
 
 _READY = "Ready. Type a message, or / for commands (/help lists them)."
+
+# Oldest log widgets are trimmed past this count so week-long sessions don't
+# accumulate thousands of live widgets (the transcript file keeps full history).
+_LOG_CAP = 600
 
 
 def _provider_label() -> str:
@@ -285,7 +291,7 @@ class ToolPanel(Collapsible):
     duration ticks without extra events. RichLogs use ``markup=False`` so
     bracketed args/results can never raise ``MarkupError``."""
 
-    DOTS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    DOTS = _SPINNER
 
     def __init__(self, ev: AgentEvent) -> None:
         self.tool_name = ev.tool or "tool"
@@ -435,34 +441,76 @@ class AgentMessageWidget(Static):
     """Full-width transcript entry for an agent reply, styled like the research
     console: a bold ``Author:`` header with an inline ``(Xs)`` run duration,
     then the reply. Header and body live in one Markdown block so a single
-    newline renders as a soft break — the reply starts on the header line."""
+    newline renders as a soft break — the reply starts on the header line.
 
-    def __init__(self, text: str = "", author: str = "Agent") -> None:
+    A ``live=True`` bubble (token streaming) throttles its re-renders: re-parsing
+    the whole reply as Markdown on every token is O(n²) in the answer length, so
+    appends only mark the bubble dirty and a ~10 Hz timer flushes them. ``text``
+    always updates immediately; only the visual render is deferred. The app calls
+    ``finalize()`` when the bubble is complete (turn ended, or output moved past
+    it to a tool/thinking panel), which flushes and stops the timer."""
+
+    def __init__(self, text: str = "", author: str = "Agent", *, live: bool = False) -> None:
         super().__init__(classes="agent-msg")
         self.author = author
         self.text = text
         self.duration: float | None = None
+        self._live = live
+        self._dirty = False
+        self._render_timer = None
         self._update_content()
+
+    def on_mount(self) -> None:
+        if self._live:
+            self._render_timer = self.set_interval(0.1, self._flush)
+
+    def on_unmount(self) -> None:
+        if self._render_timer is not None:
+            self._render_timer.stop()
+            self._render_timer = None
 
     def _update_content(self) -> None:
         dur = f" ({format_duration(self.duration)})" if self.duration is not None else ""
         head = f"**{self.author}:**{dur}"
         self.update(_ReplyMarkdown(f"{head}\n{self.text}" if self.text else head))
 
+    def _flush(self) -> None:
+        if not self._dirty:
+            return
+        self._dirty = False
+        self._update_content()
+        # The flush is what grows the bubble (appends are deferred), so following
+        # the stream happens here — and only while the user is at the bottom.
+        parent = self.parent
+        if getattr(self.app, "_follow", True) and isinstance(parent, VerticalScroll):
+            parent.scroll_end(animate=False)
+
     def append_text(self, new_text: str) -> None:
         self.text += new_text
+        if self._render_timer is not None:
+            self._dirty = True  # rendered by the ~10 Hz throttle timer
+        else:
+            self._update_content()
+
+    def finalize(self) -> None:
+        """Flush any pending text and stop the render throttle — the bubble
+        won't grow further."""
+        if self._render_timer is not None:
+            self._render_timer.stop()
+            self._render_timer = None
+        self._dirty = False
         self._update_content()
 
     def set_duration(self, seconds: float) -> None:
         self.duration = seconds
-        self._update_content()
+        self.finalize()
 
 
 class ProcessingWidget(Static):
     """Inline ``● Agent <spinner> (Xs)`` shown while the agent works before its
     first visible output; replaced by that output (or an error mark)."""
 
-    DOTS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    DOTS = _SPINNER
 
     def __init__(self, agent: str = "Agent") -> None:
         super().__init__(classes="agent-msg")
@@ -538,7 +586,11 @@ class ModelScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal"):
-            yield Static("Set model for the next query (Enter apply, Esc cancel)", id="modal-title")
+            yield Static(
+                "Set model for the next query (Enter apply, Esc cancel; "
+                "'default' clears the override)",
+                id="modal-title",
+            )
             yield Input(value=self._current, id="modal-input")
 
     def on_mount(self) -> None:
@@ -676,8 +728,12 @@ class AgentApp(App):
         self._tools_collapsed = True
         self._think_collapsed = True
         self._turn_worker = None
+        self._compacting = False  # /compact runs under _busy but on its own worker
         self._processing: ProcessingWidget | None = None
         self._answer: AgentMessageWidget | None = None  # live-streamed reply
+        # Auto-scroll follows the stream only while the user is at the bottom of
+        # the log; scrolling up pauses it, scrolling back down resumes it.
+        self._follow = True
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -734,7 +790,61 @@ class AgentApp(App):
     def _line(self, text: str, style: str = "", indent: int = 0) -> None:
         log = self._logview()
         log.mount(Static(Text(" " * indent + text, style=style)))
-        log.scroll_end(animate=False)
+        self._trim_log()
+        # Command output while idle always jumps into view; during a turn the
+        # follow flag decides, so a user reading scrollback isn't yanked down.
+        if self._follow or not self._busy:
+            log.scroll_end(animate=False)
+
+    def _trim_log(self) -> None:
+        # Removal is async — the _trimming mark keeps a burst of mounts from
+        # re-removing widgets whose removal is still pending.
+        log = self._logview()
+        kids = [w for w in log.children if not getattr(w, "_trimming", False)]
+        excess = len(kids) - _LOG_CAP
+        if excess > 0:
+            for w in kids[:excess]:
+                w._trimming = True
+                w.remove()
+
+    def _log_pinned(self) -> bool:
+        """True while the log is scrolled to (within a row of) the bottom."""
+        log = self._logview()
+        return log.scroll_offset.y >= log.max_scroll_y - 1
+
+    def _sync_follow(self) -> None:
+        """Re-derive the follow flag from geometry after a user scroll:
+        following resumes at the bottom, pauses anywhere above it."""
+        self._follow = self._log_pinned()
+
+    def _follow_end(self, log: VerticalScroll) -> None:
+        if self._follow:
+            log.scroll_end(animate=False)
+
+    def _mount_stream(self, widget) -> None:
+        """Mount a widget produced by the running turn, trimming the oldest
+        log entries and following the stream only while the user is at the
+        bottom."""
+        log = self._logview()
+        log.mount(widget)
+        self._trim_log()
+        self._follow_end(log)
+
+    def _close_answer(self) -> None:
+        """Close the live answer bubble (flush pending text, stop its render
+        throttle) so the next output starts a NEW bubble below whatever mounts
+        next."""
+        if self._answer is not None:
+            self._answer.finalize()
+            self._answer = None
+
+    def _busy_guard(self, what: str) -> bool:
+        """True (after printing a refusal) while a turn or compaction runs —
+        session-mutating commands would corrupt the in-flight turn's state."""
+        if self._busy:
+            self._line(f"busy — wait for the current turn before {what}", "dim red")
+            return True
+        return False
 
     def _stop_processing(self) -> None:
         if self._processing is not None:
@@ -755,10 +865,8 @@ class AgentApp(App):
         tool call and the next output. The next streamed event calls
         ``_stop_processing`` before mounting, so it never lingers out of order."""
         if self._busy and self._processing is None:
-            log = self._logview()
             self._processing = ProcessingWidget("Agent")
-            log.mount(self._processing)
-            log.scroll_end(animate=False)
+            self._mount_stream(self._processing)
 
     def _status_widget(self, text: str, style: str, depth: int) -> Static:
         w = Static(Text(text, style=style), classes="subagent-status")
@@ -858,13 +966,19 @@ class AgentApp(App):
         if cmd == "/quit":
             self.exit(return_code=self._exit_code)
         elif cmd == "/new":
-            self._new_conversation()
+            # /new, /clear and /resume mutate the session/log a running turn is
+            # still streaming into (worst case: its transcript entry would land
+            # in the NEW session) — refuse while busy, like /compact.
+            if not self._busy_guard("/new"):
+                self._new_conversation()
         elif cmd == "/compact":
             self._compact()
         elif cmd == "/clear":
-            self._logview().remove_children()
-            self._pending.clear()
-            self._line(_READY, "dim")
+            if not self._busy_guard("/clear"):
+                self._logview().remove_children()
+                self._pending.clear()
+                self._follow = True
+                self._line(_READY, "dim")
         elif cmd == "/help":
             self._line("commands:", "bold")
             for c, d in _COMMANDS:
@@ -886,7 +1000,9 @@ class AgentApp(App):
         elif cmd == "/sessions":
             self._show_sessions()
         elif cmd == "/resume":
-            if arg:
+            if self._busy_guard("/resume"):
+                pass
+            elif arg:
                 self._resume(arg)
             else:
                 self._pick_session()
@@ -923,6 +1039,7 @@ class AgentApp(App):
         reset_session(self.session_id)
         self._pending.clear()
         self._reset_tokens()
+        self._follow = True
         self._logview().remove_children()
         self._line(f"new conversation: {self.session_id}", "dim")
         self._line(_READY, "dim")
@@ -938,14 +1055,14 @@ class AgentApp(App):
     def _compact(self) -> None:
         """Summarize older turns and rewrite the thread so the context shrinks.
         Runs the model off the UI thread; refuses while a turn is in flight."""
-        if self._busy:
-            self._line("busy — wait for the current turn before /compact", "dim red")
+        if self._busy_guard("/compact"):
             return
         self.compact_conversation()
 
     @work(exclusive=True)
     async def compact_conversation(self) -> None:
         self._busy = True
+        self._compacting = True  # lets Esc tell compaction apart from a turn
         self._render_statusbar()
         self._line("• compacting conversation…", "dim")
         try:
@@ -958,6 +1075,7 @@ class AgentApp(App):
             return
         finally:
             self._busy = False
+            self._compacting = False
             self._render_statusbar()
             self.call_after_refresh(self._drain_queue)
         if res["removed"] == 0:
@@ -986,21 +1104,35 @@ class AgentApp(App):
         self._line(f"  session    {self.session_id}", "dim")
 
     def _import(self, arg: str) -> None:
-        """Import an IBKR statement CSV straight into the store — no model call,
-        so it works identically in live and --fake mode. Reads/parses locally
-        (fast), then prints the summary of what was stored."""
+        """Import a broker statement — IBKR CSV or OFX/QFX, auto-detected —
+        straight into the store: no model call, so it works identically in live
+        and --fake mode. Parses in a background thread so a large statement
+        can't freeze the UI, then prints the summary of what was stored."""
         path = arg.strip().strip('"').strip("'")
         if not path:
-            self._line("usage: /import PATH   (path to an IBKR statement CSV)", "dim red")
+            self._line(
+                "usage: /import PATH   (a broker statement — IBKR CSV or OFX/QFX)",
+                "dim red",
+            )
             return
         # Path() alone does not expand ~ or env vars; do it here so a typed
         # "~/Downloads/stmt.csv" resolves instead of erroring as not-found.
         path = os.path.expanduser(os.path.expandvars(path))
+        self._line(f"• importing {path} …", "dim")
+        self.run_import(path)
+
+    @work(thread=True, group="import")
+    def run_import(self, path: str) -> None:
+        # Own worker group: the turn workers are exclusive in "default", and
+        # starting one must not cancel a half-done import.
         from .tools import import_ibkr_statement
 
-        self._line(f"• importing {path} …", "dim")
         summary = import_ibkr_statement(path)
-        style = "dim red" if summary.startswith(("No file", "Could not")) else "dim"
+        self.call_from_thread(self._show_import_result, summary)
+
+    def _show_import_result(self, summary: str) -> None:
+        failed = summary.startswith(("No file", "Could not", "OFX/QFX import needs"))
+        style = "dim red" if failed else "dim"
         for line in summary.splitlines():
             self._line(f"  {line}", style)
 
@@ -1037,11 +1169,14 @@ class AgentApp(App):
             self._line(f"no such session: {arg} (see /sessions)", "dim red")
             return
         # Resume restores the visible transcript; model memory is always fresh,
-        # so drop cached graphs for both the old and resumed ids.
+        # so drop cached graphs for both the old and resumed ids. Token/cost
+        # counters belong to the old conversation — reset them like /new does.
         reset_session(self.session_id)
         self.session_id = arg
         reset_session(self.session_id)
         self._pending.clear()
+        self._reset_tokens()
+        self._follow = True
         self._logview().remove_children()
         self._line(f"resumed session: {self.session_id}", "dim")
         self._replay_transcript(self.session_id)
@@ -1055,12 +1190,17 @@ class AgentApp(App):
             self._set_model(model)
 
     def _set_model(self, model: str) -> None:
-        self.model_override = model
+        if model.lower() in ("default", "none", "-"):
+            self.model_override = None
+            note = "model override cleared — using the configured default"
+        else:
+            self.model_override = model
+            note = f"model set to {model} (applies to the next query)"
         self.query_one("#config", Static).update(
             _config_line(self.fake, self.model_override)
         )
         self._render_statusbar()
-        self._line(f"model set to {model} (applies to the next query)", "dim")
+        self._line(note, "dim")
 
     def _copy_last(self) -> None:
         if not self._last_answer:
@@ -1086,8 +1226,10 @@ class AgentApp(App):
             )
             return
         if record(self._last_user, self._last_answer, good, note):
-            verb = "emulate" if good else "avoid"
-            self._line(f"noted 👍 — I'll {verb} answers like the last one", "dim green")
+            if good:
+                self._line("noted 👍 — I'll emulate answers like the last one", "dim green")
+            else:
+                self._line("noted 👎 — I'll avoid answers like the last one", "dim yellow")
         else:
             self._line("already recorded that one", "dim")
 
@@ -1161,11 +1303,13 @@ class AgentApp(App):
         if not turns:
             self._line("nothing to export yet", "dim")
             return
-        name = arg or "export.html"
+        name = os.path.expanduser(os.path.expandvars(arg or "export.html"))
         store = sessions.store_dir()
+        # pathlib: an absolute NAME overrides the store dir entirely, and a
+        # relative one may point into a subdir — both are deliberate.
         dest = store / name
         try:
-            store.mkdir(parents=True, exist_ok=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             if name.endswith(".jsonl"):
                 dest.write_text(
                     "\n".join(json.dumps(t) for t in turns) + "\n", encoding="utf-8"
@@ -1197,17 +1341,28 @@ class AgentApp(App):
             log.mount(UserMessageWidget(turn.get("query", "")))
             log.mount(AgentMessageWidget(turn.get("answer", "") or ""))
             log.scroll_end(animate=False)
+        # The replayed conversation's last exchange is on screen — make /copy,
+        # /good and /bad act on it instead of claiming nothing happened yet.
+        self._last_user = turns[-1].get("query", "")
+        self._last_answer = turns[-1].get("answer", "") or ""
 
     # -- actions ------------------------------------------------------------
 
     def action_cancel_turn(self) -> None:
         if not self._busy:
             return
+        if self._compacting:
+            # Compaction rewrites the thread at the end of its run; killing it
+            # mid-summarize would be safe but pointless — it has no partial
+            # output to save. More importantly it is NOT the turn worker, so
+            # don't claim "turn cancelled" while it keeps running.
+            self._line("compacting — can't cancel; it finishes on its own", "dim")
+            return
         self._stop_processing()
         worker = self._turn_worker
         if worker is not None:
             worker.cancel()
-        self._line("⏹ turn cancelled", "dim red")
+            self._line("⏹ turn cancelled", "dim red")
 
     def action_toggle_mouse(self) -> None:
         """Toggle terminal mouse capture. Captured (default): scroll-wheel and
@@ -1251,32 +1406,46 @@ class AgentApp(App):
 
     # -- scrolling ----------------------------------------------------------
     # ↑/↓ are reserved for prompt history, so scrolling the log is on
-    # PgUp/PgDn, Shift+↑/↓, Ctrl+Home/End, and the mouse wheel.
+    # PgUp/PgDn, Shift+↑/↓, Ctrl+Home/End, and the mouse wheel. Every user
+    # scroll re-derives the follow flag: away from the bottom pauses streaming
+    # auto-scroll, back at the bottom resumes it. Even with animate=False the
+    # new offset only lands on the next refresh, so the check is deferred.
+
+    def _scrolled(self) -> None:
+        self.call_after_refresh(self._sync_follow)
 
     def action_scroll_log_page_up(self) -> None:
-        self._logview().scroll_page_up()
+        self._logview().scroll_page_up(animate=False)
+        self._scrolled()
 
     def action_scroll_log_page_down(self) -> None:
-        self._logview().scroll_page_down()
+        self._logview().scroll_page_down(animate=False)
+        self._scrolled()
 
     def action_scroll_log_up(self) -> None:
-        self._logview().scroll_up()
+        self._logview().scroll_up(animate=False)
+        self._scrolled()
 
     def action_scroll_log_down(self) -> None:
-        self._logview().scroll_down()
+        self._logview().scroll_down(animate=False)
+        self._scrolled()
 
     def action_scroll_log_home(self) -> None:
-        self._logview().scroll_home()
+        self._logview().scroll_home(animate=False)
+        self._scrolled()
 
     def action_scroll_log_end(self) -> None:
-        self._logview().scroll_end()
+        self._logview().scroll_end(animate=False)
+        self._follow = True
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        self._logview().scroll_up()
+        self._logview().scroll_up(animate=False)
+        self._scrolled()
         event.stop()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        self._logview().scroll_down()
+        self._logview().scroll_down(animate=False)
+        self._scrolled()
         event.stop()
 
     # -- run ----------------------------------------------------------------
@@ -1286,6 +1455,7 @@ class AgentApp(App):
         log.mount(UserMessageWidget(msg))
         self._processing = ProcessingWidget("Agent")
         log.mount(self._processing)
+        self._follow = True  # a fresh submit implies watching the reply
         log.scroll_end(animate=False)
         self._busy = True
         self._turn_started = time.time()
@@ -1293,36 +1463,42 @@ class AgentApp(App):
         # last known value (no flicker to 0%) until this turn's usage arrives.
         self._turn_in = 0
         self._render_statusbar()
-        self._turn_worker = self.stream_response(msg)
+        # The session id is snapshotted into the worker so the finished turn is
+        # always logged to the conversation it STARTED in, whatever happens to
+        # self.session_id while it runs.
+        self._turn_worker = self.stream_response(msg, self.session_id)
 
     def _drain_queue(self) -> None:
         if self._queue and not self._busy:
             self._start_turn(self._queue.pop(0))
 
     @work(exclusive=True)
-    async def stream_response(self, msg: str) -> None:
+    async def stream_response(self, msg: str, session_id: str) -> None:
+        # ``session_id`` is the conversation this turn belongs to, snapshotted
+        # at submit time — never re-read self.session_id here.
         log = self._logview()
         started = time.monotonic()
         self._answer = None  # created lazily on the first token
         self._last_user = msg  # remember the query so /good and /bad can rate it
         final_text = ""
+        turn_errored = False
         model, _ = _model_provider(self.fake, self.model_override)
         try:
             async for ev in traced(
                 run_turn(
-                    msg, self.session_id, fake=self.fake, model=self.model_override,
+                    msg, session_id, fake=self.fake, model=self.model_override,
                     think=self.show_thinking,
                 ),
-                user_msg=msg, session_id=self.session_id, model=model, fake=self.fake,
+                user_msg=msg, session_id=session_id, model=model, fake=self.fake,
             ):
                 if ev.kind == "token":
-                    # Stream tokens live into a growing answer bubble.
+                    # Stream tokens live into a growing answer bubble (the
+                    # bubble throttles its own re-renders and follow-scrolls).
                     if self._answer is None:
                         self._stop_processing()
-                        self._answer = AgentMessageWidget("")
-                        log.mount(self._answer)
+                        self._answer = AgentMessageWidget("", live=True)
+                        self._mount_stream(self._answer)
                     self._answer.append_text(ev.text)
-                    log.scroll_end(animate=False)
                 elif ev.kind == "reasoning":
                     if self.show_thinking:
                         self._stop_processing()
@@ -1330,9 +1506,8 @@ class AgentApp(App):
                         # thought starts a NEW bubble BELOW the panel — a thought
                         # that preceded the output stays above it (chronological),
                         # same as tool panels.
-                        self._answer = None
-                        log.mount(ThinkingPanel(ev))
-                        log.scroll_end(animate=False)
+                        self._close_answer()
+                        self._mount_stream(ThinkingPanel(ev))
                     self._show_processing()  # keep a spinner while it works on
                 elif ev.kind == "usage":
                     # Usage arrives as per-call deltas (live). The in/out/cache
@@ -1365,19 +1540,19 @@ class AgentApp(App):
                     # the transcript chronological: a tool that finished before the
                     # answer stays above it, instead of the answer floating to the
                     # top because it reused the pre-tool bubble.
-                    self._answer = None
+                    self._close_answer()
                     panel = ToolPanel(ev)
                     panel.collapsed = self._tools_collapsed
                     self._pending[ev.call_id] = panel
-                    log.mount(panel)
-                    log.scroll_end(animate=False)
+                    self._mount_stream(panel)
                 elif ev.kind == "tool_end":
                     panel = self._pending.pop(ev.call_id, None)
                     if panel is None:
                         panel = ToolPanel(ev)
-                        log.mount(panel)
+                        panel.collapsed = self._tools_collapsed
+                        self._mount_stream(panel)
                     panel.finish(ev)
-                    log.scroll_end(animate=False)
+                    self._follow_end(log)
                     self._show_processing()  # working on the next step
                 elif ev.kind == "final":
                     self._stop_processing()
@@ -1396,17 +1571,24 @@ class AgentApp(App):
                         # mount the answer read back from graph state.
                         w = AgentMessageWidget(final_text)
                         w.set_duration(dt)
-                        log.mount(w)
-                    log.scroll_end(animate=False)
+                        self._mount_stream(w)
+                    self._follow_end(log)
                 elif ev.kind == "error":
+                    turn_errored = True
                     if self._processing is not None:
                         self._processing.mark_error(ev.text)
                         self._processing = None
                     else:
                         self._line(f"error  {ev.text}", "bold red")
                     self._exit_code = 1
+            # Per-turn verdict: a clean turn resets a sticky error exit code, so
+            # /quit after later successes exits 0 (and --once keeps its signal).
+            self._exit_code = 1 if turn_errored else 0
             if final_text:
-                sessions.log_turn(self.session_id, msg, final_text)
+                try:
+                    sessions.log_turn(session_id, msg, final_text)
+                except OSError as e:  # disk full/permissions must not kill the app
+                    self._line(f"could not save the turn to the transcript: {e}", "dim red")
             if self.once:
                 self.exit(return_code=self._exit_code)
         finally:
@@ -1417,7 +1599,8 @@ class AgentApp(App):
             for panel in self._pending.values():
                 panel.abort()
             self._pending.clear()
-            self._answer = None
+            self._close_answer()  # flushes throttled text on cancel/error too
             self._busy = False
+            self._turn_worker = None
             self._render_statusbar()
             self.call_after_refresh(self._drain_queue)
