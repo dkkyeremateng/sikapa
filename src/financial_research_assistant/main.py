@@ -125,6 +125,20 @@ def cli() -> None:
 
     session_id = args.resume or args.session
 
+    # Resuming replays the saved transcript, but the model's actual memory is only
+    # restored when durable checkpointing is on. Nudge the user to the env var
+    # rather than silently persisting sensitive conversations to disk by default.
+    if args.resume:
+        from .adapter import durable_checkpoints_enabled
+
+        if not durable_checkpoints_enabled():
+            print(
+                "note: resuming replays the transcript, but the model's memory of the "
+                "conversation isn't restored. Set FINANCIAL_RESEARCH_CHECKPOINT_DB=1 to "
+                "persist and restore full conversation state across restarts.",
+                file=sys.stderr,
+            )
+
     if args.prompt is not None:
         sys.exit(
             asyncio.run(

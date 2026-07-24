@@ -148,9 +148,21 @@ def run_item(item: dict, fake: bool, timeout: float, env: dict | None = None) ->
             cmd.append("--fake")
         child_env = {**os.environ, **(env or {})}
         start = time.perf_counter()
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, env=child_env
-        )
+        # A single slow item (a heavyweight tool like research_report, or a stuck
+        # endpoint) must score 0 for that item, not abort the whole run — so a
+        # timeout is caught here and treated as a failure like a non-zero exit.
+        stdout = ""
+        timed_out = False
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, env=child_env
+            )
+            stdout = proc.stdout
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired as e:
+            timed_out = True
+            returncode = None
+            stdout = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
         elapsed = time.perf_counter() - start
         tools: list[dict] = []
         try:
@@ -158,11 +170,7 @@ def run_item(item: dict, fake: bool, timeout: float, env: dict | None = None) ->
                 tools = json.load(f).get("tools", [])
         except (OSError, json.JSONDecodeError):
             pass
-        value = (
-            0.0
-            if proc.returncode != 0
-            else score(item, proc.stdout, tools, fake)
-        )
+        value = 0.0 if (timed_out or returncode != 0) else score(item, stdout, tools, fake)
     finally:
         Path(trace_path).unlink(missing_ok=True)
     return {
@@ -171,8 +179,9 @@ def run_item(item: dict, fake: bool, timeout: float, env: dict | None = None) ->
         "eval_type": item["eval_type"],
         "score": round(value, 4),
         "time_taken": round(elapsed, 3),
+        "timed_out": timed_out,
         "tools": [str(t.get("name", "")) for t in tools],
-        "_answer": proc.stdout,
+        "_answer": stdout,
     }
 
 

@@ -105,8 +105,18 @@ offline deterministic fake mode, and a generic eval harness.
 >   margins and revenue growth. More authoritative than the Yahoo
 >   `stock_fundamentals` snapshot — cite it to the 10-K. Pass a us-gaap `concept`
 >   tag (e.g. `NetIncomeLoss`) for a single line's history.
+> - **`sec_quarterly_financials`** — the **quarterly (10-Q)** companion to
+>   `sec_financials`: the same line items across recent quarters (newest first),
+>   with per-quarter margins and revenue **QoQ + YoY** growth. Columns are labeled by
+>   period-end date; the fiscal-year-end quarter can be absent (the 10-K reports it
+>   as the full year). For "last N quarters / quarterly revenue / trend by quarter".
 > - **`sec_filings`** — a company's recent filings (10-K/10-Q/8-K/insider Form 4)
 >   with the filing date, description, and a direct link to each document.
+> - **`insider_transactions`** — recent **insider** activity parsed from **Form 4**
+>   ownership XML: separates open-market **buys (P)** and **sales (S)** — the
+>   conviction signals — from routine grants, option exercises, and tax-withholding,
+>   and reports the net. For "are insiders buying/selling X". Buying is the rarer,
+>   stronger signal; selling is often routine.
 > - **`sec_material_events`** — recent **8-K** filings with the event type decoded
 >   from the SEC item codes (earnings releases, M&A, executive departures, material
 >   agreements, impairments) — a catalyst monitor with a link to each disclosure.
@@ -253,6 +263,11 @@ offline deterministic fake mode, and a generic eval harness.
 >   against an index (e.g. SPY), or overlay several tickers rebased to 100.
 > - **`risk_metrics`** — per-ticker annualized volatility, max drawdown, Sharpe,
 >   and beta vs a benchmark.
+> - **`portfolio_risk`** — the **whole-portfolio** companion to `risk_metrics`:
+>   value-weights your current holdings into one synthetic daily return series, then
+>   reports annualized volatility, max drawdown, Sharpe, and beta. Current holdings
+>   are held constant over the window, and the covered share of portfolio value is
+>   reported (unpriceable positions are excluded, not treated as risk-free).
 > - **`factor_exposure`** — Fama-French factor regression for a ticker or the whole
 >   portfolio: market, size (SMB), and value (HML) loadings — plus profitability
 >   (RMW) and investment (CMA) in 5-factor mode — with annualized **alpha** and
@@ -304,9 +319,9 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── tools.py       # local calculators + read-only broker MCP loader/filter
 │   ├── brokers.py     # pluggable broker-provider registry (IBKR + any other broker)
 │   ├── fundamentals.py# yfinance reference tools (valuation/ratings/earnings/dividends/etf)
-│   ├── analytics.py   # tax-loss-harvest + correlation matrix + ETF look-through aggregate
+│   ├── analytics.py   # tax-loss-harvest, correlation, ETF look-through, portfolio_risk
 │   ├── factors.py     # Fama-French factor exposure (market/size/value, alpha, R²)
-│   ├── edgar.py       # SEC EDGAR filing intelligence (financials/filings/full-text search, keyless)
+│   ├── edgar.py       # SEC EDGAR intelligence: annual/quarterly financials, filings, insider Form 4, full-text (keyless)
 │   ├── valuation.py   # deterministic two-stage DCF intrinsic valuation (dcf_valuation)
 │   ├── options.py     # keyless options explainer — single-leg payoff economics (explain_option)
 │   ├── documents.py   # document-upload RAG — ingest/ask local files with cited passages
@@ -314,6 +329,7 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── subagents.py   # parallel/sequence research subagent dispatch (dispatch_subagent[s])
 │   ├── research.py    # deep-research report (parallel gather → synthesize) + --research
 │   ├── monitor.py     # portfolio monitoring digest (movers/earnings/ex-divs) + --digest
+│   ├── alerts.py      # user-defined alert rules the digest checks (add/list/remove_alert)
 │   ├── flex.py        # IBKR Flex Web Service pull (--flex-sync); XML parser is a seam
 │   ├── statements.py  # IBKR CSV + OFX/QFX parsers, format dispatch, SQLite store
 │   ├── tui.py         # Textual chat app
@@ -536,8 +552,9 @@ financial-research-assistant --digest --account U123  # a specific account
 
 It scans each holding for **price movers** (beyond ±5% over the lookback window),
 **upcoming earnings** (next 14 days, with consensus EPS), and **upcoming
-ex-dividend dates**, all from keyless Yahoo data. Run it from cron/launchd and
-pipe it to mail or a push service (e.g. `ntfy`):
+ex-dividend dates**, all from keyless Yahoo data — plus any of your own **alert
+rules** that fire (see below). Run it from cron/launchd and pipe it to mail or a
+push service (e.g. `ntfy`):
 
 ```cron
 # 8am on weekdays: email the portfolio digest
@@ -547,6 +564,17 @@ pipe it to mail or a push service (e.g. `ntfy`):
 The same report is available in-chat as the `portfolio_digest` tool (which also
 takes `include_news=true` to attach a headline per mover), so you can just ask
 *"anything I should know about my portfolio this week?"*.
+
+**Standing alert rules.** Set your own thresholds and the digest checks them on
+every run (in-chat or via `--digest`), surfacing a 🔔 section at the top when any
+fire. Just say *"tell me if AAPL drops more than 5%"*, *"alert me if any holding
+moves 8%"*, *"notify me if TSLA goes below 200"*, or *"flag NVDA earnings within a
+week"* and the agent calls `add_alert(symbol, kind, value)` — where `kind` is
+`drop`/`rise`/`move` (percent), `below`/`above` (a price level), or `earnings`
+(days), and `symbol="*"` means any holding. Review them with `list_alerts` and drop
+one with `remove_alert`. Rules are stored as plain JSON at
+`~/.financial-research-assistant/alerts.json` (override with
+`FINANCIAL_RESEARCH_ALERTS_FILE`).
 
 ## Durable conversation memory (survives restarts)
 

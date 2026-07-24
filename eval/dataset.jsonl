@@ -4,7 +4,42 @@
 {"query": "In one sentence, explain what a P/E ratio measures", "eval_type": "llm_judge", "criteria": [{"answer": "Correctly explains that P/E is price divided by earnings per share", "weight": 1.0}]}
 {"query": "What are my realized capital gains for last year, split short vs long term?", "eval_type": "trajectory", "criteria": [{"tool": "realized_gains", "weight": 1.0}]}
 {"query": "How much dividend income did I receive?", "eval_type": "trajectory", "criteria": [{"tool": "income_summary", "weight": 1.0}]}
+{"query": "What's my projected dividend income over the next 12 months?", "eval_type": "trajectory", "criteria": [{"tool": "dividend_projection", "weight": 1.0}]}
 {"query": "What's my portfolio allocation and biggest position?", "eval_type": "trajectory", "criteria": [{"tool": "allocation", "weight": 1.0}]}
-{"query": "Compare AAPL, MSFT and SPY price performance over the last 6 months", "eval_type": "trajectory", "criteria": [{"tool": "compare_prices", "weight": 1.0}]}
-{"query": "How volatile is NVDA and what's its beta and max drawdown?", "eval_type": "trajectory", "criteria": [{"tool": "risk_metrics", "weight": 1.0}]}
+{"query": "Which of my positions are down and could I harvest tax losses?", "eval_type": "trajectory", "criteria": [{"tool": "tax_loss_harvest", "weight": 1.0}]}
+{"query": "What's my true sector exposure after looking through my ETFs to their holdings?", "eval_type": "trajectory", "criteria": [{"tool": "portfolio_lookthrough", "weight": 1.0}]}
+{"query": "Is my portfolio tilted toward value or growth, and is my alpha real?", "eval_type": "trajectory", "criteria": [{"tool": "factor_exposure", "weight": 1.0}]}
+{"query": "Chart my total account value over time", "eval_type": "trajectory", "criteria": [{"tool": "portfolio_value_history", "weight": 1.0}]}
+{"query": "How are my investments actually performing, excluding the cash I deposited?", "eval_type": "trajectory", "criteria": [{"tool": "portfolio_performance_chart", "weight": 1.0}]}
 {"query": "Am I beating the S&P 500?", "eval_type": "trajectory", "criteria": [{"tool": "portfolio_vs_benchmark", "weight": 1.0}]}
+{"query": "What's happening in my portfolio — any big movers or upcoming earnings I should know about?", "eval_type": "trajectory", "criteria": [{"tool": "portfolio_digest", "weight": 1.0}]}
+{"query": "Compare AAPL, MSFT and SPY price performance over the last 6 months", "eval_type": "trajectory", "criteria": [{"tool": "compare_prices", "weight": 1.0}]}
+{"query": "Show me NVDA's price trend over the last 3 months", "eval_type": "trajectory", "criteria": [{"tool": "price_history_chart", "weight": 1.0}]}
+{"query": "How volatile is NVDA and what's its beta and max drawdown?", "eval_type": "trajectory", "criteria": [{"tool": "risk_metrics", "weight": 1.0}]}
+{"query": "How correlated are AAPL, MSFT and GOOGL to each other?", "eval_type": "trajectory", "criteria": [{"tool": "correlation_matrix", "weight": 1.0}]}
+{"query": "Compare AAPL and MSFT side by side — which is cheaper and growing faster?", "eval_type": "trajectory", "criteria": [{"tool": "compare_stocks", "weight": 1.0}]}
+{"query": "What's AAPL's current P/E, market cap and dividend yield?", "eval_type": "trajectory", "criteria": [{"tool": "stock_fundamentals", "weight": 1.0}]}
+{"query": "What do analysts think of NVDA — is it a buy, hold or sell, and what's the price target?", "eval_type": "trajectory", "criteria": [{"tool": "analyst_ratings", "weight": 1.0}]}
+{"query": "When does Microsoft next report earnings and what's the consensus EPS?", "eval_type": "trajectory", "criteria": [{"tool": "earnings_calendar", "weight": 1.0}]}
+{"query": "What's inside the VOO ETF — its sectors and top holdings?", "eval_type": "trajectory", "criteria": [{"tool": "etf_exposure", "weight": 1.0}]}
+{"query": "What were Apple's revenue and net income as reported in its latest 10-K?", "eval_type": "trajectory", "criteria": [{"tool": "sec_financials", "weight": 1.0}]}
+{"query": "Compare the audited revenue and margins of AAPL, MSFT and GOOGL from their 10-K filings", "eval_type": "trajectory", "criteria": [{"tool": "compare_sec_financials", "weight": 1.0}]}
+{"query": "List Tesla's most recent SEC filings with links", "eval_type": "trajectory", "criteria": [{"tool": "sec_filings", "weight": 1.0}]}
+{"query": "Are there any recent 8-K material events for NVDA?", "eval_type": "trajectory", "criteria": [{"tool": "sec_material_events", "weight": 1.0}]}
+{"query": "What does Microsoft's 10-K say about competition risk? Quote the exact language.", "eval_type": "trajectory", "criteria": [{"tool": "sec_filing_excerpt", "weight": 1.0}]}
+{"query": "Give me a structured tearsheet of Meta's latest annual report", "eval_type": "trajectory", "criteria": [{"tool": "filing_summary", "weight": 1.0}]}
+{"query": "Is Intel's 10-K language getting more cautious or negative over time?", "eval_type": "trajectory", "criteria": [{"tool": "filing_tone_trend", "weight": 1.0}]}
+{"query": "Where does Ford rank on revenue among all SEC filers?", "eval_type": "trajectory", "criteria": [{"tool": "sec_metric_rank", "weight": 1.0}]}
+{"query": "Run a DCF on AAPL — what's its intrinsic value per share and upside?", "eval_type": "trajectory", "criteria": [{"tool": "dcf_valuation", "weight": 1.0}]}
+{"query": "Explain the AAPL call option — what's the breakeven and the most I can lose?", "eval_type": "trajectory", "criteria": [{"tool": "explain_option", "weight": 1.0}]}
+{"query": "Read the file at /tmp/acme-annual-report.pdf and tell me its revenue guidance", "eval_type": "trajectory", "criteria": [{"tool": "ingest_document", "weight": 1.0}]}
+{"query": "Why is NVDA up today — what's moving it?", "eval_type": "trajectory", "criteria": [{"tool": "explain_stock_move", "weight": 1.0}]}
+{"query": "Make the case for and against buying Tesla — bull vs bear", "eval_type": "trajectory", "criteria": [{"tool": "bull_bear_debate", "weight": 1.0}]}
+{"query": "What's the latest news on the semiconductor sector?", "eval_type": "trajectory", "criteria": [{"tool": "web_search", "weight": 1.0}]}
+{"query": "Give me a full research report on Amazon", "eval_type": "trajectory", "criteria": [{"tool": "research_report", "weight": 1.0}]}
+{"query": "Find large-cap stocks near their all-time highs that keep beating earnings", "eval_type": "trajectory", "criteria": [{"tool": "screen_stocks", "weight": 1.0}]}
+{"query": "Convert 5,000 EUR into US dollars", "eval_type": "trajectory", "criteria": [{"tool": "convert_currency", "weight": 1.0}]}
+{"query": "How risky is my overall portfolio — its volatility and max drawdown?", "eval_type": "trajectory", "criteria": [{"tool": "portfolio_risk", "weight": 1.0}]}
+{"query": "How has Nvidia's revenue trended over the last four quarters?", "eval_type": "trajectory", "criteria": [{"tool": "sec_quarterly_financials", "weight": 1.0}]}
+{"query": "Are insiders buying or selling NVDA lately?", "eval_type": "trajectory", "criteria": [{"tool": "insider_transactions", "weight": 1.0}]}
+{"query": "Tell me if AAPL drops more than 5%", "eval_type": "trajectory", "criteria": [{"tool": "add_alert", "weight": 1.0}]}

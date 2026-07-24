@@ -7,6 +7,11 @@ Prices are USD per 1M tokens (input, output); override either with
 ``OPENAI_INPUT_COST_PER_1M`` / ``OPENAI_OUTPUT_COST_PER_1M`` for a custom
 gateway. Unknown models return ``None`` (no cost shown) rather than guessing.
 
+To update prices or add models WITHOUT editing this code, drop a
+``pricing.json`` data file (``FINANCIAL_RESEARCH_PRICING_FILE``, default
+``~/.financial-research-assistant/pricing.json``) — see ``_load_overrides``; its
+entries merge over the built-in tables. The per-model env vars above still win.
+
 Cached input tokens are billed at a fraction of the input rate
 (``CACHE_DISCOUNT``); ``tokens_in`` already includes the cached tokens, so
 ``cost_usd`` discounts the cached portion rather than adding to it.
@@ -14,7 +19,64 @@ Cached input tokens are billed at a fraction of the input rate
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
+
+
+def _pricing_file() -> Path:
+    """Location of the optional pricing/context override file. Defaults to
+    ``~/.financial-research-assistant/pricing.json``; override with
+    ``FINANCIAL_RESEARCH_PRICING_FILE``."""
+    raw = (os.environ.get("FINANCIAL_RESEARCH_PRICING_FILE") or "").strip()
+    if raw:
+        return Path(os.path.expandvars(raw)).expanduser()
+    return Path.home() / ".financial-research-assistant" / "pricing.json"
+
+
+def _parse_pricing(raw: dict) -> dict[str, tuple[float, float]]:
+    out: dict[str, tuple[float, float]] = {}
+    for k, v in (raw or {}).items():
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            try:
+                out[str(k)] = (float(v[0]), float(v[1]))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _parse_context(raw: dict) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for k, v in (raw or {}).items():
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out[str(k)] = n
+    return out
+
+
+def _load_overrides() -> tuple[dict[str, tuple[float, float]], dict[str, int]]:
+    """User pricing/context overrides from the data file, so prices can be updated
+    or a new model added WITHOUT editing this code. Returns ``(pricing, context)``
+    keyed by model prefix (same prefix-match semantics as the built-in tables);
+    file entries merge OVER the built-ins. Read fresh each call (the file is tiny
+    and lookups aren't hot) so an edit takes effect without a restart. Shape::
+
+        {"pricing": {"my-model": [1.0, 3.0]}, "context": {"my-model": 200000}}
+
+    An absent or malformed file yields no overrides (built-in behavior)."""
+    p = _pricing_file()
+    try:
+        if not p.exists():
+            return {}, {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, {}
+    if not isinstance(data, dict):
+        return {}, {}
+    return _parse_pricing(data.get("pricing")), _parse_context(data.get("context"))
 
 # Known context windows (prefix match); everything else falls back to 128k.
 # Non-OpenAI families are covered too so MODEL_PROVIDER=anthropic/google shows a
@@ -67,11 +129,14 @@ def context_cap(model: str) -> int:
                 return n
         except ValueError:
             pass
-    # Longest prefix wins, so a specific key ("gemini-2.5") beats a shorter one
-    # regardless of dict order — no accidental mis-match from insertion order.
-    for name in sorted(MODEL_CONTEXT, key=len, reverse=True):
+    # Data-file overrides merge over the built-ins (file wins on a shared prefix),
+    # so a new/updated context window needs no code edit. Longest prefix wins, so a
+    # specific key ("gemini-2.5") beats a shorter one regardless of dict order.
+    _, context_override = _load_overrides()
+    table = {**MODEL_CONTEXT, **context_override}
+    for name in sorted(table, key=len, reverse=True):
         if model.startswith(name):
-            return MODEL_CONTEXT[name]
+            return table[name]
     return 128_000
 
 
@@ -93,9 +158,13 @@ def rates(model: str) -> tuple[float, float] | None:
             return float(ci), float(co)
         except ValueError:
             pass
-    for name in sorted(MODEL_PRICING, key=len, reverse=True):
+    # Data-file overrides merge over the built-ins (file wins on a shared prefix),
+    # so updating a price or adding a model needs no code edit.
+    pricing_override, _ = _load_overrides()
+    table = {**MODEL_PRICING, **pricing_override}
+    for name in sorted(table, key=len, reverse=True):
         if model.startswith(name):
-            return MODEL_PRICING[name]
+            return table[name]
     return None
 
 

@@ -193,6 +193,25 @@ def test_memory_auto_capture_skips_questions(monkeypatch, tmp_path):
     assert any("QQQ" in t for t in texts)
 
 
+def test_memory_auto_capture_skips_action_requests(monkeypatch, tmp_path):
+    """An imperative 'I want a chart / I need a comparison' is a one-off task, not a
+    durable fact — it must NOT be stored (and re-injected into later turns), even
+    though the bare verb 'want'/'need' looks durable. A real goal or preference
+    phrased with the same verb is still captured."""
+    mem = _local_mem(monkeypatch, tmp_path)
+    mem.remember("I want a chart of AAPL", "…") # task → skip
+    mem.remember("I need a comparison of MSFT and GOOG", "…") # task → skip
+    mem.remember("I'd like a DCF valuation of NVDA", "…") # task → skip
+    mem.remember("I want the latest price of TSLA", "…") # task → skip
+    assert mem.all() == []
+    # ...but a genuine goal / preference with the same verb IS durable.
+    mem.remember("I want to retire early", "ok")
+    mem.remember("I need lower-risk holdings", "ok")
+    texts = [e["text"] for e in mem.all()]
+    assert any("retire early" in t for t in texts)
+    assert any("lower-risk" in t for t in texts)
+
+
 def test_memory_tools_gated_by_backend(monkeypatch, tmp_path):
     """The model-facing memory tools are present only when a backend is set."""
     from financial_research_assistant.memory import memory_tools

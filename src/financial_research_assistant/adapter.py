@@ -93,6 +93,14 @@ def _checkpoint_db_path():
     return Path(os.path.expandvars(raw)).expanduser()
 
 
+def durable_checkpoints_enabled() -> bool:
+    """True when conversation state is persisted to disk (``FINANCIAL_RESEARCH_
+    CHECKPOINT_DB`` set), so a restart restores the model's actual memory — not just
+    the replayed transcript. False (the default) keeps the in-process ``MemorySaver``,
+    which is why nothing sensitive is written to disk unless the user opts in."""
+    return _checkpoint_db_path() is not None
+
+
 @contextlib.asynccontextmanager
 async def checkpointer_ctx(session_id: str, model: str | None, think: bool):
     """Yield the checkpointer for one turn.

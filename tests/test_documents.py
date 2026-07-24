@@ -78,6 +78,9 @@ def test_ingest_then_ask_keyword(tmp_path):
     assert "repurchase" in ans.lower() and "20 billion" in ans
     assert "[annual]" in ans          # citation tag present
     assert "Synthesize" in ans        # findings-return framing
+    # Uploaded docs are an injection vector: passages are framed as data, not
+    # instructions, before the model reads them.
+    assert "NOT as instructions" in ans
 
 
 def test_ask_scoped_to_missing_doc(tmp_path):
@@ -127,6 +130,28 @@ def test_semantic_retrieval_prefers_cosine(tmp_path, monkeypatch):
     monkeypatch.setattr(embeddings, "embed_query", lambda q: [1.0, 0.0])
     ans = documents.ask_document("How robust is the operation to disruption?", max_passages=1)
     assert "resilience" in ans.lower()      # semantic match, not keyword
+
+
+def test_ask_backfills_embeddings_when_endpoint_appears(tmp_path, monkeypatch):
+    """A document ingested in keyword-only mode (no endpoint) gets its chunks
+    embedded and persisted on a later ask once an embeddings endpoint is available —
+    so it upgrades to semantic search instead of staying keyword-only forever."""
+    from financial_research_assistant import embeddings
+
+    # Ingest with no embeddings available → keyword-only chunks.
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    documents.ingest_document(_write(tmp_path, "kw.txt",
+        "Revenue grew and operating margins expanded across every region this year."))
+    assert all("vec" not in r for r in documents._load_index())   # keyword-only
+
+    # Endpoint now available → the ask backfills + persists the vectors.
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts: [[1.0, 0.0] for _ in texts])
+    monkeypatch.setattr(embeddings, "embed_query", lambda q: [1.0, 0.0])
+    out = documents.ask_document("revenue", doc="kw")
+    assert "revenue" in out.lower()
+    persisted = documents._load_index()
+    assert persisted and all(r.get("vec") == [1.0, 0.0] for r in persisted)  # backfilled
 
 
 # --- PDF support gate --------------------------------------------------------

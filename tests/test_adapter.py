@@ -283,6 +283,33 @@ def test_context_window_env_override(monkeypatch):
     assert context_cap("gpt-4o") == 128_000               # bad value ignored
 
 
+def test_pricing_data_file_override(monkeypatch, tmp_path):
+    """A pricing.json data file adds/updates model prices and context windows
+    without editing code; the per-model env vars still win over it."""
+    import json as _json
+
+    from financial_research_assistant.pricing import context_cap, rates
+
+    for var in ("OPENAI_CONTEXT_WINDOW", "OPENAI_INPUT_COST_PER_1M", "OPENAI_OUTPUT_COST_PER_1M"):
+        monkeypatch.delenv(var, raising=False)
+    f = tmp_path / "pricing.json"
+    f.write_text(_json.dumps({
+        "pricing": {"my-local-model": [1.5, 4.5], "gpt-4o": [9.9, 9.9]},  # add + override
+        "context": {"my-local-model": 262144},
+    }))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_PRICING_FILE", str(f))
+
+    assert rates("my-local-model-v2") == (1.5, 4.5)     # new model added (prefix match)
+    assert rates("gpt-4o") == (9.9, 9.9)                # file overrides the built-in
+    assert context_cap("my-local-model-v2") == 262144  # new context window from the file
+    assert rates("totally-unknown-xyz") is None         # still None for the truly unknown
+
+    # the per-model env override still wins over the data file
+    monkeypatch.setenv("OPENAI_INPUT_COST_PER_1M", "2.0")
+    monkeypatch.setenv("OPENAI_OUTPUT_COST_PER_1M", "6.0")
+    assert rates("gpt-4o") == (2.0, 6.0)
+
+
 async def test_think_reasoning_event_carries_duration():
     """The think tool's reasoning event is stamped with the step's duration
     (measured like a tool's), so the 💭 panel can show (Xs) like tool panels."""

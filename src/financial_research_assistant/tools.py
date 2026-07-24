@@ -19,6 +19,8 @@ import json
 import os
 import re
 import shlex
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
@@ -117,37 +119,78 @@ def _parse_yahoo_json(text: str) -> list[tuple[str, float]]:
     return rows
 
 
-# Same-process cache: (symbol, range) -> series. Yahoo's keyless endpoint is a
-# single point of failure with no SLA; caching within a run avoids re-fetching
-# the same series across tools (e.g. compare_prices + risk_metrics + benchmark)
-# and cushions transient failures. Cleared when the process exits.
-_PRICE_CACHE: dict[tuple[str, str], list[tuple[str, float]]] = {}
+class PriceDataUnavailable(RuntimeError):
+    """The price source (Yahoo) couldn't be reached after retries — distinct from
+    a valid response that simply has no data for a symbol (an unknown or delisted
+    ticker). ``strict`` callers render 'the data source is down, try again' for
+    this, while an empty result still means 'check the ticker' — so a transient
+    outage is never misreported as a bad symbol."""
 
 
-def _fetch_daily(symbol: str, days: int, timeout: float = 15.0) -> list[tuple[str, float]]:
+# Same-process cache: (symbol, range) -> (series, fetched_at). Yahoo's keyless
+# endpoint is a single point of failure with no SLA; caching within a run avoids
+# re-fetching the same series across tools (e.g. compare_prices + risk_metrics +
+# benchmark) and cushions transient failures. Entries expire after _price_ttl()
+# so a long-lived session never serves yesterday's closes as "latest".
+_PRICE_CACHE: dict[tuple[str, str], tuple[list[tuple[str, float]], float]] = {}
+
+
+def _price_ttl() -> float:
+    """Seconds a cached price series stays fresh (default 900 = 15 min). Override
+    with ``FINANCIAL_RESEARCH_PRICE_TTL``; a value <= 0 disables caching so every
+    call re-fetches."""
+    try:
+        return float(os.environ.get("FINANCIAL_RESEARCH_PRICE_TTL") or 900.0)
+    except ValueError:
+        return 900.0
+
+
+def _fetch_daily(
+    symbol: str, days: int, timeout: float = 15.0, *, strict: bool = False
+) -> list[tuple[str, float]]:
     """Fetch daily ``(date, close)`` history for ``symbol`` from Yahoo Finance,
-    with a same-process cache and one retry on transient failure."""
+    with a same-process TTL cache and one retry on transient failure.
+
+    Returns ``[]`` when the source responds but has no data for the symbol (an
+    unknown or delisted ticker — a definitive answer). On a transport/parse
+    failure after both attempts: ``strict=True`` raises ``PriceDataUnavailable``
+    so the caller can tell an outage apart from a bad ticker; ``strict=False``
+    (the default, used by the many best-effort callers) returns ``[]`` as before."""
     sym = symbol.strip().upper()
     rng = _yahoo_range(days)
     key = (sym, rng)
-    if key in _PRICE_CACHE:
-        return _PRICE_CACHE[key]
+    ttl = _price_ttl()
+    cached = _PRICE_CACHE.get(key)
+    if cached is not None and ttl > 0 and (time.time() - cached[1]) < ttl:
+        return cached[0]
     url = _YF_URL.format(sym=urllib.parse.quote(sym), rng=rng)
     req = urllib.request.Request(url, headers={"User-Agent": _YF_UA})
     last_exc: Exception | None = None
-    for attempt in range(2):  # one retry — Yahoo occasionally 5xx/timeouts
+    for _ in range(2):  # one retry — Yahoo occasionally 5xx/timeouts
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
                 text = resp.read().decode("utf-8", "replace")
             series = _parse_yahoo_json(text)
-            if series:
-                _PRICE_CACHE[key] = series
-            return series
-        except Exception as e:  # noqa: BLE001 — retry once, then give up gracefully
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Definitive "no such symbol" — a valid answer, not an outage; the
+                # caller's "check the ticker" message is the right one here.
+                return []
             last_exc = e
-    # Both attempts failed: return empty so callers show their "no data" message
-    # rather than raising into the turn. (last_exc kept for debugging clarity.)
-    _ = last_exc
+            continue
+        except Exception as e:  # noqa: BLE001 — retry once, then decide below
+            last_exc = e
+            continue
+        if series and ttl > 0:
+            _PRICE_CACHE[key] = (series, time.time())
+        return series
+    # Both attempts hit a transport/parse failure (not a clean 404). Signal it
+    # distinctly for strict callers; stay backward-compatible (empty) otherwise.
+    if strict:
+        raise PriceDataUnavailable(
+            f"Couldn't reach the price data source for {sym!r} "
+            f"({type(last_exc).__name__ if last_exc else 'unknown error'})."
+        )
     return []
 
 
@@ -178,7 +221,14 @@ def price_history_chart(symbol: str, days: int = 90) -> str:
     real-time quotes. Use US tickers like AAPL or MSFT (Yahoo suffixes like
     ``VOD.L`` or ``SAP.DE`` for non-US). Use this to visualize a price trend.
     """
-    series = _fetch_daily(symbol, days)
+    try:
+        series = _fetch_daily(symbol, days, strict=True)
+    except PriceDataUnavailable:
+        return (
+            f"The price data source (Yahoo Finance) is temporarily unreachable — "
+            f"this is a data-source issue, not a problem with {symbol.upper()!r}. "
+            f"Please try again in a moment."
+        )
     if not series:
         return (
             f"No historical data found for {symbol!r}. Check the ticker — use "
@@ -721,7 +771,7 @@ def income_summary(year: int = 0, account: str = "") -> str:
 
 def allocation(account: str = "") -> str:
     """Portfolio allocation & concentration from the newest imported statement's
-    open positions: each position's weight as a %% of the book, the largest
+    open positions: each position's weight as a % of the book, the largest
     position, top-5 concentration, and a breakdown by asset category. Use for
     'allocation / concentration / diversification / biggest position / how
     exposed am I' questions. ``account`` scopes to one account."""
@@ -774,21 +824,48 @@ def allocation(account: str = "") -> str:
 BASE_CURRENCY = os.environ.get("BASE_CURRENCY", "USD").upper()
 
 
-def _fx_rate(currency: str, on_date: str | None = None) -> float | None:
-    """Units of the base currency (USD) per 1 unit of ``currency``, from Yahoo's
-    keyless FX series (e.g. ``EURUSD=X``). ``on_date`` (YYYY-MM-DD) uses the rate
-    on/just-before that date; otherwise the latest. Returns 1.0 for the base
-    currency, or None if the rate can't be fetched."""
+def _fx_series_days(on_date: str | None) -> int:
+    """How many days of FX history to fetch so ``on_date`` is actually covered.
+    Latest-rate lookups need only a short window; a historical date needs a window
+    that reaches back to it — sizing it from the gap (plus a buffer) fixes the old
+    fixed-400-day window silently falling short for dates older than ~13 months."""
+    if not on_date:
+        return 7
+    try:
+        gap = (date.today() - date.fromisoformat(on_date)).days
+    except ValueError:
+        return 400
+    return max(30, gap + 10)
+
+
+def _fx_lookup(currency: str, on_date: str | None = None) -> tuple[float, str] | None:
+    """``(rate, rate_date)`` — units of the base currency (USD) per 1 unit of
+    ``currency``, and the actual series date the rate came from — or None if it
+    can't be fetched. ``on_date`` (YYYY-MM-DD) uses the rate on/just-before that
+    day; otherwise the latest. ``rate_date`` lets callers report the true date
+    used rather than assuming it equals the requested one."""
     c = (currency or BASE_CURRENCY).strip().upper()
     if c in (BASE_CURRENCY, "", "?"):
-        return 1.0
-    series = _fetch_daily(f"{c}{BASE_CURRENCY}=X", 400 if on_date else 7)
+        return 1.0, on_date or ""
+    # Best-effort: an FX outage yields None (income/allocation note "missing FX"),
+    # never a raised error mid-turn.
+    series = _fetch_daily(f"{c}{BASE_CURRENCY}=X", _fx_series_days(on_date))
     if not series:
         return None
     if on_date:
-        prior = [v for d, v in series if d <= on_date]
-        return prior[-1] if prior else series[0][1]
-    return series[-1][1]
+        prior = [(d, v) for d, v in series if d <= on_date]
+        rate_date, rate = prior[-1] if prior else series[0]
+        return rate, rate_date
+    rate_date, rate = series[-1]
+    return rate, rate_date
+
+
+def _fx_rate(currency: str, on_date: str | None = None) -> float | None:
+    """Units of the base currency (USD) per 1 unit of ``currency`` (rate only;
+    ``_fx_lookup`` also returns the rate date). Returns 1.0 for the base currency,
+    or None if the rate can't be fetched."""
+    res = _fx_lookup(currency, on_date)
+    return None if res is None else res[0]
 
 
 def convert_currency(amount: float, from_currency: str, on_date: str = "") -> str:
@@ -796,11 +873,24 @@ def convert_currency(amount: float, from_currency: str, on_date: str = "") -> st
     using market FX rates (Yahoo, keyless). ``on_date`` (YYYY-MM-DD) uses the
     historical rate for that day; empty uses the latest. Use for 'convert / in
     USD / what's X EUR worth' questions."""
-    rate = _fx_rate(from_currency, on_date or None)
     src = (from_currency or "").upper()
-    if rate is None:
-        return f"Couldn't fetch an FX rate for {src}→{BASE_CURRENCY}. Check the currency code."
-    when = f" (rate on {on_date})" if on_date else " (latest rate)"
+    res = _fx_lookup(from_currency, on_date or None)
+    if res is None:
+        return (
+            f"Couldn't fetch an FX rate for {src}→{BASE_CURRENCY} right now — the "
+            f"rate source may be temporarily unavailable, or {src!r} may not be a "
+            f"recognized currency code."
+        )
+    rate, rate_date = res
+    # Report the date the rate actually came from. When a requested historical date
+    # falls on a weekend/holiday (or predates the series) the true date differs, so
+    # naming it avoids implying a rate that doesn't exist for that exact day.
+    if rate_date and on_date and rate_date != on_date:
+        when = f" (rate as of {rate_date}, the closest date on/before {on_date})"
+    elif rate_date and on_date:
+        when = f" (rate on {rate_date})"
+    else:
+        when = " (latest rate)"
     return (f"{amount:,.2f} {src} ≈ {amount * rate:,.2f} {BASE_CURRENCY} "
             f"at {rate:.4f}{when}.")
 
@@ -824,16 +914,65 @@ def _render_multi_series(title: str, series: list[tuple[str, list[float]]],
     return _ANSI_RE.sub("", plt.build())
 
 
-def _aligned_closes(symbols: list[str], days: int) -> tuple[list[str], dict[str, list[float]]]:
-    """Fetch daily closes for each symbol and align them on their common dates.
-    Symbols with no data are dropped (absent from the returned dict) rather than
-    emptying the whole intersection. Returns ``(dates, {symbol: closes})`` —
-    empty if fewer than 2 common dates across the symbols that had data."""
-    fetched = {s: dict(_fetch_daily(s, days)) for s in symbols}
+# Yahoo fetches are network-bound (I/O-wait dominated), so fetching several
+# symbols concurrently in a small thread pool cuts multi-ticker latency to ~the
+# slowest single fetch instead of the sum — the same pattern the screener uses.
+_FETCH_WORKERS = 8
+
+
+def _fetch_many(
+    symbols: list[str], days: int, *, strict: bool = False
+) -> tuple[dict[str, list[tuple[str, float]]], bool]:
+    """Fetch daily series for several symbols concurrently. Returns
+    ``({symbol: series}, unreachable)`` — a failed symbol maps to ``[]``, and
+    ``unreachable`` is True when ``strict`` and at least one symbol hit a transport
+    failure (so the caller can decide whether a full outage should raise). Dedupes
+    symbols; skips the pool for the single-symbol case. ``_fetch_daily`` is
+    thread-safe (per-call urllib request; atomic dict-cache writes)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    syms = list(dict.fromkeys(symbols))
+    results: dict[str, list[tuple[str, float]]] = {}
+    unreachable = False
+
+    def _one(s: str):
+        try:
+            return s, _fetch_daily(s, days, strict=strict), False
+        except PriceDataUnavailable:
+            return s, [], True
+
+    if not syms:
+        return results, unreachable
+    if len(syms) == 1:
+        s, series, failed = _one(syms[0])
+        return {s: series}, failed
+    with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(syms))) as pool:
+        for s, series, failed in pool.map(_one, syms):
+            results[s] = series
+            unreachable = unreachable or failed
+    return results, unreachable
+
+
+def _aligned_closes(
+    symbols: list[str], days: int, *, strict: bool = False
+) -> tuple[list[str], dict[str, list[float]]]:
+    """Fetch daily closes for each symbol (concurrently) and align them on their
+    common dates. Symbols with no data are dropped (absent from the returned dict)
+    rather than emptying the whole intersection. Returns ``(dates, {symbol:
+    closes})`` — empty if fewer than 2 common dates across the symbols that had data.
+
+    ``strict=True`` propagates ``PriceDataUnavailable`` when the source was
+    unreachable AND nothing usable came back — so a full outage surfaces as an
+    outage rather than as a set of 'bad tickers'. Partial data (some symbols
+    fetched) is still returned; best-effort callers leave ``strict=False``."""
+    fetched_raw, unreachable = _fetch_many(symbols, days, strict=strict)
+    fetched = {s: dict(series) for s, series in fetched_raw.items()}
     have = {s: d for s, d in fetched.items() if d}
     common = set.intersection(*[set(d) for d in have.values()]) if have else set()
     dates = sorted(common)[-max(2, min(days, len(common) or 2)):] if common else []
     if len(dates) < 2:
+        if unreachable and not have:
+            raise PriceDataUnavailable("Couldn't reach the price data source.")
         return [], {}
     return dates, {s: [have[s][d] for d in dates] for s in have}
 
@@ -848,7 +987,13 @@ def compare_prices(symbols: str, days: int = 180) -> str:
     syms = [s.strip().upper() for s in symbols.replace(",", " ").split() if s.strip()][:6]
     if len(syms) < 1:
         return "Give one or more tickers, e.g. compare_prices('AAPL, MSFT, SPY')."
-    dates, closes = _aligned_closes(syms, days)
+    try:
+        dates, closes = _aligned_closes(syms, days, strict=True)
+    except PriceDataUnavailable:
+        return (
+            f"The price data source (Yahoo Finance) is temporarily unreachable — "
+            f"couldn't compare {', '.join(syms)} right now. Please try again in a moment."
+        )
     if not dates:
         return (
             f"Not enough overlapping price history for {', '.join(syms)}. Check the "
@@ -891,7 +1036,14 @@ def portfolio_vs_benchmark(benchmark: str = "SPY", account: str = "") -> str:
     start, end = pts[0]["date"], pts[-1]["date"]
     port_ret = pts[-1]["index"] - 100.0
     span_days = (date.fromisoformat(end) - date.fromisoformat(start)).days
-    bench = _fetch_daily(benchmark, max(5, span_days + 5))
+    try:
+        bench = _fetch_daily(benchmark, max(5, span_days + 5), strict=True)
+    except PriceDataUnavailable:
+        return (
+            f"Portfolio return over {start} → {end} was {port_ret:+.2f}%, but the "
+            f"price data source is temporarily unreachable, so couldn't fetch "
+            f"{benchmark.upper()} to compare. Please try again shortly."
+        )
     bench = [(d, c) for d, c in bench if start <= d <= end]
     if len(bench) < 2:
         return (
@@ -916,11 +1068,18 @@ def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY") -> str:
     max drawdown, Sharpe ratio (risk-free 0), and beta vs a benchmark. Use for
     'how risky / volatility / drawdown / Sharpe / beta' questions about a ticker.
     ``days`` is the lookback; ``benchmark`` the beta reference (default SPY).
-    (Portfolio-level risk needs a daily NAV series, which imported statements are
-    too sparse to provide — this is per-ticker.)"""
+    This is PER-TICKER; for the whole portfolio's risk use `portfolio_risk`, which
+    value-weights your current holdings into one synthetic return series."""
     import statistics as _stats
 
-    series = _fetch_daily(symbol, days)
+    try:
+        series = _fetch_daily(symbol, days, strict=True)
+    except PriceDataUnavailable:
+        return (
+            f"The price data source (Yahoo Finance) is temporarily unreachable — "
+            f"couldn't compute risk metrics for {symbol.upper()} right now. Please "
+            f"try again shortly."
+        )
     if len(series) < 20:
         return (
             f"Not enough price history for {symbol.upper()} to compute risk "
@@ -999,6 +1158,7 @@ from .edgar import EDGAR_TOOLS  # noqa: E402
 from .valuation import VALUATION_TOOLS  # noqa: E402
 from .options import OPTIONS_TOOLS  # noqa: E402
 from .documents import DOCUMENT_TOOLS  # noqa: E402
+from .alerts import ALERT_TOOLS  # noqa: E402
 
 TOOLS += FUNDAMENTALS_TOOLS
 TOOLS += MONITOR_TOOLS
@@ -1011,6 +1171,7 @@ TOOLS += EDGAR_TOOLS
 TOOLS += VALUATION_TOOLS
 TOOLS += OPTIONS_TOOLS
 TOOLS += DOCUMENT_TOOLS
+TOOLS += ALERT_TOOLS
 
 
 # --- IBKR MCP tools (read-only) --------------------------------------------

@@ -105,6 +105,112 @@ def test_sec_financials_single_concept_and_bad_tag(monkeypatch):
     assert "No us-gaap concept" in bad
 
 
+_QFACTS = {"entityName": "Apple Inc.", "facts": {"us-gaap": {
+    "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+        # 10-Q single quarters (~90 days) — newest to oldest, 5 for a YoY compare
+        {"fp": "Q2", "form": "10-Q", "start": "2025-01-01", "end": "2025-03-31", "val": 100_000_000_000, "filed": "2025-05-01"},
+        {"fp": "Q1", "form": "10-Q", "start": "2024-10-01", "end": "2024-12-31", "val": 95_000_000_000, "filed": "2025-02-01"},
+        {"fp": "Q4", "form": "10-Q", "start": "2024-07-01", "end": "2024-09-30", "val": 90_000_000_000, "filed": "2024-11-01"},
+        {"fp": "Q3", "form": "10-Q", "start": "2024-04-01", "end": "2024-06-30", "val": 88_000_000_000, "filed": "2024-08-01"},
+        {"fp": "Q2", "form": "10-Q", "start": "2024-01-01", "end": "2024-03-31", "val": 80_000_000_000, "filed": "2024-05-01"},
+        # a 6-month YTD span in a 10-Q (~181 days) must be EXCLUDED (not a quarter)
+        {"fp": "H1", "form": "10-Q", "start": "2025-01-01", "end": "2025-06-30", "val": 210_000_000_000, "filed": "2025-08-01"},
+        # an annual 10-K row must be EXCLUDED from the quarterly series
+        {"fp": "FY", "form": "10-K", "start": "2024-01-01", "end": "2024-12-31", "val": 383_000_000_000, "filed": "2025-02-01"},
+    ]}},
+    "GrossProfit": {"units": {"USD": [
+        {"fp": "Q2", "form": "10-Q", "start": "2025-01-01", "end": "2025-03-31", "val": 46_000_000_000, "filed": "2025-05-01"},
+    ]}},
+    "NetIncomeLoss": {"units": {"USD": [
+        {"fp": "Q2", "form": "10-Q", "start": "2025-01-01", "end": "2025-03-31", "val": 24_000_000_000, "filed": "2025-05-01"},
+    ]}},
+    "EarningsPerShareDiluted": {"units": {"USD/shares": [
+        {"fp": "Q2", "form": "10-Q", "start": "2025-01-01", "end": "2025-03-31", "val": 1.55, "filed": "2025-05-01"},
+    ]}},
+}}}
+
+
+def test_sec_quarterly_financials_summary(monkeypatch):
+    """The quarterly view selects only 10-Q single quarters (excluding YTD spans and
+    the annual 10-K), labels columns by period-end date, and computes per-quarter
+    margins plus revenue QoQ and YoY growth."""
+    _with_tickers(monkeypatch, {"companyfacts/CIK0000320193": _QFACTS})
+    out = edgar.sec_quarterly_financials("AAPL")
+    assert "quarterly" in out.lower()
+    assert "2025-03-31" in out and "2024-03-31" in out    # period-end column labels
+    assert "100.00B" in out and "1.55" in out             # newest revenue + EPS
+    assert "gross 46.0%" in out and "net 24.0%" in out    # 46/100, 24/100
+    assert "revenue QoQ 2024-12-31→2025-03-31: +5.3%" in out   # (100-95)/95
+    assert "revenue YoY 2024-03-31→2025-03-31: +25.0%" in out  # (100-80)/80
+    assert "210.00B" not in out                           # 6-month YTD span excluded
+    assert "383.00B" not in out                           # annual 10-K excluded
+
+
+def test_sec_quarterly_financials_single_concept(monkeypatch):
+    _with_tickers(monkeypatch, {"companyfacts/CIK0000320193": _QFACTS})
+    out = edgar.sec_quarterly_financials("AAPL", concept="RevenueFromContractWithCustomerExcludingAssessedTax")
+    assert "quarter ended 2025-03-31" in out and "100.00B" in out
+    assert "210.00B" not in out                           # YTD span still excluded
+    assert "No SEC CIK" in edgar.sec_quarterly_financials("ZZZZ")   # unknown ticker
+
+
+def _form4_xml(owner, rel_xml, txns_xml):
+    return (f'<?xml version="1.0"?><ownershipDocument>'
+            f'<reportingOwner><reportingOwnerId><rptOwnerName>{owner}</rptOwnerName>'
+            f'</reportingOwnerId><reportingOwnerRelationship>{rel_xml}'
+            f'</reportingOwnerRelationship></reportingOwner>'
+            f'<nonDerivativeTable>{txns_xml}</nonDerivativeTable></ownershipDocument>')
+
+
+def _txn(date, code, shares, ad, price=None):
+    px = f'<transactionPricePerShare><value>{price}</value></transactionPricePerShare>' if price else ''
+    return (f'<nonDerivativeTransaction><transactionDate><value>{date}</value></transactionDate>'
+            f'<transactionCoding><transactionCode>{code}</transactionCode></transactionCoding>'
+            f'<transactionAmounts><transactionShares><value>{shares}</value></transactionShares>'
+            f'{px}<transactionAcquiredDisposedCode><value>{ad}</value>'
+            f'</transactionAcquiredDisposedCode></transactionAmounts></nonDerivativeTransaction>')
+
+
+def test_insider_transactions_summarizes_open_market_vs_routine(monkeypatch):
+    """Form 4 parsing separates open-market buys (P) and sales (S) — the conviction
+    signals — from routine grants, computes the net, and lists recent transactions
+    with each insider's role."""
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["4", "4"],
+        "filingDate": ["2025-04-30", "2025-04-15"],
+        "accessionNumber": ["0000320193-25-000201", "0000320193-25-000200"],
+        "primaryDocument": ["form4a.xml", "form4b.xml"],
+        "primaryDocDescription": ["", ""], "items": ["", ""],
+    }}}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs})
+    xml_a = _form4_xml("Cook Timothy D", "<isOfficer>1</isOfficer><officerTitle>CEO</officerTitle>",
+                       _txn("2025-04-30", "S", 50000, "D", "170.00"))
+    xml_b = _form4_xml("Levinson Arthur D", "<isDirector>1</isDirector>",
+                       _txn("2025-04-15", "P", 5000, "A", "165.00") + _txn("2025-04-10", "A", 1000, "A"))
+    monkeypatch.setattr(edgar, "_fetch_text",
+                        lambda url, **kw: xml_a if "form4a" in url else xml_b)
+
+    out = edgar.insider_transactions("AAPL")
+    assert "INSIDER TRANSACTIONS" in out and "AAPL" in out
+    assert "1 buy(s) 5,000 sh" in out and "1 sale(s) 50,000 sh" in out
+    assert "net -45,000 sh (net selling)" in out
+    assert "1 routine transaction" in out                       # the grant (code A)
+    assert "Cook Timothy D (CEO)" in out and "open-market sale" in out
+    assert "Levinson Arthur D (Director)" in out and "open-market buy" in out
+    assert "8.50M" in out                                       # 50000 * 170
+
+
+def test_insider_transactions_no_filings_and_unknown(monkeypatch):
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["10-K"], "filingDate": ["2025-11-01"],
+        "accessionNumber": ["x"], "primaryDocument": ["a.htm"],
+        "primaryDocDescription": [""], "items": [""],
+    }}}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs})
+    assert "No recent Form 4" in edgar.insider_transactions("AAPL")   # none present
+    assert "No SEC CIK" in edgar.insider_transactions("ZZZZ")         # unknown ticker
+
+
 def test_sec_filing_search_returns_cited_hits(monkeypatch):
     fts = {"hits": {"total": {"value": 42}, "hits": [
         {"_id": "0000320193-24-000123:aapl-20240928.htm", "_source": {
@@ -179,6 +285,9 @@ def test_sec_filing_excerpt_extracts_matching_passages(monkeypatch):
     assert "10-K filed 2025-11-01" in out          # picked the latest 10-K, not the 10-Q
     assert "concentrated supply chain" in out       # the matching passage text
     assert "aapl-10k.htm" in out                     # source filing link
+    # Filing text is third-party content: the model is reminded not to obey any
+    # instructions embedded in it (indirect prompt injection).
+    assert "NOT instructions" in out
 
     assert "No passage" in edgar.sec_filing_excerpt("AAPL", "zzznonexistentterm", form_type="10-K")
     assert "topic/phrase" in edgar.sec_filing_excerpt("AAPL", "")   # empty query

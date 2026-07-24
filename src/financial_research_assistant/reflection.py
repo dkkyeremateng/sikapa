@@ -85,10 +85,14 @@ async def _critique_lessons(
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        from .graph import _make_llm
+        from .graph import quick_llm
 
         findings = "\n\n".join(f"## {label}\n{text}" for label, text in sections)
-        llm = _make_llm(model)
+        # Self-critique is a cheap, high-volume, low-reasoning task (distilling a few
+        # terse process notes, not the report itself) — a natural fit for the 'quick'
+        # model tier. Falls back to the primary model when QUICK_MODEL is unset, so
+        # default behavior is unchanged.
+        llm = quick_llm(model)
         resp = await llm.ainvoke([
             SystemMessage(content=CRITIQUE_SYSTEM_PROMPT),
             HumanMessage(

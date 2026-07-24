@@ -31,7 +31,7 @@ def fake_ibkr_tools_session(*tool_names):
 def install_fake_price_fetch(monkeypatch):
     import financial_research_assistant.tools as t
 
-    def fake(sym, days):
+    def fake(sym, days, strict=False):
         base = {"AAPL": 100.0, "MSFT": 50.0, "SPY": 400.0}.get(sym.upper(), 100.0)
         # a gently varying series so vol/drawdown/beta are well-defined
         return [(f"2025-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
@@ -44,7 +44,7 @@ def install_stub_fx(monkeypatch, rates):
     """Stub the Yahoo FX fetch: rates maps currency -> USD-per-unit."""
     import financial_research_assistant.tools as t
 
-    def fake(sym, days):
+    def fake(sym, days, strict=False):
         # sym like "EURUSD=X" -> currency EUR
         ccy = sym.replace("USD=X", "")
         r = rates.get(ccy)

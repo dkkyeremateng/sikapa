@@ -1,6 +1,6 @@
 # Tools Reference
 
-Every agent tool the assistant can call, grouped by area. **51 tools.**
+Every agent tool the assistant can call, grouped by area. **57 tools.**
 
 You don't call these directly — you ask the assistant in plain English and it
 picks the tool(s). Each entry below shows:
@@ -172,10 +172,20 @@ Recent **8-K** filings with the event type decoded from item codes (earnings, M&
 - **Ask:** "Any material events for Nvidia recently?"
 - **Call:** `sec_material_events(symbol="NVDA", limit=10)`
 
+#### `insider_transactions(symbol, limit=15)`
+Recent **insider** activity from Form 4 ownership XML — separates open-market **buys (P)** and **sales (S)**, the conviction signals, from routine grants/exercises/tax-withholding, and reports the net. Buying is the rarer, stronger signal.
+- **Ask:** "Are insiders buying or selling Nvidia?"
+- **Call:** `insider_transactions(symbol="NVDA", limit=15)`
+
 #### `sec_financials(symbol, concept="", years=4)`
 As-reported annual financials from XBRL: revenue, gross/operating/net income, EPS, balance sheet, cash + computed margins & growth. Pass a `concept` (us-gaap tag) for one line's history.
 - **Ask:** "What was Apple's revenue and net margin over the last 4 years, per their 10-K?"
 - **Call:** `sec_financials(symbol="AAPL", years=4)` · one line: `sec_financials(symbol="AAPL", concept="NetIncomeLoss")`
+
+#### `sec_quarterly_financials(symbol, concept="", quarters=8)`
+The **quarterly** (10-Q) companion to `sec_financials` — the same line items across recent quarters (newest first), with per-quarter margins and revenue QoQ + YoY growth. Columns are labeled by period-end date; the fiscal-year-end quarter may be absent (the 10-K reports it as the full year).
+- **Ask:** "How has Nvidia's revenue trended over the last four quarters?"
+- **Call:** `sec_quarterly_financials(symbol="NVDA", quarters=8)`
 
 #### `sec_filing_search(query, symbol="", forms="", limit=5)`
 Full-text search across filings (since 2001) — find the filings that mention a phrase, so a claim is citable.
@@ -297,10 +307,20 @@ Fama-French factor exposure for a ticker (or the whole portfolio when empty): ma
 - **Ask:** "What's my portfolio's value vs growth tilt — is my alpha real?"
 - **Call:** `factor_exposure(five_factor=True)` · one ticker: `factor_exposure(symbol="IWM")`
 
+#### `portfolio_risk(account="", days=365, benchmark="SPY")`
+Whole-**portfolio** risk (the companion to per-ticker `risk_metrics`): value-weights your current holdings into one synthetic daily return series, then reports annualized volatility, max drawdown, Sharpe, and beta. Holdings held constant over the window; reports the covered share of portfolio value.
+- **Ask:** "How risky is my overall portfolio — its volatility and drawdown?"
+- **Call:** `portfolio_risk(days=365, benchmark="SPY")`
+
 #### `portfolio_digest(account="", lookback_days=5, move_threshold=5.0, earnings_within=14, include_news=False)`
-Monitoring digest over your holdings: price movers beyond ±threshold, upcoming earnings/ex-dividends, optionally a headline per mover.
+Monitoring digest over your holdings: any triggered **alert rules** (see below), price movers beyond ±threshold, upcoming earnings/ex-dividends, optionally a headline per mover.
 - **Ask:** "Anything I should know about my portfolio this week?"
 - **Call:** `portfolio_digest(lookback_days=5, move_threshold=5, include_news=True)`
+
+#### `add_alert(symbol, kind, value=0)` · `list_alerts()` · `remove_alert(alert_id)`
+Standing **alert rules** the digest checks each run. `kind`: `drop`/`rise`/`move` (percent move over the lookback), `below`/`above` (a price level), or `earnings` (days out). `symbol="*"` means any holding. Triggered alerts appear at the top of `portfolio_digest` and the `--digest` CLI.
+- **Ask:** "Tell me if AAPL drops more than 5%." / "Alert me if any holding moves 8%." / "Notify me when NVDA reports within a week."
+- **Call:** `add_alert(symbol="AAPL", kind="drop", value=5)` · `add_alert(symbol="*", kind="move", value=8)` · `list_alerts()` · `remove_alert(alert_id="a1")`
 
 ---
 

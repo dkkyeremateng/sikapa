@@ -175,7 +175,7 @@ def test_price_history_chart_no_data_message(monkeypatch):
     """An empty history (unknown ticker) returns a helpful message, not a crash."""
     import financial_research_assistant.tools as tools
 
-    monkeypatch.setattr(tools, "_fetch_daily", lambda symbol, days: [])
+    monkeypatch.setattr(tools, "_fetch_daily", lambda symbol, days, strict=False: [])
     out = tools.price_history_chart("NOPE")
     assert "No historical data" in out and "NOPE" in out
 
@@ -186,7 +186,7 @@ def test_price_history_chart_renders_stats_and_window(monkeypatch):
     import financial_research_assistant.tools as tools
 
     series = [(f"2026-01-{i:02d}", float(100 + i)) for i in range(1, 21)]  # 20 sessions
-    monkeypatch.setattr(tools, "_fetch_daily", lambda symbol, days: series)
+    monkeypatch.setattr(tools, "_fetch_daily", lambda symbol, days, strict=False: series)
     out = tools.price_history_chart("AAPL", days=5)
     assert "AAPL" in out
     assert "change" in out
@@ -659,7 +659,7 @@ def test_compare_prices_drops_ticker_with_no_data(monkeypatch):
     note and the remaining tickers still chart."""
     import financial_research_assistant.tools as t
 
-    def fake(sym, days):
+    def fake(sym, days, strict=False):
         if sym.upper() == "NOPE":
             return []
         return [(f"2025-01-{i + 1:02d}", 100.0 + i) for i in range(20)]
@@ -687,7 +687,7 @@ def test_portfolio_vs_benchmark(monkeypatch, tmp_path):
     s.import_statement(_mini_statement("U1", "January 1, 2024 - December 31, 2024", "10%", 1000))
     s.import_statement(_mini_statement("U1", "January 1, 2025 - December 31, 2025", "20%", 1300))
 
-    def fake(sym, days):
+    def fake(sym, days, strict=False):
         return [("2024-01-01", 100.0), ("2024-07-01", 110.0), ("2025-12-31", 120.0)]
 
     monkeypatch.setattr(t, "_fetch_daily", fake)
@@ -779,6 +779,127 @@ def test_convert_currency_tool(monkeypatch):
     assert "110.00 USD" in out and "1.1000" in out
     assert t.convert_currency(1, "USD").startswith("1.00 USD ≈ 1.00 USD")  # base is identity
     assert "Couldn't fetch" in t.convert_currency(5, "ZZZ")  # no rate
+
+
+def test_fetch_daily_strict_distinguishes_outage_from_bad_ticker(monkeypatch):
+    """strict=True raises PriceDataUnavailable when the source is unreachable (so a
+    caller can say 'try again'), but a 404 (unknown symbol) is still an empty
+    result, not an outage. Non-strict stays backward-compatible (empty on failure)."""
+    import pytest
+    import financial_research_assistant.tools as t
+    t._PRICE_CACHE.clear()
+
+    def always_fail(req, timeout=0):
+        raise OSError("dns down")
+
+    monkeypatch.setattr(t.urllib.request, "urlopen", always_fail)
+    with pytest.raises(t.PriceDataUnavailable):
+        t._fetch_daily("AAPL", 5, strict=True)
+    assert t._fetch_daily("AAPL", 5) == []  # non-strict: empty, no raise
+
+    def not_found(req, timeout=0):
+        raise t.urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(t.urllib.request, "urlopen", not_found)
+    assert t._fetch_daily("NOPE", 5, strict=True) == []  # 404 → empty even in strict
+
+
+def test_fetch_many_dedups_and_flags_unreachable(monkeypatch):
+    """The concurrent multi-symbol fetch dedupes symbols, maps each to its series,
+    and (in strict mode) flags when any symbol hit a transport outage."""
+    import financial_research_assistant.tools as t
+
+    def fake(sym, days, strict=False):
+        if sym == "DOWN":
+            if strict:
+                raise t.PriceDataUnavailable("outage")
+            return []
+        return [("2025-01-01", 10.0), ("2025-01-02", 11.0)]
+
+    monkeypatch.setattr(t, "_fetch_daily", fake)
+    res, unreachable = t._fetch_many(["AAPL", "MSFT", "AAPL"], 5)  # AAPL repeated
+    assert set(res) == {"AAPL", "MSFT"} and res["AAPL"] and not unreachable
+    res2, unreachable2 = t._fetch_many(["AAPL", "DOWN"], 5, strict=True)
+    assert res2["AAPL"] and res2["DOWN"] == [] and unreachable2 is True
+
+
+def test_aligned_closes_strict_raises_on_full_outage(monkeypatch):
+    """When every symbol is unreachable and nothing came back, strict alignment
+    raises the outage rather than returning an empty 'bad tickers' result."""
+    import pytest
+
+    import financial_research_assistant.tools as t
+
+    def down(sym, days, strict=False):
+        if strict:
+            raise t.PriceDataUnavailable("outage")
+        return []
+
+    monkeypatch.setattr(t, "_fetch_daily", down)
+    with pytest.raises(t.PriceDataUnavailable):
+        t._aligned_closes(["AAPL", "MSFT"], 90, strict=True)
+
+
+def test_price_history_chart_reports_outage_not_bad_ticker(monkeypatch):
+    """A data-source outage is reported as such, never misattributed to the ticker
+    — the trust fix so a Yahoo blip doesn't tell users their symbol is wrong."""
+    import financial_research_assistant.tools as t
+
+    def boom(symbol, days, strict=False):
+        if strict:
+            raise t.PriceDataUnavailable("down")
+        return []
+
+    monkeypatch.setattr(t, "_fetch_daily", boom)
+    out = t.price_history_chart("AAPL")
+    assert "unreachable" in out.lower() and "AAPL" in out
+    assert "Check the ticker" not in out
+
+
+def test_price_cache_expires(monkeypatch):
+    """A cached series past its TTL is re-fetched, so a long-lived session never
+    serves stale closes as 'latest'."""
+    import financial_research_assistant.tools as t
+    t._PRICE_CACHE.clear()
+    calls = {"n": 0}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            return b'{"chart":{"result":[{"timestamp":[1704067200],"indicators":{"quote":[{"close":[10.0]}]}}]}}'
+
+    def fake_urlopen(req, timeout=0):
+        calls["n"] += 1
+        return _Resp()
+
+    monkeypatch.setattr(t.urllib.request, "urlopen", fake_urlopen)
+    t._fetch_daily("AAPL", 5)
+    assert calls["n"] == 1
+    t._fetch_daily("AAPL", 5)               # within TTL → served from cache
+    assert calls["n"] == 1
+    # Backdate the cached entry beyond the TTL → the next call must re-fetch.
+    series, _ts = t._PRICE_CACHE[("AAPL", "5d")]
+    t._PRICE_CACHE[("AAPL", "5d")] = (series, t.time.time() - 100_000)
+    t._fetch_daily("AAPL", 5)
+    assert calls["n"] == 2
+
+
+def test_fx_window_sizes_from_date_and_reports_actual_rate_date(monkeypatch):
+    """The FX fetch window reaches back to a requested historical date, and the
+    conversion names the actual series date the rate came from (not the exact
+    requested day, which may be a weekend/holiday or predate the series)."""
+    import financial_research_assistant.tools as t
+    assert t._fx_series_days(None) == 7            # latest → short window
+    assert t._fx_series_days("2020-01-01") > 700   # old date → window reaching it
+
+    def fake(sym, days, strict=False):
+        return [("2025-06-12", 1.20), ("2025-06-13", 1.25)]
+
+    monkeypatch.setattr(t, "_fetch_daily", fake)
+    out = t.convert_currency(100, "EUR", on_date="2025-06-14")  # Sat → closest on/before
+    assert "125.00 USD" in out and "1.2500" in out
+    assert "2025-06-13" in out and "2025-06-14" in out
 
 
 def test_income_summary_tool_adds_usd_total(monkeypatch, tmp_path):

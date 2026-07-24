@@ -44,6 +44,15 @@ def test_subagent_toolset_excludes_dispatch_tools():
     assert "stock_fundamentals" in names and "price_history_chart" in names
 
 
+def test_subagent_prompt_guards_untrusted_content_and_file_paths():
+    """The subagent inherits the untrusted-data rule AND the file-path clause —
+    it holds filesystem tools (import/export/ingest), so a path must come from its
+    task, never from web/tool content it fetches."""
+    prompt = subagents.SUBAGENT_SYSTEM_PROMPT
+    assert "UNTRUSTED DATA" in prompt
+    assert "file path" in prompt.lower() and "never from web or tool content" in prompt
+
+
 # --- single dispatch -------------------------------------------------------
 
 async def test_dispatch_subagent_runs_one_and_returns_findings(monkeypatch):

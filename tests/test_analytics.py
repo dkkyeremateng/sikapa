@@ -512,6 +512,70 @@ def test_correlation_matrix(monkeypatch):
     assert "at least two" in a.correlation_matrix("AAPL")
 
 
+def _risk_series(base: float, n: int = 30) -> list[float]:
+    """A gently trending, oscillating close series so returns have non-zero
+    variance and a real drawdown — deterministic, offline."""
+    return [base * (1 + 0.03 * ((i % 5) - 2) / 100 + 0.002 * i) for i in range(n)]
+
+
+def _two_position_stmt(a_sym="AAPL", a_val=600, b_sym="MSFT", b_val=400) -> str:
+    cols = ("Open Positions,Header,DataDiscriminator,Asset Category,Currency,Symbol,"
+            "Quantity,Mult,Cost Price,Cost Basis,Close Price,Value,Unrealized P/L,Code\n")
+    row = "Open Positions,Data,Summary,Stocks,USD,{s},1,1,{v},{v},{v},{v},0,\n"
+    return cols + row.format(s=a_sym, v=a_val) + row.format(s=b_sym, v=b_val)
+
+
+def test_portfolio_risk_computes_metrics(monkeypatch, tmp_path):
+    """portfolio_risk value-weights the current holdings into one return series and
+    reports volatility, drawdown, Sharpe, and beta vs the benchmark."""
+    import financial_research_assistant.analytics as a
+    import financial_research_assistant.tools as tools
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_two_position_stmt())  # AAPL 600 (60%), MSFT 400 (40%)
+
+    dates = [f"2026-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}" for i in range(30)]
+    closes = {"AAPL": _risk_series(100.0), "MSFT": _risk_series(50.0),
+              "SPY": _risk_series(400.0)}
+    monkeypatch.setattr(tools, "_aligned_closes",
+                        lambda syms, days, **kw: (dates, {s2: closes[s2] for s2 in syms if s2 in closes}))
+
+    out = a.portfolio_risk()
+    assert "PORTFOLIO RISK" in out
+    assert "annualized volatility" in out and "max drawdown" in out
+    assert "Sharpe" in out and "beta vs SPY" in out
+    assert "AAPL 60%" in out and "MSFT 40%" in out  # value weights
+    assert "covers 100% of portfolio value" in out
+
+
+def test_portfolio_risk_excludes_unpriced_and_reports_coverage(monkeypatch, tmp_path):
+    """A holding with no price history is excluded (not treated as risk-free), the
+    covered share of portfolio value is reported, and the excluded name is named."""
+    import financial_research_assistant.analytics as a
+    import financial_research_assistant.tools as tools
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_two_position_stmt("AAPL", 600, "FOO", 400))  # FOO has no data
+
+    dates = [f"2026-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}" for i in range(30)]
+    closes = {"AAPL": _risk_series(100.0), "SPY": _risk_series(400.0)}  # no FOO
+    monkeypatch.setattr(tools, "_aligned_closes",
+                        lambda syms, days, **kw: (dates, {s2: closes[s2] for s2 in syms if s2 in closes}))
+
+    out = a.portfolio_risk()
+    assert "covers 60% of portfolio value" in out  # 600 of 1000
+    assert "no price history for FOO" in out
+
+
+def test_portfolio_risk_empty_store(monkeypatch, tmp_path):
+    import financial_research_assistant.analytics as a
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "none.db"))
+    out = a.portfolio_risk()
+    assert "No positions found" in out and "risk_metrics" in out  # points at per-ticker tool
+
+
 def test_etf_exposure(monkeypatch):
     import financial_research_assistant.fundamentals as f
 

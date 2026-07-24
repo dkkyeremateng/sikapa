@@ -47,6 +47,122 @@ def _next_earnings(cal: dict):
     return _as_date(ed)
 
 
+def _scan_one(sym, lookback_days, move_threshold, horizon, today, fetch_daily, fetch_calendar):
+    """Scan one holding → ``(mover|None, earnings|None, exdiv|None)``. Independent
+    per symbol, so several run concurrently in ``_scan_holdings``."""
+    mover = earn = exdiv = None
+    series = fetch_daily(sym, max(5, lookback_days))
+    if len(series) >= 2 and series[0][1]:
+        (d0, first), (d1, last) = series[0], series[-1]
+        chg = (last - first) / first * 100.0
+        if abs(chg) >= move_threshold:
+            mover = {"symbol": sym, "pct": chg, "from_date": d0, "to_date": d1,
+                     "first": first, "last": last}
+    cal = fetch_calendar(sym)
+    if cal:
+        ed = _next_earnings(cal)
+        if ed and today <= ed and ed.toordinal() <= horizon:
+            earn = (ed, sym, cal.get("Earnings Average"))
+        xd = _as_date(cal.get("Ex-Dividend Date"))
+        if xd and today <= xd and xd.toordinal() <= horizon:
+            exdiv = (xd, sym)
+    return mover, earn, exdiv
+
+
+def _scan_holdings(symbols, lookback_days, move_threshold, earnings_within, today,
+                   fetch_daily, fetch_calendar):
+    """Per-holding scan → ``(movers, earnings, exdivs)``, each already sorted for
+    display (movers by absolute move, the dated lists chronologically). Holdings are
+    scanned concurrently (network-bound) with output order preserved."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    horizon = today.toordinal() + earnings_within
+    movers, earnings, exdivs = [], [], []
+    if symbols:
+        with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
+            scanned = pool.map(
+                lambda s: _scan_one(s, lookback_days, move_threshold, horizon,
+                                    today, fetch_daily, fetch_calendar),
+                symbols,
+            )
+            for mover, earn, exdiv in scanned:
+                if mover:
+                    movers.append(mover)
+                if earn:
+                    earnings.append(earn)
+                if exdiv:
+                    exdivs.append(exdiv)
+    movers.sort(key=lambda m: abs(m["pct"]), reverse=True)
+    earnings.sort()
+    exdivs.sort()
+    return movers, earnings, exdivs
+
+
+def _alert_section(symbols, lookback_days, today) -> list[str]:
+    """The 🔔 triggered-alerts block, or ``[]`` when no rules are set."""
+    from . import alerts
+
+    rules = alerts.load_alerts()
+    if not rules:
+        return []
+    fired = alerts.evaluate_alerts(symbols, lookback_days, today)
+    out = ["", "## 🔔 Alerts triggered"]
+    if fired:
+        out += [f"- {a}" for a in fired]
+    else:
+        out.append(f"- none of your {len(rules)} alert rule(s) triggered")
+    return out
+
+
+def _movers_section(movers, move_threshold) -> list[str]:
+    out = ["", f"## 📈 Movers (±{move_threshold:g}% over the window)"]
+    if not movers:
+        out.append("- none beyond the threshold")
+        return out
+    out += [
+        f"- {m['symbol']:<6} {m['pct']:+.2f}%  "
+        f"({m['from_date']} → {m['to_date']}: {m['first']:.2f} → {m['last']:.2f})"
+        for m in movers
+    ]
+    return out
+
+
+def _earnings_section(earnings, earnings_within) -> list[str]:
+    out = ["", f"## 📅 Upcoming earnings (next {earnings_within}d)"]
+    if not earnings:
+        out.append("- none scheduled in the window")
+        return out
+    for ed, sym, est in earnings:
+        try:
+            est_txt = f"  · consensus EPS {float(est):.2f}" if est is not None else ""
+        except (TypeError, ValueError):
+            est_txt = ""
+        out.append(f"- {sym:<6} {ed.isoformat()}{est_txt}")
+    return out
+
+
+def _exdivs_section(exdivs, earnings_within) -> list[str]:
+    out = ["", f"## 💵 Upcoming ex-dividends (next {earnings_within}d)"]
+    if exdivs:
+        out += [f"- {sym:<6} {xd.isoformat()}" for xd, sym in exdivs]
+    else:
+        out.append("- none in the window")
+    return out
+
+
+def _news_section(movers) -> list[str]:
+    from .tools import web_search
+
+    out = ["", "## 📰 Headlines for movers"]
+    for m in movers:
+        hit = web_search(f"{m['symbol']} stock news", max_results=1)
+        first_line = next(
+            (ln.strip() for ln in hit.splitlines() if ln.strip().startswith("1.")), ""
+        )
+        out.append(f"- {m['symbol']:<6} {first_line[3:].strip() or '(no headline)'}")
+    return out
+
+
 def build_digest(
     account: str | None = None,
     lookback_days: int = 5,
@@ -78,83 +194,25 @@ def build_digest(
     symbols = [
         (p.get("symbol") or "").upper() for p in positions if (p.get("symbol") or "").strip()
     ]
-    horizon = today.toordinal() + earnings_within
-    movers: list[dict] = []
-    earnings: list[tuple] = []
-    exdivs: list[tuple] = []
-
-    for sym in symbols:
-        series = _fetch_daily(sym, max(5, lookback_days))
-        if len(series) >= 2:
-            (d0, first), (d1, last) = series[0], series[-1]
-            if first:
-                chg = (last - first) / first * 100.0
-                if abs(chg) >= move_threshold:
-                    movers.append({
-                        "symbol": sym, "pct": chg, "from_date": d0, "to_date": d1,
-                        "first": first, "last": last,
-                    })
-        cal = _fetch_calendar(sym)
-        if cal:
-            ed = _next_earnings(cal)
-            if ed and today <= ed and ed.toordinal() <= horizon:
-                earnings.append((ed, sym, cal.get("Earnings Average")))
-            xd = _as_date(cal.get("Ex-Dividend Date"))
-            if xd and today <= xd and xd.toordinal() <= horizon:
-                exdivs.append((xd, sym))
-
-    movers.sort(key=lambda m: abs(m["pct"]), reverse=True)
-    earnings.sort()
-    exdivs.sort()
+    movers, earnings, exdivs = _scan_holdings(
+        symbols, lookback_days, move_threshold, earnings_within, today,
+        _fetch_daily, _fetch_calendar,
+    )
 
     acct = account or (positions[0].get("account") if positions else "") or "default"
     lines = [
         f"# Portfolio digest · {today.isoformat()} · account {acct}",
         f"{len(symbols)} holding(s) · price lookback ~{lookback_days}d · "
         f"event window {earnings_within}d",
-        "",
-        f"## 📈 Movers (±{move_threshold:g}% over the window)",
     ]
-    if movers:
-        for m in movers:
-            lines.append(
-                f"- {m['symbol']:<6} {m['pct']:+.2f}%  "
-                f"({m['from_date']} → {m['to_date']}: {m['first']:.2f} → {m['last']:.2f})"
-            )
-    else:
-        lines.append("- none beyond the threshold")
-
-    lines += ["", f"## 📅 Upcoming earnings (next {earnings_within}d)"]
-    if earnings:
-        for ed, sym, est in earnings:
-            est_txt = ""
-            try:
-                est_txt = f"  · consensus EPS {float(est):.2f}" if est is not None else ""
-            except (TypeError, ValueError):
-                est_txt = ""
-            lines.append(f"- {sym:<6} {ed.isoformat()}{est_txt}")
-    else:
-        lines.append("- none scheduled in the window")
-
-    lines += ["", f"## 💵 Upcoming ex-dividends (next {earnings_within}d)"]
-    if exdivs:
-        for xd, sym in exdivs:
-            lines.append(f"- {sym:<6} {xd.isoformat()}")
-    else:
-        lines.append("- none in the window")
-
+    # User-defined alert rules first — the personalized, act-on-it part of the
+    # digest (shown only when rules exist), then the standing scans.
+    lines += _alert_section(symbols, lookback_days, today)
+    lines += _movers_section(movers, move_threshold)
+    lines += _earnings_section(earnings, earnings_within)
+    lines += _exdivs_section(exdivs, earnings_within)
     if include_news and movers:
-        from .tools import web_search
-
-        lines += ["", "## 📰 Headlines for movers"]
-        for m in movers:
-            hit = web_search(f"{m['symbol']} stock news", max_results=1)
-            first_line = next(
-                (ln.strip() for ln in hit.splitlines() if ln.strip().startswith("1.")),
-                "",
-            )
-            lines.append(f"- {m['symbol']:<6} {first_line[3:].strip() or '(no headline)'}")
-
+        lines += _news_section(movers)
     lines += [
         "",
         "(Prices/earnings are delayed Yahoo data; verify before acting. "

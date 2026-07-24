@@ -195,6 +195,134 @@ def correlation_matrix(symbols: str = "", days: int = 180) -> str:
     return "\n".join(lines)
 
 
+def _max_drawdown(returns: list[float]) -> tuple[float, float]:
+    """Reconstruct a growth-of-1 index from a return series and return
+    ``(cumulative_return, max_drawdown)`` as fractions (e.g. -0.23 = -23%)."""
+    idx, peak, max_dd = 1.0, 1.0, 0.0
+    for r in returns:
+        idx *= (1.0 + r)
+        peak = max(peak, idx)
+        if peak:
+            max_dd = min(max_dd, (idx - peak) / peak)
+    return idx - 1.0, max_dd
+
+
+def _beta(port: list[float], bench: list[float]) -> float | None:
+    """Beta of a portfolio return series against a benchmark's, over their common
+    length; None when there isn't enough overlap or the benchmark has no variance."""
+    import statistics as st
+
+    n = min(len(port), len(bench))
+    if n < 20:
+        return None
+    p, b = port[:n], bench[:n]
+    var_b = st.pvariance(b)
+    if not var_b:
+        return None
+    cov = st.fmean([p[i] * b[i] for i in range(n)]) - st.fmean(p) * st.fmean(b)
+    return cov / var_b
+
+
+def portfolio_risk(account: str = "", days: int = 365, benchmark: str = "SPY") -> str:
+    """Risk/return metrics for your WHOLE portfolio as it stands now: annualized
+    volatility, max drawdown, Sharpe ratio (risk-free 0), and beta vs a benchmark.
+
+    Builds a synthetic daily portfolio return series by value-weighting each
+    holding's daily return (weights = each position's current market value, so it
+    answers 'how risky is the basket I hold TODAY'), then computes the metrics from
+    it. This is the portfolio-level companion to the per-ticker `risk_metrics`. Use
+    for 'how risky is my portfolio / my volatility / drawdown / Sharpe / beta /
+    overall risk'. ``days`` is the lookback; ``benchmark`` the beta reference
+    (default SPY); ``account`` scopes it.
+
+    Approximation, stated in the output: current holdings are held CONSTANT over the
+    window (it ignores past trades/rebalancing), and only holdings with fetchable
+    price history are included — the covered share of portfolio value is reported,
+    and weights are renormalized over the covered holdings. Positions without price
+    data (cash, some non-US tickers) are excluded, not treated as risk-free."""
+    import statistics as st
+
+    from . import statements
+    from .fundamentals import _num
+    from .tools import BASE_CURRENCY, _aligned_closes, _fx_rate
+
+    positions = statements.query_positions(account=account or None)
+    if not positions:
+        return (
+            "No positions found. Import a statement with open positions using "
+            "`import_ibkr_statement`, then try again. (For one ticker's risk, use "
+            "`risk_metrics`.)"
+        )
+    # Current base-currency market value per symbol (the constant weights).
+    value, fx_missing = {}, set()
+    for p in positions:
+        sym = (p.get("symbol") or "").upper()
+        val = _num(p.get("value")) or 0.0
+        ccy = (p.get("currency") or BASE_CURRENCY).upper()
+        r = _fx_rate(ccy)
+        if r is None:
+            fx_missing.add(ccy)
+            r = 1.0
+        base_val = val * r
+        if sym and base_val > 0:
+            value[sym] = value.get(sym, 0.0) + base_val
+    if not value:
+        return "Positions have no positive market value to analyze."
+
+    total_value = sum(value.values())
+    syms = list(value)
+    bench = benchmark.strip().upper()
+    dates, closes = _aligned_closes(syms + [bench], days)
+    covered = [s for s in syms if s in closes]
+    if len(dates) < 20 or not covered:
+        return (
+            "Not enough overlapping price history to compute portfolio risk. Widen "
+            "the window, or check that your holdings have price data (US tickers, or "
+            "Yahoo suffixes like VOD.L)."
+        )
+    # Renormalize the constant weights over the covered holdings, and record how much
+    # of the portfolio's value that covers so the answer states its own scope.
+    covered_value = sum(value[s] for s in covered)
+    w = {s: value[s] / covered_value for s in covered}
+    rets = {s: _returns(closes[s]) for s in covered}
+    n = min(len(rets[s]) for s in covered)
+    port = [sum(w[s] * rets[s][i] for s in covered) for i in range(n)]
+    if len(port) < 19:
+        return "Not enough overlapping return history to compute portfolio risk."
+
+    sd = st.pstdev(port)
+    vol = sd * (252 ** 0.5) * 100.0
+    sharpe = (st.fmean(port) / sd * (252 ** 0.5)) if sd else 0.0
+    cum_ret, max_dd = _max_drawdown(port)
+    beta = _beta(port, _returns(closes[bench])) if bench in closes else None
+    beta_txt = f"\n  beta vs {bench}          {beta:.2f}" if beta is not None else ""
+
+    coverage = covered_value / total_value * 100.0 if total_value else 0.0
+    excluded = [s for s in syms if s not in covered]
+    lines = [
+        f"PORTFOLIO RISK · {dates[0]} → {dates[-1]} ({len(port) + 1} sessions, "
+        f"{len(covered)} holding(s)):",
+        f"  annualized volatility  {vol:.1f}%",
+        f"  max drawdown           {max_dd * 100.0:.1f}%",
+        f"  cumulative return      {cum_ret * 100.0:+.1f}% (over the window)",
+        f"  Sharpe (rf=0)          {sharpe:.2f}{beta_txt}",
+    ]
+    top = sorted(w.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    lines.append(
+        "weights (current value): " + ", ".join(f"{s} {wt * 100:.0f}%" for s, wt in top)
+        + (" …" if len(covered) > 5 else "")
+    )
+    lines.append(
+        f"note: current holdings held constant; covers {coverage:.0f}% of portfolio "
+        f"value (holdings with price history)."
+    )
+    if excluded:
+        lines.append(f"note: no price history for {', '.join(excluded)} — excluded.")
+    if fx_missing:
+        lines.append(f"note: no FX rate for {', '.join(sorted(fx_missing))} — used raw values.")
+    return "\n".join(lines)
+
+
 def _norm_sector(name: str | None) -> str:
     """Canonical sector key so ETF weightings (``financial_services``) and stock
     ``.info`` sectors (``Financial Services``) merge into one bucket."""
@@ -291,4 +419,4 @@ def portfolio_lookthrough(account: str = "") -> str:
     return "\n".join(lines)
 
 
-ANALYTICS_TOOLS = [tax_loss_harvest, correlation_matrix, portfolio_lookthrough]
+ANALYTICS_TOOLS = [tax_loss_harvest, correlation_matrix, portfolio_lookthrough, portfolio_risk]

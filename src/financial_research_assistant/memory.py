@@ -95,6 +95,24 @@ _PREFIX = re.compile(
     r"for future reference,?|don'?t forget that)\b[:,]?\s*(that\b\s*)?",
     re.I,
 )
+# "I want/need [a] <deliverable>" — a one-off task request, NOT a lasting fact.
+# ``_DURABLE`` matches the bare verb "want"/"need", so without this veto imperative
+# asks like "I want a chart of AAPL" or "I need a comparison of MSFT and GOOG" get
+# stored as durable memories and re-injected into later turns. The deliverable
+# nouns are research artifacts, so a genuine goal ("I want to retire early") or a
+# preference ("I want lower-risk holdings") is NOT matched and stays captured. An
+# explicit store verb ("remember …") still wins above this in ``_memorable``.
+_ACTION_REQUEST = re.compile(
+    r"\bi\b\s*(?:'d\s+like|want|need|would\s+like|wanna)\s+"
+    r"(?:you\s+to\s+|us\s+to\s+|to\s+(?:see|get|know)\s+)?"
+    r"(?:a|an|the|some|another)?\s*(?:\w+\s+){0,2}"
+    r"(charts?|graphs?|plots?|reports?|comparisons?|compare|breakdowns?|"
+    r"summar(?:y|ies)|analys[ei]s|overviews?|snapshots?|tables?|lists?|"
+    r"quotes?|prices?|figures?|numbers?|valuations?|dcf|screens?|estimates?|"
+    r"projections?|recommendations?|rundowns?|tearsheets?|deep\s*dives?|"
+    r"write[- ]?ups?)\b",
+    re.I,
+)
 
 
 def _memorable(msg: str) -> bool:
@@ -104,6 +122,8 @@ def _memorable(msg: str) -> bool:
         return False
     if _STORE_VERB.search(msg):
         return True  # explicit intent wins, even if phrased as a question
+    if _ACTION_REQUEST.search(msg):
+        return False  # "I want a chart of X" is a task to do now, not a fact to keep
     if not (_DURABLE.search(msg) or _MY_IS.search(msg)):
         return False
     # Durable-looking but interrogative → the user is asking, not telling.
