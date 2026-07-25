@@ -819,7 +819,10 @@ class AgentApp(App):
                 pass
 
         if alerts.sound_enabled():
+            # Both, deliberately: bell is instant but many terminals drop it, and
+            # the played file is what actually makes noise on those.
             best_effort(self.bell)
+            best_effort(alerts.play_alert_sound)
         best_effort(
             lambda: self.notify(
                 text, title="🔔 Alert triggered", severity="warning", timeout=10

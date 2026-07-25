@@ -24,7 +24,7 @@ holdings cheap). ``monitor.build_digest`` calls ``evaluate_alerts`` and prepends
 
 A fired rule is also buffered for out-of-band delivery (see ``drain_triggered``),
 so an interface can push it the moment it triggers instead of relying on the user
-to read it out of the digest text.
+to read it out of the digest text, and ``play_alert_sound`` makes it audible.
 """
 
 from __future__ import annotations
@@ -60,9 +60,22 @@ def drain_triggered() -> list[str]:
 
 _SOUND_OFF = {"0", "false", "no", "off"}
 
+# Played when a rule fires; first one that exists on this machine wins. The
+# terminal bell alone is not enough — it's only a BEL byte, and terminals widely
+# drop it (VS Code's integrated terminal disables it by default, and macOS
+# Terminal/iTerm profiles commonly ship with the audible bell off), so an alert
+# that relies on BEL is silent on a lot of setups.
+_DEFAULT_SOUNDS = (
+    "/System/Library/Sounds/Ping.aiff",                   # macOS
+    "/usr/share/sounds/freedesktop/stereo/message.oga",   # Linux (freedesktop)
+    "/usr/share/sounds/freedesktop/stereo/bell.oga",
+)
+# Players tried in order on non-macOS; macOS always has afplay.
+_PLAYERS = ("paplay", "aplay", "ffplay", "play")
+
 
 def sound_enabled() -> bool:
-    """Whether a fired alert also rings the terminal bell.
+    """Whether a fired alert makes a sound.
 
     On by default: an alert you only catch if you happen to be looking at the
     terminal isn't much of an alert, which is the whole reason these are pushed
@@ -72,6 +85,82 @@ def sound_enabled() -> bool:
     """
     raw = os.environ.get("FINANCIAL_RESEARCH_ALERT_SOUND", "").strip().lower()
     return raw not in _SOUND_OFF
+
+
+def alert_sound_file() -> str | None:
+    """The audio file to play, or None if this machine has none to offer.
+
+    ``FINANCIAL_RESEARCH_ALERT_SOUND`` doubles as the override: point it at a
+    file to choose your own sound. Its on/off words aren't paths, so they fall
+    through to the system default and the flag keeps working as a plain toggle.
+    """
+    raw = os.environ.get("FINANCIAL_RESEARCH_ALERT_SOUND", "").strip()
+    if raw and raw.lower() not in _SOUND_OFF:
+        chosen = Path(os.path.expandvars(raw)).expanduser()
+        if chosen.is_file():
+            return str(chosen)
+    for cand in _DEFAULT_SOUNDS:
+        if Path(cand).is_file():
+            return cand
+    return None
+
+
+def _player_cmd(sound: str) -> list[str] | None:
+    """The command that plays ``sound`` on this platform, or None if none is
+    installed (headless servers routinely have no audio player at all)."""
+    import shutil
+    import sys
+
+    if sys.platform == "darwin":
+        return ["afplay", sound] if shutil.which("afplay") else None
+    for name in _PLAYERS:
+        if shutil.which(name):
+            # ffplay needs to be told not to open a window or wait for input.
+            if name == "ffplay":
+                return [name, "-nodisp", "-autoexit", "-loglevel", "quiet", sound]
+            return [name, sound]
+    return None
+
+
+def _spawn(cmd: list[str]) -> None:
+    """Run ``cmd`` on a daemon thread.
+
+    The thread is what keeps this honest: playing inline would freeze the UI for
+    the length of the sound, while a bare Popen we never wait on would leave a
+    zombie behind for every alert in a long-running TUI. Waiting on a daemon
+    thread reaps the child without blocking anything, and won't hold up exit."""
+    import subprocess
+    import threading
+
+    def run() -> None:
+        try:
+            subprocess.run(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=15, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass  # best-effort: the toast and 🔔 line already delivered the alert
+
+    threading.Thread(target=run, daemon=True, name="alert-sound").start()
+
+
+def play_alert_sound() -> bool:
+    """Play the alert sound, returning whether a player was actually started.
+
+    Complements the terminal bell rather than replacing it: the bell is free and
+    works where it's enabled, but can't be relied on alone. False here just means
+    no sound was available (disabled, no sound file, or no player installed) —
+    never an error the caller should act on."""
+    if not sound_enabled():
+        return False
+    sound = alert_sound_file()
+    if not sound:
+        return False
+    cmd = _player_cmd(sound)
+    if cmd is None:
+        return False
+    _spawn(cmd)
+    return True
 
 _KINDS = {"drop", "rise", "move", "below", "above", "earnings"}
 # Symbol tokens that mean "every holding" rather than one ticker.
