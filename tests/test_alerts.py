@@ -104,6 +104,54 @@ def test_alert_sound_is_on_unless_explicitly_silenced(monkeypatch):
         assert alerts.sound_enabled() is True, on
 
 
+def test_alert_sound_file_prefers_an_explicit_override(monkeypatch, tmp_path):
+    """FINANCIAL_RESEARCH_ALERT_SOUND doubles as a file override, while its
+    on/off words stay plain toggles rather than being read as paths."""
+    mine = tmp_path / "chime.aiff"
+    mine.write_bytes(b"not really audio")
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", str(mine))
+    assert alerts.alert_sound_file() == str(mine)
+
+    # A toggle word is not a path, so it falls through to the system default.
+    monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", "on")
+    assert alerts.alert_sound_file() != "on"
+
+    # A path that doesn't exist also falls through rather than being played.
+    monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", str(tmp_path / "missing.aiff"))
+    assert alerts.alert_sound_file() != str(tmp_path / "missing.aiff")
+
+
+def test_play_alert_sound_launches_a_player(monkeypatch, tmp_path,
+                                            _never_actually_play_audio):
+    """The happy path hands a real player command to the spawner."""
+    sound = tmp_path / "ping.aiff"
+    sound.write_bytes(b"x")
+    monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", str(sound))
+    monkeypatch.setattr(alerts, "_player_cmd", lambda s: ["afplay", s])
+
+    assert alerts.play_alert_sound() is True
+    assert _never_actually_play_audio == [["afplay", str(sound)]]
+
+
+def test_play_alert_sound_is_silent_when_it_cannot_play(monkeypatch,
+                                                        _never_actually_play_audio):
+    """Disabled, no sound file, or no player installed (a headless server) each
+    return False without raising — the toast and 🔔 line still carried it."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", "0")
+    assert alerts.play_alert_sound() is False
+
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_SOUND", raising=False)
+    monkeypatch.setattr(alerts, "alert_sound_file", lambda: None)
+    assert alerts.play_alert_sound() is False
+
+    monkeypatch.setattr(alerts, "alert_sound_file", lambda: "/tmp/x.aiff")
+    monkeypatch.setattr(alerts, "_player_cmd", lambda s: None)
+    assert alerts.play_alert_sound() is False
+
+    assert _never_actually_play_audio == []
+
+
 def test_notification_buffer_is_bounded(monkeypatch):
     """Nothing guarantees a drain (the eval harness ignores alert events), so the
     buffer caps rather than growing for the life of the process."""

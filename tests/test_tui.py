@@ -1480,10 +1480,11 @@ async def test_tui_alert_line_survives_a_failing_toast(monkeypatch, tmp_path):
         assert "🔔 TSLA at 195.00" in log_text(app)
 
 
-async def test_tui_alert_rings_the_bell_and_can_be_silenced(monkeypatch, tmp_path):
-    """A fired alert rings the terminal bell so it carries when the terminal
-    isn't on screen, and FINANCIAL_RESEARCH_ALERT_SOUND=0 silences just the
-    bell — the toast and the transcript line still land."""
+async def test_tui_alert_makes_a_sound_and_can_be_silenced(monkeypatch, tmp_path,
+                                                           _never_actually_play_audio):
+    """A fired alert both rings the bell and plays a sound file — the bell alone
+    is a BEL byte that many terminals drop. FINANCIAL_RESEARCH_ALERT_SOUND=0
+    silences both while the toast and the transcript line still land."""
     monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
     monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_SOUND", raising=False)
 
@@ -1497,11 +1498,13 @@ async def test_tui_alert_rings_the_bell_and_can_be_silenced(monkeypatch, tmp_pat
         app._notify_alert("AAPL down 6.2%")
         await pilot.pause()
         assert rings == [1]
+        assert len(_never_actually_play_audio) == 1  # a player was launched
 
         monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", "0")
         app._notify_alert("TSLA at 195.00")
         await pilot.pause()
-        assert rings == [1]  # no new ring
+        assert rings == [1]                          # no new ring
+        assert len(_never_actually_play_audio) == 1  # and no new sound
         assert toasts == ["AAPL down 6.2%", "TSLA at 195.00"]  # toast unaffected
         assert "🔔 TSLA at 195.00" in log_text(app)
 

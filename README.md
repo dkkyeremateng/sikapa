@@ -577,11 +577,17 @@ one with `remove_alert`. Rules are stored as plain JSON at
 `FINANCIAL_RESEARCH_ALERTS_FILE`).
 
 A rule that fires is also pushed to you the moment it triggers, rather than only
-appearing in the digest text: the TUI rings the terminal bell, raises a toast, and
-writes a 🔔 line into the transcript (tool panels are collapsed by default, so the
-line is what survives a dismissed toast), and the headless CLI prints it to stderr,
-ringing only when stderr is a terminal. Set `FINANCIAL_RESEARCH_ALERT_SOUND=0` to
-silence the bell and keep the toast and line.
+appearing in the digest text: the TUI plays a sound, raises a toast, and writes a
+🔔 line into the transcript (tool panels are collapsed by default, so the line is
+what survives a dismissed toast); the headless CLI prints it to stderr and plays
+the same sound.
+
+The sound is a real audio file (`afplay` on macOS, `paplay`/`aplay`/`ffplay`/`play`
+on Linux) played alongside the terminal bell, because the bell on its own is just a
+BEL byte that many terminals drop — VS Code's integrated terminal disables it by
+default, and macOS Terminal/iTerm profiles often ship with the audible bell off.
+Set `FINANCIAL_RESEARCH_ALERT_SOUND=0` to silence it and keep the toast and line,
+or point it at an audio file to choose your own.
 
 ## Durable conversation memory (survives restarts)
 

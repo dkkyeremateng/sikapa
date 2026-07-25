@@ -279,9 +279,11 @@ async def _headless(
         elif ev.kind == "alert":
             print(f"🔔 {ev.text}", file=sys.stderr)
             # Only ring an interactive terminal: piped/redirected stderr is a log
-            # file or a CI transcript, where a stray BEL byte is just noise.
+            # file or a CI transcript, where a stray BEL byte is just noise. The
+            # played sound has no such problem, so it isn't gated on the tty.
             if alerts.sound_enabled() and sys.stderr.isatty():
                 print("\a", end="", file=sys.stderr, flush=True)
+            alerts.play_alert_sound()
         elif ev.kind == "usage" and (ev.tokens_in or ev.tokens_out or ev.tokens_cache):
             # Usage streams as per-call deltas; accumulate so the trace + line
             # report the turn total, not just the last call.
