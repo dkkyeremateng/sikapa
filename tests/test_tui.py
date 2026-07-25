@@ -1438,3 +1438,43 @@ def test_reply_markdown_code_block_has_no_background():
     flush = render(_ReplyMarkdown)
     assert not re.search(r"48;[25];", flush)                 # ours has none
     assert "VOO" in flush and "🟢" in flush                   # content preserved
+
+
+async def test_tui_alert_event_toasts_and_leaves_a_transcript_line(monkeypatch, tmp_path):
+    """A fired alert raises a toast AND writes a durable 🔔 line. Both matter:
+    the toast lands while the user is reading something else, and the line
+    survives it — the digest that evaluated the rule sits in a tool panel that
+    is collapsed by default, so a dismissed toast would leave nothing visible."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+
+    app = AgentApp(fake=True, session_id="alerting")
+    async with app.run_test() as pilot:
+        raised: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            type(app), "notify", lambda self, msg, **kw: raised.append((msg, kw))
+        )
+
+        app._notify_alert("AAPL down 6.2% — now 180.10")
+        await pilot.pause()
+
+        assert raised == [(
+            "AAPL down 6.2% — now 180.10",
+            {"title": "🔔 Alert triggered", "severity": "warning", "timeout": 10},
+        )]
+        assert "🔔 AAPL down 6.2% — now 180.10" in log_text(app)
+
+
+async def test_tui_alert_line_survives_a_failing_toast(monkeypatch, tmp_path):
+    """A toast is best-effort: if notify() raises, the alert must still reach the
+    transcript rather than taking the turn down with it."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+
+    def boom(self, msg, **kw):
+        raise RuntimeError("no screen")
+
+    app = AgentApp(fake=True, session_id="alerting-broken")
+    async with app.run_test() as pilot:
+        monkeypatch.setattr(type(app), "notify", boom)
+        app._notify_alert("TSLA at 195.00")
+        await pilot.pause()
+        assert "🔔 TSLA at 195.00" in log_text(app)

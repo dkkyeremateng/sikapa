@@ -318,7 +318,7 @@ Monitoring digest over your holdings: any triggered **alert rules** (see below),
 - **Call:** `portfolio_digest(lookback_days=5, move_threshold=5, include_news=True)`
 
 #### `add_alert(symbol, kind, value=0)` · `list_alerts()` · `remove_alert(alert_id)`
-Standing **alert rules** the digest checks each run. `kind`: `drop`/`rise`/`move` (percent move over the lookback), `below`/`above` (a price level), or `earnings` (days out). `symbol="*"` means any holding. Triggered alerts appear at the top of `portfolio_digest` and the `--digest` CLI.
+Standing **alert rules** the digest checks each run. `kind`: `drop`/`rise`/`move` (percent move over the lookback), `below`/`above` (a price level), or `earnings` (days out). `symbol="*"` means any holding. Triggered alerts appear at the top of `portfolio_digest` and the `--digest` CLI, and are pushed as they fire — a toast plus a 🔔 transcript line in the TUI, stderr in the headless CLI.
 - **Ask:** "Tell me if AAPL drops more than 5%." / "Alert me if any holding moves 8%." / "Notify me when NVDA reports within a week."
 - **Call:** `add_alert(symbol="AAPL", kind="drop", value=5)` · `add_alert(symbol="*", kind="move", value=8)` · `list_alerts()` · `remove_alert(alert_id="a1")`
 

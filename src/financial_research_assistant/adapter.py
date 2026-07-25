@@ -394,6 +394,17 @@ def _announce(cid: str, entry: dict) -> AgentEvent | None:
     return _tool_start(cid, entry)
 
 
+def _fired_alerts() -> list[AgentEvent]:
+    """One ``alert`` event per user rule that fired during the tool call that
+    just finished. Alerts are evaluated deep inside ``build_digest``, so they'd
+    otherwise only reach the user as prose in that tool's result — easy to miss
+    in a long digest. Draining at tool_end lets an interface surface them the
+    moment they trigger, while keeping the digest text the source of truth."""
+    from .alerts import drain_triggered
+
+    return [AgentEvent("alert", msg, agent=AGENT_NAME) for msg in drain_triggered()]
+
+
 TOOLS_NODE = "tools"  # create_agent's tool-executing node
 
 
@@ -497,6 +508,8 @@ async def _stream_events(graph, inputs, config):
                     # Args never became parseable: announce late so start/end pair.
                     yield _tool_start(cid, entry)
                 yield _tool_end(cid, entry, chunk)
+                for ev in _fired_alerts():
+                    yield ev
         elif isinstance(chunk, AIMessageChunk):
             for tc in chunk.tool_call_chunks:
                 idx, cid = tc.get("index"), tc.get("id")

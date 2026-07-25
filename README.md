@@ -576,6 +576,11 @@ one with `remove_alert`. Rules are stored as plain JSON at
 `~/.financial-research-assistant/alerts.json` (override with
 `FINANCIAL_RESEARCH_ALERTS_FILE`).
 
+A rule that fires is also pushed to you the moment it triggers, rather than only
+appearing in the digest text: the TUI raises a toast and writes a 🔔 line into
+the transcript (tool panels are collapsed by default, so the line is what
+survives a dismissed toast), and the headless CLI prints it to stderr.
+
 ## Durable conversation memory (survives restarts)
 
 By default the graph checkpoints to an in-process `MemorySaver`, so conversation

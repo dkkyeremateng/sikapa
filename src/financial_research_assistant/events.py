@@ -23,6 +23,7 @@ class AgentEvent:
       tool_start  a tool call began (agent, tool, detail=args JSON)
       tool_end    a tool call finished (duration, ok, detail=result snippet)
       token       streamed answer text (unused in fake mode)
+      alert       a user alert rule fired; surfaced out-of-band (TUI toast)
       usage       cumulative token counts for the turn (tokens_in/out/cache)
       final       the answer; always the last event of a successful run
       error       fatal; always the last event of a failed run

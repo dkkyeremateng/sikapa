@@ -276,6 +276,8 @@ async def _headless(
         elif ev.kind == "tool_end":
             print(f"• {ev.text}", file=sys.stderr)
             tools.append({"name": ev.tool, "ok": ev.ok, "duration": round(ev.duration, 3)})
+        elif ev.kind == "alert":
+            print(f"🔔 {ev.text}", file=sys.stderr)
         elif ev.kind == "usage" and (ev.tokens_in or ev.tokens_out or ev.tokens_cache):
             # Usage streams as per-call deltas; accumulate so the trace + line
             # report the turn total, not just the last call.

@@ -49,6 +49,45 @@ def scripted_tool_graph():
     return g.compile()
 
 
+def alerting_tool_graph(messages: list[str]):
+    """A tool-calling graph whose tool fires user alerts while it runs — the
+    shape build_digest has when a rule triggers deep inside it."""
+
+    def model(state: MessagesState):
+        if any(isinstance(m, ToolMessage) for m in state["messages"]):
+            return {"messages": [AIMessage(content="digest ready")]}
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "digest", "args": {}, "id": "call_1"}],
+                )
+            ]
+        }
+
+    def tools(state: MessagesState):
+        from financial_research_assistant import alerts
+
+        alerts._fired.extend(messages)  # what evaluate_alerts does when a rule fires
+        return {
+            "messages": [
+                ToolMessage(content="digest text", tool_call_id=tc["id"], name=tc["name"])
+                for tc in cast(AIMessage, state["messages"][-1]).tool_calls
+            ]
+        }
+
+    g = StateGraph(MessagesState)
+    g.add_node("model", model)
+    g.add_node("tools", tools)
+    g.add_edge(START, "model")
+    g.add_conditional_edges(
+        "model",
+        lambda s: "tools" if cast(AIMessage, s["messages"][-1]).tool_calls else END,
+    )
+    g.add_edge("tools", "model")
+    return g.compile()
+
+
 def nested_model_graph():
     """A graph whose tool node runs THREE models concurrently — the shape
     ``dispatch_subagents`` creates. A model invoked inside a tool inherits the
