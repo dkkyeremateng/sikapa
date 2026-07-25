@@ -89,6 +89,21 @@ def test_evaluating_rules_buffers_them_for_notification(monkeypatch):
     assert alerts.drain_triggered() == []  # drained, so it won't replay next turn
 
 
+def test_alert_sound_is_on_unless_explicitly_silenced(monkeypatch):
+    """The bell defaults ON — an alert you only catch while looking at the
+    terminal defeats the point — and only an explicit falsy value turns it off."""
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_SOUND", raising=False)
+    assert alerts.sound_enabled() is True
+
+    for off in ("0", "false", "no", "off", "OFF", " Off "):
+        monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", off)
+        assert alerts.sound_enabled() is False, off
+
+    for on in ("1", "true", "yes", "on", ""):
+        monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", on)
+        assert alerts.sound_enabled() is True, on
+
+
 def test_notification_buffer_is_bounded(monkeypatch):
     """Nothing guarantees a drain (the eval harness ignores alert events), so the
     buffer caps rather than growing for the life of the process."""

@@ -50,7 +50,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Collapsible, Footer, Header, Input, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 
-from . import sessions
+from . import alerts, sessions
 from .adapter import compact_session, reset_session, run_turn
 from .events import AgentEvent, format_duration
 from .pricing import context_cap as _context_cap
@@ -797,18 +797,34 @@ class AgentApp(App):
             log.scroll_end(animate=False)
 
     def _notify_alert(self, text: str) -> None:
-        """Surface a fired alert rule as a toast *and* a transcript line.
+        """Surface a fired alert rule: bell, toast, and a transcript line.
 
-        The toast is the point — it lands even while the user is reading
-        something else. The line is what makes it durable: toasts auto-dismiss,
-        and the digest that evaluated the rule renders in a tool panel that is
-        collapsed by default, so a missed toast would otherwise leave nothing
-        visible. A notify() failure must never sink the turn that raised it."""
+        Each reaches a different kind of inattention. The bell carries when the
+        terminal isn't even on screen; the toast lands while the user is reading
+        something else; the line is what makes it durable, since toasts
+        auto-dismiss and the digest that evaluated the rule renders in a tool
+        panel that is collapsed by default.
+
+        The line is written first and unguarded — it's the one that must always
+        land. Bell and toast are best-effort and independently guarded: they go
+        through the driver and the screen, so a failure in either (a detached
+        driver during teardown, say) must neither sink the turn nor suppress the
+        other."""
         self._line(f"🔔 {text}", "bold yellow")
-        try:
-            self.notify(text, title="🔔 Alert triggered", severity="warning", timeout=10)
-        except Exception:  # noqa: BLE001 - a toast is best-effort
-            pass
+
+        def best_effort(fn) -> None:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - the transcript line already landed
+                pass
+
+        if alerts.sound_enabled():
+            best_effort(self.bell)
+        best_effort(
+            lambda: self.notify(
+                text, title="🔔 Alert triggered", severity="warning", timeout=10
+            )
+        )
 
     def _trim_log(self) -> None:
         # Removal is async — the _trimming mark keeps a burst of mounts from

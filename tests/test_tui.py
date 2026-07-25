@@ -1478,3 +1478,51 @@ async def test_tui_alert_line_survives_a_failing_toast(monkeypatch, tmp_path):
         app._notify_alert("TSLA at 195.00")
         await pilot.pause()
         assert "🔔 TSLA at 195.00" in log_text(app)
+
+
+async def test_tui_alert_rings_the_bell_and_can_be_silenced(monkeypatch, tmp_path):
+    """A fired alert rings the terminal bell so it carries when the terminal
+    isn't on screen, and FINANCIAL_RESEARCH_ALERT_SOUND=0 silences just the
+    bell — the toast and the transcript line still land."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_SOUND", raising=False)
+
+    app = AgentApp(fake=True, session_id="alert-bell")
+    async with app.run_test() as pilot:
+        rings: list[int] = []
+        toasts: list[str] = []
+        monkeypatch.setattr(type(app), "bell", lambda self: rings.append(1))
+        monkeypatch.setattr(type(app), "notify", lambda self, msg, **kw: toasts.append(msg))
+
+        app._notify_alert("AAPL down 6.2%")
+        await pilot.pause()
+        assert rings == [1]
+
+        monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", "0")
+        app._notify_alert("TSLA at 195.00")
+        await pilot.pause()
+        assert rings == [1]  # no new ring
+        assert toasts == ["AAPL down 6.2%", "TSLA at 195.00"]  # toast unaffected
+        assert "🔔 TSLA at 195.00" in log_text(app)
+
+
+async def test_tui_alert_survives_a_failing_bell(monkeypatch, tmp_path):
+    """Bell and toast are independently best-effort: a bell that raises must
+    neither sink the turn nor swallow the toast that follows it."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_SOUND", raising=False)
+
+    def boom(self):
+        raise RuntimeError("no driver")
+
+    app = AgentApp(fake=True, session_id="alert-bell-broken")
+    async with app.run_test() as pilot:
+        toasts: list[str] = []
+        monkeypatch.setattr(type(app), "bell", boom)
+        monkeypatch.setattr(type(app), "notify", lambda self, msg, **kw: toasts.append(msg))
+
+        app._notify_alert("NVDA reports earnings 2026-01-08")
+        await pilot.pause()
+
+        assert toasts == ["NVDA reports earnings 2026-01-08"]
+        assert "🔔 NVDA reports earnings 2026-01-08" in log_text(app)
