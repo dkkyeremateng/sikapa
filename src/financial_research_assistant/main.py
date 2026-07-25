@@ -252,7 +252,7 @@ async def _headless(
     think: bool = True,
     trace_path: str | None = None,
 ) -> int:
-    from . import sessions
+    from . import alerts, sessions
     from .adapter import run_turn
     from .pricing import cost_usd
     from .tracing import traced
@@ -278,6 +278,10 @@ async def _headless(
             tools.append({"name": ev.tool, "ok": ev.ok, "duration": round(ev.duration, 3)})
         elif ev.kind == "alert":
             print(f"🔔 {ev.text}", file=sys.stderr)
+            # Only ring an interactive terminal: piped/redirected stderr is a log
+            # file or a CI transcript, where a stray BEL byte is just noise.
+            if alerts.sound_enabled() and sys.stderr.isatty():
+                print("\a", end="", file=sys.stderr, flush=True)
         elif ev.kind == "usage" and (ev.tokens_in or ev.tokens_out or ev.tokens_cache):
             # Usage streams as per-call deltas; accumulate so the trace + line
             # report the turn total, not just the last call.

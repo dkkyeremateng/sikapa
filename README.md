@@ -577,9 +577,11 @@ one with `remove_alert`. Rules are stored as plain JSON at
 `FINANCIAL_RESEARCH_ALERTS_FILE`).
 
 A rule that fires is also pushed to you the moment it triggers, rather than only
-appearing in the digest text: the TUI raises a toast and writes a 🔔 line into
-the transcript (tool panels are collapsed by default, so the line is what
-survives a dismissed toast), and the headless CLI prints it to stderr.
+appearing in the digest text: the TUI rings the terminal bell, raises a toast, and
+writes a 🔔 line into the transcript (tool panels are collapsed by default, so the
+line is what survives a dismissed toast), and the headless CLI prints it to stderr,
+ringing only when stderr is a terminal. Set `FINANCIAL_RESEARCH_ALERT_SOUND=0` to
+silence the bell and keep the toast and line.
 
 ## Durable conversation memory (survives restarts)
 

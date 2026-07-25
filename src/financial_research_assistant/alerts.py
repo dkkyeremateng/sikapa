@@ -57,6 +57,22 @@ def drain_triggered() -> list[str]:
         except IndexError:
             return out
 
+
+_SOUND_OFF = {"0", "false", "no", "off"}
+
+
+def sound_enabled() -> bool:
+    """Whether a fired alert also rings the terminal bell.
+
+    On by default: an alert you only catch if you happen to be looking at the
+    terminal isn't much of an alert, which is the whole reason these are pushed
+    rather than left in the digest text. Set
+    ``FINANCIAL_RESEARCH_ALERT_SOUND=0`` to silence it — for a shared space, or a
+    terminal that renders the bell as a full-screen flash.
+    """
+    raw = os.environ.get("FINANCIAL_RESEARCH_ALERT_SOUND", "").strip().lower()
+    return raw not in _SOUND_OFF
+
 _KINDS = {"drop", "rise", "move", "below", "above", "earnings"}
 # Symbol tokens that mean "every holding" rather than one ticker.
 _ALL = {"*", "all", "any", "portfolio", "holdings", "everything"}
