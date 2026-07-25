@@ -1,6 +1,8 @@
+import asyncio
 from typing import cast
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 
@@ -42,6 +44,57 @@ def scripted_tool_graph():
     g.add_conditional_edges(
         "model",
         lambda state: "tools" if cast(AIMessage, state["messages"][-1]).tool_calls else END,
+    )
+    g.add_edge("tools", "model")
+    return g.compile()
+
+
+def nested_model_graph():
+    """A graph whose tool node runs THREE models concurrently — the shape
+    ``dispatch_subagents`` creates. A model invoked inside a tool inherits the
+    parent run's callbacks, so LangGraph streams its tokens into the same
+    ``messages`` stream; unfiltered they interleave word-by-word with each other
+    and with the real reply. Only the ``model`` node's own tokens are the answer."""
+
+    def fake(text: str):
+        return GenericFakeChatModel(messages=iter([text] * 9))
+
+    async def tools(state: MessagesState):
+        await asyncio.gather(
+            *(fake(f"NESTED{c} one two three").ainvoke([HumanMessage(content="q")])
+              for c in "ABC")
+        )
+        last = cast(AIMessage, state["messages"][-1])
+        return {
+            "messages": [
+                ToolMessage(content="ok", tool_call_id=tc["id"], name=tc["name"])
+                for tc in last.tool_calls
+            ]
+        }
+
+    async def model(state: MessagesState):
+        if any(isinstance(m, ToolMessage) for m in state["messages"]):
+            parts = [
+                str(c.content)
+                async for c in fake("ANSWER alpha beta").astream([HumanMessage(content="q")])
+            ]
+            return {"messages": [AIMessage(content="".join(parts))]}
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "dispatch", "args": {"tasks": "a"}, "id": "d1"}],
+                )
+            ]
+        }
+
+    g = StateGraph(MessagesState)
+    g.add_node("model", model)
+    g.add_node("tools", tools)
+    g.add_edge(START, "model")
+    g.add_conditional_edges(
+        "model",
+        lambda s: "tools" if cast(AIMessage, s["messages"][-1]).tool_calls else END,
     )
     g.add_edge("tools", "model")
     return g.compile()

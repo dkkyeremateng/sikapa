@@ -4,9 +4,30 @@ from financial_research_assistant.adapter import run_turn
 
 from .helpers.fakes import fake_ibkr_tools_session as _fake_ibkr_tools_session
 from .helpers.graphs import (
+    nested_model_graph as _nested_model_graph,
     scripted_think_graph as _scripted_think_graph,
     scripted_tool_graph as _scripted_tool_graph,
 )
+
+
+async def test_models_running_inside_tools_do_not_stream_into_the_answer():
+    """A model invoked inside a tool (what dispatch_subagents does, three at a
+    time) shares the parent run's callbacks, so LangGraph streams its tokens into
+    the same messages stream. Unfiltered they interleave word-by-word and the
+    reply renders as a mash; only the agent's own model node is the answer."""
+    from financial_research_assistant.adapter import _stream_events
+
+    graph = _nested_model_graph()
+    inputs = {"messages": [{"role": "user", "content": "go"}]}
+    events = [ev async for ev in _stream_events(graph, inputs, {})]
+
+    streamed = "".join(ev.text for ev in events if ev.kind == "token")
+    assert "NESTED" not in streamed
+    assert "ANSWER" in streamed
+    # The tool itself still pairs normally — filtering answer text must not
+    # suppress the 🛠 panel for the call the nested models ran under.
+    assert [ev.tool for ev in events if ev.kind == "tool_start"] == ["dispatch"]
+    assert [ev.tool for ev in events if ev.kind == "tool_end"] == ["dispatch"]
 
 
 async def test_stream_events_pair_tool_start_and_end():
