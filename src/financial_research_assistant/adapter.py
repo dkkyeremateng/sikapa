@@ -394,6 +394,44 @@ def _announce(cid: str, entry: dict) -> AgentEvent | None:
     return _tool_start(cid, entry)
 
 
+TOOLS_NODE = "tools"  # create_agent's tool-executing node
+
+
+def _from_own_node(meta: dict | None) -> bool:
+    """True when a streamed chunk is the agent's OWN reply, rather than output
+    from a model running inside one of its tools.
+
+    A chat model invoked inside a tool inherits the parent run's callbacks, so
+    LangGraph streams its tokens into this same ``messages`` stream. That happens
+    in two shapes, which report different metadata:
+
+    * a bare model called in a tool (report synthesis, self-critique) — reports
+      ``langgraph_node="tools"``;
+    * a whole subagent graph — reports its inner ``langgraph_node="model"``, but
+      stays namespaced under the parent's ``tools:<id>`` task.
+
+    Either way the work sits under the tool task, so that is what we test. It
+    matters most for ``dispatch_subagents``, which runs several subagents at
+    once: unfiltered, their tokens interleave word-by-word with each other and
+    with the real answer, and the reply renders as an unreadable mash. Nothing is
+    lost by dropping them — a subagent's answer comes back as its tool result and
+    renders in that tool's panel.
+
+    Everything else is kept by comparing the task namespace to the node, so this
+    holds for any graph shape without naming the answering node (the real agent
+    answers from ``model``, the fake graph from ``respond``).
+    """
+    node = (meta or {}).get("langgraph_node") or ""
+    ns = (meta or {}).get("checkpoint_ns") or ""
+    # A completed message carries no task namespace (reasoning models that don't
+    # stream, and the fake graph, report their reply that way), so it stands in
+    # as its own root.
+    root = ns.split(":", 1)[0] if ns else node
+    if TOOLS_NODE in (root, node):
+        return False
+    return root == node
+
+
 async def _stream_events(graph, inputs, config):
     """Translate ``stream_mode="messages"`` output into AgentEvents.
 
@@ -423,20 +461,23 @@ async def _stream_events(graph, inputs, config):
             calls[cid] = entry
         return cid, entry
 
-    async for chunk, _meta in graph.astream(
+    async for chunk, meta in graph.astream(
         inputs, config, stream_mode="messages"
     ):
+        own = _from_own_node(meta)
         # Any message type may carry the model's chain-of-thought in
         # additional_kwargs["reasoning_content"] (reasoning models put it
         # there; the fake graph mirrors that). Surface it before tool/token
         # handling so the 💭 panel can render alongside the answer.
         rc = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning_content")
-        if rc:
+        if rc and own:
             yield AgentEvent("reasoning", rc, agent=AGENT_NAME)
         # Live token usage: a model call reports its usage on its final chunk, so
         # emit a per-call delta as each completes (ReAct turns have several). The
         # counts tick up mid-run instead of jumping at the end; run_turn reconciles
-        # any provider that doesn't stream per-call usage.
+        # any provider that doesn't stream per-call usage. Deliberately NOT filtered
+        # to the agent's own node: a subagent's tokens are billed too, so they must
+        # count toward the turn's cost even though its text isn't shown.
         din, dout, dcache = _usage_delta(getattr(chunk, "usage_metadata", None))
         if din or dout or dcache:
             yield AgentEvent("usage", "", tokens_in=din, tokens_out=dout, tokens_cache=dcache)
@@ -486,7 +527,7 @@ async def _stream_events(graph, inputs, config):
                     if ev is not None:
                         yield ev
             text = _chunk_text(chunk)
-            if text:
+            if text and own:
                 yield AgentEvent("token", text)
         elif isinstance(chunk, AIMessage):
             # Complete message from a non-streaming node: whole tool calls.

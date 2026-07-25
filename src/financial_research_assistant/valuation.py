@@ -259,8 +259,9 @@ def _sensitivity_block(base_fcf, growth, years, net_debt, snap, discount, tg) ->
         return []
     discounts, tgs, grid = _sensitivity(
         base_fcf, growth, years, net_debt, snap["shares"], discount, tg)
+    corner = "disc\\tg"  # kept out of the f-string: backslashes in an expression need 3.12
     lines = ["", "Sensitivity — intrinsic value / share (rows: discount, cols: terminal growth):",
-             f"{'disc\\tg':<9}" + "".join(f"{_pct(g):>9}" for g in tgs)]
+             f"{corner:<9}" + "".join(f"{_pct(g):>9}" for g in tgs)]
     for r, row in zip(discounts, grid):
         cells = "".join(f"{(f'{v:,.0f}' if v is not None else '—'):>9}" for v in row)
         lines.append(f"{_pct(r):<9}{cells}")
