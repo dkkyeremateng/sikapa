@@ -796,6 +796,20 @@ class AgentApp(App):
         if self._follow or not self._busy:
             log.scroll_end(animate=False)
 
+    def _notify_alert(self, text: str) -> None:
+        """Surface a fired alert rule as a toast *and* a transcript line.
+
+        The toast is the point — it lands even while the user is reading
+        something else. The line is what makes it durable: toasts auto-dismiss,
+        and the digest that evaluated the rule renders in a tool panel that is
+        collapsed by default, so a missed toast would otherwise leave nothing
+        visible. A notify() failure must never sink the turn that raised it."""
+        self._line(f"🔔 {text}", "bold yellow")
+        try:
+            self.notify(text, title="🔔 Alert triggered", severity="warning", timeout=10)
+        except Exception:  # noqa: BLE001 - a toast is best-effort
+            pass
+
     def _trim_log(self) -> None:
         # Removal is async — the _trimming mark keeps a burst of mounts from
         # re-removing widgets whose removal is still pending.
@@ -1554,6 +1568,8 @@ class AgentApp(App):
                     panel.finish(ev)
                     self._follow_end(log)
                     self._show_processing()  # working on the next step
+                elif ev.kind == "alert":
+                    self._notify_alert(ev.text)
                 elif ev.kind == "final":
                     self._stop_processing()
                     final_text = ev.text or (self._answer.text if self._answer else "")

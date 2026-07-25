@@ -69,6 +69,38 @@ def test_evaluate_alerts_fires_the_right_rules(monkeypatch):
     assert "[a5]" not in fired
 
 
+def test_evaluating_rules_buffers_them_for_notification(monkeypatch):
+    """Firing a rule also records it for out-of-band delivery, so an interface
+    can raise a notification the moment it triggers. The buffer drains once."""
+    import financial_research_assistant.fundamentals as fund
+    import financial_research_assistant.tools as tools
+
+    monkeypatch.setattr(tools, "_fetch_daily",
+                        lambda sym, days, **kw: [("2026-01-01", 100.0), ("2026-01-05", 88.0)])
+    monkeypatch.setattr(fund, "_fetch_calendar", lambda sym: {})
+    alerts.drain_triggered()
+
+    alerts.add_alert("AAPL", "drop", 5)
+    alerts.evaluate_alerts(["AAPL"], 5, dt.date(2026, 1, 5))
+
+    fired = alerts.drain_triggered()
+    assert len(fired) == 1
+    assert "AAPL down -12.0%" in fired[0]
+    assert alerts.drain_triggered() == []  # drained, so it won't replay next turn
+
+
+def test_notification_buffer_is_bounded(monkeypatch):
+    """Nothing guarantees a drain (the eval harness ignores alert events), so the
+    buffer caps rather than growing for the life of the process."""
+    alerts.drain_triggered()
+    for i in range(alerts._fired.maxlen + 25):
+        alerts._fired.append(f"alert {i}")
+
+    fired = alerts.drain_triggered()
+    assert len(fired) == alerts._fired.maxlen
+    assert fired[-1] == f"alert {alerts._fired.maxlen + 24}"  # newest kept
+
+
 def test_evaluate_star_applies_to_each_holding(monkeypatch):
     import financial_research_assistant.fundamentals as fund
     import financial_research_assistant.tools as tools

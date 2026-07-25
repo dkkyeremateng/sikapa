@@ -4,10 +4,31 @@ from financial_research_assistant.adapter import run_turn
 
 from .helpers.fakes import fake_ibkr_tools_session as _fake_ibkr_tools_session
 from .helpers.graphs import (
+    alerting_tool_graph as _alerting_tool_graph,
     nested_model_graph as _nested_model_graph,
     scripted_think_graph as _scripted_think_graph,
     scripted_tool_graph as _scripted_tool_graph,
 )
+
+
+async def test_fired_alerts_surface_as_events_after_their_tool_call():
+    """A rule that fires inside a tool reaches the UI as its own `alert` event
+    right after that tool's tool_end, so an interface can notify on it instead of
+    hoping the user spots it in the digest prose."""
+    from financial_research_assistant import alerts
+    from financial_research_assistant.adapter import _stream_events
+
+    alerts.drain_triggered()  # start from a clean buffer
+    graph = _alerting_tool_graph(["AAPL down 6.2% — now 180.10", "TSLA at 195.00"])
+    inputs = {"messages": [{"role": "user", "content": "any alerts?"}]}
+    events = [ev async for ev in _stream_events(graph, inputs, {})]
+
+    kinds = [ev.kind for ev in events]
+    fired = [ev.text for ev in events if ev.kind == "alert"]
+    assert fired == ["AAPL down 6.2% — now 180.10", "TSLA at 195.00"]
+    assert kinds.index("tool_end") < kinds.index("alert")
+    # Drained, not merely copied — a second turn must not replay stale alerts.
+    assert alerts.drain_triggered() == []
 
 
 async def test_models_running_inside_tools_do_not_stream_into_the_answer():

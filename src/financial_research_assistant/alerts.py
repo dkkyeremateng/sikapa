@@ -21,14 +21,41 @@ Evaluation is model-free and reuses the same keyless fetch helpers the digest
 uses (so it's exercised offline in tests and the price cache makes re-fetching
 holdings cheap). ``monitor.build_digest`` calls ``evaluate_alerts`` and prepends a
 "🔔 Alerts triggered" section when any fire.
+
+A fired rule is also buffered for out-of-band delivery (see ``drain_triggered``),
+so an interface can push it the moment it triggers instead of relying on the user
+to read it out of the digest text.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from collections import deque
 from datetime import date
 from pathlib import Path
+
+# Alerts that fired since the last drain, so an interface can surface them
+# out-of-band the moment they trigger (the TUI raises a toast) instead of only
+# inside the digest text a tool returns. ``evaluate_alerts`` fills it; the
+# adapter drains it when the tool call that ran it finishes.
+#
+# Bounded because nothing guarantees a drain — the eval harness and any embedder
+# that ignores alert events would otherwise grow it for the life of the process.
+# Losing the oldest entries is the right trade: the digest text stays the record
+# of what fired, this is only the nudge. deque append/popleft are atomic, which
+# is what makes it safe for rules evaluated on a worker thread.
+_fired: deque[str] = deque(maxlen=100)
+
+
+def drain_triggered() -> list[str]:
+    """Return the alerts that fired since the last call, emptying the buffer."""
+    out = []
+    while True:
+        try:
+            out.append(_fired.popleft())
+        except IndexError:
+            return out
 
 _KINDS = {"drop", "rise", "move", "below", "above", "earnings"}
 # Symbol tokens that mean "every holding" rather than one ticker.
@@ -233,6 +260,7 @@ def evaluate_alerts(symbols_held: list[str], lookback_days: int, today: date) ->
             msg = _check_rule(t, kind, v, lookback_days, today, _fetch_daily, _fetch_calendar)
             if msg:
                 triggered.append(f"[{r['id']}] {msg}")
+                _fired.append(msg)  # for the out-of-band notification
     return triggered
 
 
