@@ -284,6 +284,7 @@ async def _headless(
             if alerts.sound_enabled() and sys.stderr.isatty():
                 print("\a", end="", file=sys.stderr, flush=True)
             alerts.play_alert_sound()
+            alerts.notify_desktop(ev.text)
         elif ev.kind == "usage" and (ev.tokens_in or ev.tokens_out or ev.tokens_cache):
             # Usage streams as per-call deltas; accumulate so the trace + line
             # report the turn total, not just the last call.
