@@ -577,10 +577,16 @@ one with `remove_alert`. Rules are stored as plain JSON at
 `FINANCIAL_RESEARCH_ALERTS_FILE`).
 
 A rule that fires is also pushed to you the moment it triggers, rather than only
-appearing in the digest text: the TUI plays a sound, raises a toast, and writes a
-🔔 line into the transcript (tool panels are collapsed by default, so the line is
-what survives a dismissed toast); the headless CLI prints it to stderr and plays
-the same sound.
+appearing in the digest text: the TUI raises an **OS notification**, plays a sound,
+shows a toast, and writes a 🔔 line into the transcript (tool panels are collapsed
+by default, so the line is what survives a dismissed toast); the headless CLI
+prints it to stderr and does the same sound and banner.
+
+The OS banner uses built-in tooling — `osascript` on macOS, `notify-send` on Linux
+— so there's nothing to install. It's the only delivery that reaches you with the
+terminal buried behind other windows. On macOS the first one may not appear until
+your terminal app is granted permission under System Settings › Notifications. Set
+`FINANCIAL_RESEARCH_ALERT_DESKTOP=0` to turn banners off.
 
 The sound is a real audio file (`afplay` on macOS, `paplay`/`aplay`/`ffplay`/`play`
 on Linux) played alongside the terminal bell, because the bell on its own is just a

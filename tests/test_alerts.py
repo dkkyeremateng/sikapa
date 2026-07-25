@@ -152,6 +152,51 @@ def test_play_alert_sound_is_silent_when_it_cannot_play(monkeypatch,
     assert _never_actually_play_audio == []
 
 
+def test_desktop_notification_passes_text_through_argv(monkeypatch,
+                                                       _never_actually_play_audio):
+    """The alert text must never be interpolated into the AppleScript source —
+    a line carrying quotes (or AppleScript syntax) would break it or run as
+    code. It goes through argv, so it survives verbatim."""
+    monkeypatch.setattr(alerts.sys, "platform", "darwin")
+    monkeypatch.setattr(alerts.shutil, "which", lambda n: f"/usr/bin/{n}")
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_DESKTOP", raising=False)
+
+    nasty = 'CPRT at 27.94 — at/below your "100" level'
+    assert alerts.notify_desktop(nasty) is True
+
+    cmd = _never_actually_play_audio[0]
+    assert cmd[0] == "osascript"
+    assert nasty in cmd                      # verbatim, its own argv entry
+    assert nasty not in cmd[2]               # and NOT inside the script source
+
+
+def test_desktop_notification_can_be_silenced_and_degrades(monkeypatch,
+                                                           _never_actually_play_audio):
+    """Off by env var, and a no-op where the OS offers no notifier — neither
+    raises, since the toast and 🔔 line already delivered the alert."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_DESKTOP", "0")
+    assert alerts.notify_desktop("AAPL down 6%") is False
+
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_DESKTOP", raising=False)
+    monkeypatch.setattr(alerts.sys, "platform", "linux")
+    monkeypatch.setattr(alerts.shutil, "which", lambda n: None)  # no notify-send
+    assert alerts.notify_desktop("AAPL down 6%") is False
+
+    assert _never_actually_play_audio == []
+
+
+def test_desktop_notification_uses_notify_send_on_linux(monkeypatch,
+                                                        _never_actually_play_audio):
+    monkeypatch.setattr(alerts.sys, "platform", "linux")
+    monkeypatch.setattr(alerts.shutil, "which",
+                        lambda n: "/usr/bin/notify-send" if n == "notify-send" else None)
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_DESKTOP", raising=False)
+
+    assert alerts.notify_desktop("TSLA at 195.00") is True
+    assert _never_actually_play_audio[0][0] == "notify-send"
+    assert "TSLA at 195.00" in _never_actually_play_audio[0]
+
+
 def test_notification_buffer_is_bounded(monkeypatch):
     """Nothing guarantees a drain (the eval harness ignores alert events), so the
     buffer caps rather than growing for the life of the process."""

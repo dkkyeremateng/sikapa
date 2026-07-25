@@ -8,7 +8,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Input, OptionList, Static
 from textual.worker import Worker
 
-from financial_research_assistant import sessions
+from financial_research_assistant import alerts, sessions
 from .fixtures.statements import SAMPLE_STATEMENT
 from .helpers.fakes import RecordingWorker
 from .helpers.tui import log_text, statusbar_text
@@ -1488,6 +1488,11 @@ async def test_tui_alert_makes_a_sound_and_can_be_silenced(monkeypatch, tmp_path
     monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
     monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_SOUND", raising=False)
 
+    # The same spawn point serves the desktop notifier, so count players only.
+    def players():
+        notifiers = {"osascript", "notify-send"}
+        return [c for c in _never_actually_play_audio if c[0] not in notifiers]
+
     app = AgentApp(fake=True, session_id="alert-bell")
     async with app.run_test() as pilot:
         rings: list[int] = []
@@ -1498,13 +1503,13 @@ async def test_tui_alert_makes_a_sound_and_can_be_silenced(monkeypatch, tmp_path
         app._notify_alert("AAPL down 6.2%")
         await pilot.pause()
         assert rings == [1]
-        assert len(_never_actually_play_audio) == 1  # a player was launched
+        assert len(players()) == 1  # a player was launched
 
         monkeypatch.setenv("FINANCIAL_RESEARCH_ALERT_SOUND", "0")
         app._notify_alert("TSLA at 195.00")
         await pilot.pause()
-        assert rings == [1]                          # no new ring
-        assert len(_never_actually_play_audio) == 1  # and no new sound
+        assert rings == [1]          # no new ring
+        assert len(players()) == 1   # and no new sound
         assert toasts == ["AAPL down 6.2%", "TSLA at 195.00"]  # toast unaffected
         assert "🔔 TSLA at 195.00" in log_text(app)
 
@@ -1524,6 +1529,45 @@ async def test_tui_alert_survives_a_failing_bell(monkeypatch, tmp_path):
         monkeypatch.setattr(type(app), "bell", boom)
         monkeypatch.setattr(type(app), "notify", lambda self, msg, **kw: toasts.append(msg))
 
+        app._notify_alert("NVDA reports earnings 2026-01-08")
+        await pilot.pause()
+
+        assert toasts == ["NVDA reports earnings 2026-01-08"]
+        assert "🔔 NVDA reports earnings 2026-01-08" in log_text(app)
+
+
+async def test_tui_alert_raises_an_os_notification(monkeypatch, tmp_path):
+    """A fired alert also goes out as an OS-level banner — the only delivery
+    that survives the terminal being buried behind other windows entirely."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_DESKTOP", raising=False)
+
+    banners: list[str] = []
+    monkeypatch.setattr(alerts, "notify_desktop", lambda text: banners.append(text))
+
+    app = AgentApp(fake=True, session_id="alert-desktop")
+    async with app.run_test() as pilot:
+        monkeypatch.setattr(type(app), "notify", lambda self, msg, **kw: None)
+        app._notify_alert("CPRT at 27.94 — at/below your 100 level")
+        await pilot.pause()
+
+    assert banners == ["CPRT at 27.94 — at/below your 100 level"]
+
+
+async def test_tui_alert_survives_a_failing_os_notification(monkeypatch, tmp_path):
+    """The banner is best-effort too: if it raises, the transcript line and the
+    toast must still land."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+
+    def boom(text):
+        raise RuntimeError("no notifier")
+
+    monkeypatch.setattr(alerts, "notify_desktop", boom)
+
+    app = AgentApp(fake=True, session_id="alert-desktop-broken")
+    async with app.run_test() as pilot:
+        toasts: list[str] = []
+        monkeypatch.setattr(type(app), "notify", lambda self, msg, **kw: toasts.append(msg))
         app._notify_alert("NVDA reports earnings 2026-01-08")
         await pilot.pause()
 

@@ -24,13 +24,17 @@ holdings cheap). ``monitor.build_digest`` calls ``evaluate_alerts`` and prepends
 
 A fired rule is also buffered for out-of-band delivery (see ``drain_triggered``),
 so an interface can push it the moment it triggers instead of relying on the user
-to read it out of the digest text, and ``play_alert_sound`` makes it audible.
+to read it out of the digest text. ``play_alert_sound`` makes it audible and
+``notify_desktop`` raises an OS-level banner, so an alert reaches you even with
+the terminal buried.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 from collections import deque
 from datetime import date
 from pathlib import Path
@@ -58,7 +62,8 @@ def drain_triggered() -> list[str]:
             return out
 
 
-_SOUND_OFF = {"0", "false", "no", "off"}
+# Shared by every alert-delivery toggle, so they all accept the same words.
+_FALSY = {"0", "false", "no", "off"}
 
 # Played when a rule fires; first one that exists on this machine wins. The
 # terminal bell alone is not enough — it's only a BEL byte, and terminals widely
@@ -84,7 +89,7 @@ def sound_enabled() -> bool:
     terminal that renders the bell as a full-screen flash.
     """
     raw = os.environ.get("FINANCIAL_RESEARCH_ALERT_SOUND", "").strip().lower()
-    return raw not in _SOUND_OFF
+    return raw not in _FALSY
 
 
 def alert_sound_file() -> str | None:
@@ -95,7 +100,7 @@ def alert_sound_file() -> str | None:
     through to the system default and the flag keeps working as a plain toggle.
     """
     raw = os.environ.get("FINANCIAL_RESEARCH_ALERT_SOUND", "").strip()
-    if raw and raw.lower() not in _SOUND_OFF:
+    if raw and raw.lower() not in _FALSY:
         chosen = Path(os.path.expandvars(raw)).expanduser()
         if chosen.is_file():
             return str(chosen)
@@ -108,9 +113,6 @@ def alert_sound_file() -> str | None:
 def _player_cmd(sound: str) -> list[str] | None:
     """The command that plays ``sound`` on this platform, or None if none is
     installed (headless servers routinely have no audio player at all)."""
-    import shutil
-    import sys
-
     if sys.platform == "darwin":
         return ["afplay", sound] if shutil.which("afplay") else None
     for name in _PLAYERS:
@@ -123,12 +125,14 @@ def _player_cmd(sound: str) -> list[str] | None:
 
 
 def _spawn(cmd: list[str]) -> None:
-    """Run ``cmd`` on a daemon thread.
+    """Run an alert-delivery command (sound player, desktop notifier) on a
+    daemon thread.
 
-    The thread is what keeps this honest: playing inline would freeze the UI for
-    the length of the sound, while a bare Popen we never wait on would leave a
-    zombie behind for every alert in a long-running TUI. Waiting on a daemon
-    thread reaps the child without blocking anything, and won't hold up exit."""
+    The thread is what keeps this honest: running inline would freeze the UI for
+    the length of the sound or the notifier call, while a bare Popen we never
+    wait on would leave a zombie behind for every alert in a long-running TUI.
+    Waiting on a daemon thread reaps the child without blocking anything, and
+    won't hold up exit."""
     import subprocess
     import threading
 
@@ -141,7 +145,7 @@ def _spawn(cmd: list[str]) -> None:
         except (OSError, subprocess.SubprocessError):
             pass  # best-effort: the toast and 🔔 line already delivered the alert
 
-    threading.Thread(target=run, daemon=True, name="alert-sound").start()
+    threading.Thread(target=run, daemon=True, name="alert-delivery").start()
 
 
 def play_alert_sound() -> bool:
@@ -157,6 +161,62 @@ def play_alert_sound() -> bool:
     if not sound:
         return False
     cmd = _player_cmd(sound)
+    if cmd is None:
+        return False
+    _spawn(cmd)
+    return True
+
+
+DESKTOP_TITLE = "🔔 Alert triggered"
+DESKTOP_SUBTITLE = "financial-research-assistant"
+
+# AppleScript reads the notification text out of argv rather than having it
+# interpolated into the source. An alert line is built from fetched data and
+# routinely contains quotes and em dashes, which would break the script — or, if
+# a symbol or note ever carried AppleScript syntax, run as code.
+_OSA_NOTIFY = (
+    "on run argv\n"
+    "display notification (item 1 of argv) with title (item 2 of argv) "
+    "subtitle (item 3 of argv)\n"
+    "end run"
+)
+
+
+def desktop_enabled() -> bool:
+    """Whether a fired alert also raises an OS-level notification.
+
+    On by default, for the same reason the sound is: the point of an alert is to
+    reach you when you're doing something else, and a desktop banner is the only
+    delivery here that survives the terminal being buried entirely. Silence with
+    ``FINANCIAL_RESEARCH_ALERT_DESKTOP=0``.
+    """
+    raw = os.environ.get("FINANCIAL_RESEARCH_ALERT_DESKTOP", "").strip().lower()
+    return raw not in _FALSY
+
+
+def _desktop_cmd(text: str) -> list[str] | None:
+    """The command that raises an OS notification, or None where there's no way
+    to (a bare Linux box without notify-send, or Windows)."""
+    if sys.platform == "darwin":
+        if not shutil.which("osascript"):
+            return None
+        return ["osascript", "-e", _OSA_NOTIFY, text, DESKTOP_TITLE, DESKTOP_SUBTITLE]
+    if shutil.which("notify-send"):
+        return ["notify-send", "--app-name", DESKTOP_SUBTITLE, DESKTOP_TITLE, text]
+    return None
+
+
+def notify_desktop(text: str) -> bool:
+    """Raise an OS-level notification for a fired alert, returning whether one
+    was actually dispatched.
+
+    Best-effort like the sound: False means there was no way to notify here, not
+    an error. Note that macOS gates these on the *terminal app* having
+    notification permission — a first run may need that granted in System
+    Settings › Notifications before anything appears."""
+    if not desktop_enabled():
+        return False
+    cmd = _desktop_cmd(text)
     if cmd is None:
         return False
     _spawn(cmd)

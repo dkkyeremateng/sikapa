@@ -823,6 +823,9 @@ class AgentApp(App):
             # the played file is what actually makes noise on those.
             best_effort(self.bell)
             best_effort(alerts.play_alert_sound)
+        # The OS banner is the only delivery that survives the terminal being
+        # buried behind other windows entirely.
+        best_effort(lambda: alerts.notify_desktop(text))
         best_effort(
             lambda: self.notify(
                 text, title="🔔 Alert triggered", severity="warning", timeout=10
