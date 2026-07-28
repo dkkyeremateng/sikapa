@@ -206,16 +206,11 @@ def _autocompact_fraction() -> float | None:
 def _resolved_model(model: str | None) -> str:
     """The model name used for pricing/context display, matching what _make_llm
     actually builds — so a non-OpenAI provider's default is reflected, not a
-    hardcoded gpt-4.1-mini."""
-    if model:
-        return model
-    env = os.environ.get("OPENAI_MODEL")
-    if env:
-        return env
-    from .graph import _default_model
+    hardcoded gpt-4.1-mini. Delegates to graph.resolved_model, which the context
+    middleware's trigger threshold also uses."""
+    from .graph import resolved_model
 
-    provider = (os.environ.get("MODEL_PROVIDER") or "openai").strip().lower()
-    return _default_model(provider)
+    return resolved_model(model)
 
 
 COMPACT_KEEP_LAST = 4  # recent messages left verbatim after the summary seed
@@ -357,14 +352,19 @@ def _tool_start(cid: str, entry: dict) -> AgentEvent:
 def _tool_end(cid: str, entry: dict, msg: ToolMessage) -> AgentEvent:
     ok = getattr(msg, "status", "success") != "error"
     dt = time.monotonic() - entry["started"]
+    # Chart tools split their result: `content` is the summary the model sees,
+    # `artifact` is the full text including the chart art, which is display-only
+    # (see tools.ChartText). Prefer the artifact so the panel still shows the
+    # whole chart while the model's context carries only the stats.
+    display = getattr(msg, "artifact", None) or msg.content
     return AgentEvent(
         "tool_end",
         f"{AGENT_NAME} · {entry['name']} {'✓' if ok else '✗'} ({format_duration(dt)})",
         agent=AGENT_NAME,
         tool=entry["name"],
-        # Roomy cap so a rendered chart (price_history_chart) shows in full in the
-        # tool-result panel; other results are far shorter than this.
-        detail=_snippet(msg.content, 4000),
+        # Roomy cap so a rendered chart shows in full in the tool-result panel;
+        # other results are far shorter than this.
+        detail=_snippet(display, 4000),
         duration=dt,
         ok=ok,
         call_id=cid,

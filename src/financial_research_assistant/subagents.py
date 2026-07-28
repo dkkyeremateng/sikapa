@@ -43,6 +43,28 @@ _DISPATCH_NAMES = {"dispatch_subagent", "dispatch_subagents"}
 _MAX_TASKS = 6
 _RECURSION_LIMIT = 40
 
+# How much of one subagent's findings comes back into the PRIMARY agent's
+# context. Dispatch is the biggest token amplifier in the system — up to six
+# subagents, each running its own multi-step tool loop, all of whose output lands
+# in the main thread and is then replayed on every later step of the turn. The
+# sequence-mode digest has always been capped (see `_dispatch_subagents`); this
+# caps the returned findings on the same principle. It's deliberately generous —
+# a subagent is asked for a findings summary, not a transcript, so a well-scoped
+# task lands well inside it and only a runaway is trimmed.
+_RESULT_CAP = 2500
+
+
+def _cap(out: str, cap: int = _RESULT_CAP) -> str:
+    """Trim one subagent's findings to ``cap`` characters, saying so when it cuts
+    (a silent truncation would read as the subagent's own conclusion)."""
+    if len(out) <= cap:
+        return out
+    return (
+        out[:cap].rstrip()
+        + f"\n… [findings truncated at {cap} characters — narrow the task, or "
+        f"dispatch a follow-up for the rest]"
+    )
+
 
 def _subagent_timeout() -> float:
     """Per-subagent wall-clock cap (seconds). Override with
@@ -100,25 +122,181 @@ SUBAGENT_SYSTEM_PROMPT = (
 )
 
 
-def _subagent_tools() -> list:
-    """The local research tools a subagent gets: everything in ``tools.TOOLS``
-    except the dispatch tools (recursion guard). Imported lazily so this module
-    stays import-cycle-free (``tools`` imports ``SUBAGENT_TOOLS`` at load)."""
+# --- Subagent toolset ------------------------------------------------------
+#
+# A subagent used to receive the ENTIRE local toolset — ~12.6k tokens of schemas
+# re-sent on every step of its own ReAct loop. With six parallel subagents each
+# running several steps, one `dispatch_subagents` call spent several hundred
+# thousand input tokens describing tools that a focused task ("get NVDA's latest
+# quarterly revenue") would never call.
+#
+# So a subagent gets the CORE tools plus only the groups its task text implicates.
+# Routing is a deliberately conservative keyword match on the task, with three
+# safety properties:
+#   - the core group is always present, so any subagent can fetch a price, a
+#     fundamentals snapshot, the date, and news;
+#   - a task matching NO group falls back to the full pool rather than a bare
+#     core, so an unanticipated phrasing degrades to today's behavior;
+#   - `FINANCIAL_RESEARCH_SUBAGENT_ALL_TOOLS=1` restores the full pool outright.
+#
+# Tool names not listed in any group below are only reachable via that fallback
+# or the env override — keep the groups in sync when adding a tool.
+
+_CORE_TOOLS = frozenset({
+    "current_date", "pct_change", "cagr", "position_weight",
+    "price_history_chart", "web_search", "stock_fundamentals",
+})
+
+# group -> (tool names, trigger keywords matched against the lowercased task)
+_TOOL_GROUPS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "filings": (
+        frozenset({
+            "sec_financials", "sec_quarterly_financials", "compare_sec_financials",
+            "insider_transactions", "sec_filings", "sec_material_events",
+            "sec_filing_search", "sec_filing_excerpt", "filing_summary",
+            "filing_tone_trend", "sec_metric_rank",
+        }),
+        frozenset({
+            "sec", "edgar", "10-k", "10k", "10-q", "10q", "8-k", "8k", "filing",
+            "filed", "insider", "form 4", "as-reported", "as reported", "audited",
+            "disclosure", "disclose", "material event", "annual report", "xbrl",
+            "quarterly", "quarter", "restat", "footnote",
+        }),
+    ),
+    "valuation": (
+        frozenset({"dcf_valuation"}),
+        frozenset({
+            "dcf", "intrinsic", "fair value", "valuation", "worth", "overvalued",
+            "undervalued", "over-valued", "under-valued", "discounted cash",
+        }),
+    ),
+    "options": (
+        frozenset({"explain_option"}),
+        frozenset({
+            "option", "call ", "put ", "strike", "expiry", "expiration", "premium",
+            "breakeven", "implied vol", " iv ", "contract",
+        }),
+    ),
+    "screener": (
+        frozenset({"screen_stocks"}),
+        frozenset({
+            "screen", "find stocks", "universe", "sp500", "s&p", "candidates",
+            "meeting", "criteria", "scan for",
+        }),
+    ),
+    "reference": (
+        frozenset({
+            "analyst_ratings", "earnings_calendar", "etf_exposure",
+            "compare_stocks", "dividend_projection",
+        }),
+        frozenset({
+            "analyst", "rating", "price target", "upgrade", "downgrade", "earnings",
+            "eps", "consensus", "etf", "fund", "holdings of", "dividend", "yield",
+            "ex-div", "compare", "vs ", "versus", "cheaper", "growth",
+        }),
+    ),
+    "risk": (
+        frozenset({
+            "risk_metrics", "correlation_matrix", "factor_exposure",
+            "portfolio_risk", "portfolio_lookthrough",
+        }),
+        frozenset({
+            "risk", "volatil", "drawdown", "sharpe", "beta", "correlat", "factor",
+            "alpha", "exposure", "concentration", "look-through", "lookthrough",
+        }),
+    ),
+    "portfolio": (
+        frozenset({
+            "query_transactions", "query_portfolio", "portfolio_value_history",
+            "portfolio_performance_chart", "realized_gains", "income_summary",
+            "allocation", "export_data", "portfolio_vs_benchmark",
+            "tax_loss_harvest", "portfolio_digest", "import_ibkr_statement",
+        }),
+        frozenset({
+            "portfolio", "holding", "position", "my account", "allocation",
+            "realized", "capital gain", "tax", "income", "nav", "net worth",
+            "statement", "benchmark", "deposits", "my ",
+        }),
+    ),
+    "documents": (
+        frozenset({
+            "ingest_document", "ask_document", "list_documents", "forget_document",
+        }),
+        frozenset({
+            "document", "pdf", "uploaded", "local file", "the file", "the report",
+            "attached",
+        }),
+    ),
+    "research": (
+        frozenset({"research_report", "explain_stock_move", "bull_bear_debate"}),
+        frozenset({
+            "research report", "deep dive", "deep-dive", "full write-up", "why is",
+            "why did", "moved", "bull", "bear", "case for", "case against",
+            "catalyst",
+        }),
+    ),
+    "fx": (
+        frozenset({"convert_currency"}),
+        frozenset({"currency", "convert", "fx", "exchange rate", "eur", "gbp", "usd"}),
+    ),
+    "alerts": (
+        frozenset({"add_alert", "list_alerts", "remove_alert"}),
+        frozenset({"alert", "notify", "tell me if", "watch for"}),
+    ),
+}
+
+
+def _all_tools_override() -> bool:
+    """``FINANCIAL_RESEARCH_SUBAGENT_ALL_TOOLS=1`` gives every subagent the full
+    toolset again — the escape hatch if keyword routing ever withholds something a
+    task needed."""
+    return (os.environ.get("FINANCIAL_RESEARCH_SUBAGENT_ALL_TOOLS") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _selected_names(task: str) -> frozenset[str] | None:
+    """Tool names for ``task``: core plus every group its text implicates. Returns
+    ``None`` when no group matched, meaning "give it everything" — better to
+    overspend tokens than to strand a subagent without the tool it needed."""
+    text = f" {' '.join((task or '').lower().split())} "
+    keep = set(_CORE_TOOLS)
+    matched = False
+    for names, triggers in _TOOL_GROUPS.values():
+        if any(k in text for k in triggers):
+            keep |= names
+            matched = True
+    return frozenset(keep) if matched else None
+
+
+def _subagent_tools(task: str = "") -> list:
+    """The local research tools a subagent gets: ``tools.TOOLS`` minus the dispatch
+    tools (the hard recursion guard), minus groups whose backing store is empty
+    (``active_tools``), minus groups this ``task`` doesn't implicate. Imported
+    lazily so this module stays import-cycle-free (``tools`` imports
+    ``SUBAGENT_TOOLS`` at load)."""
     from . import tools as tools_mod
 
-    out = []
-    for t in tools_mod.TOOLS:
-        name = getattr(t, "name", None) or getattr(t, "__name__", "")
-        if name not in _DISPATCH_NAMES:
-            out.append(t)
-    return out
+    pool = [
+        t for t in tools_mod.TOOLS
+        if tools_mod.tool_name(t) not in _DISPATCH_NAMES
+    ]
+    # Same capability gate the primary agent uses: never hand a subagent a
+    # statements/documents/alerts tool whose store holds nothing.
+    pool = tools_mod.active_tools(pool=pool)
+    if _all_tools_override():
+        return pool
+    keep = _selected_names(task)
+    if keep is None:
+        return pool
+    return [t for t in pool if tools_mod.tool_name(t) in keep]
 
 
-def _build_subagent(model: str | None = None):
+def _build_subagent(model: str | None = None, task: str = ""):
     """Compile a fresh ReAct subagent: the subagent model (an explicit ``model``
-    wins, else ``SUBAGENT_MODEL``, else the primary agent's model), the subagent
-    toolset, the subagent system prompt, and its own isolated checkpointer (so
-    parallel subagents never share state)."""
+    wins, else ``SUBAGENT_MODEL``, else the primary agent's model), the toolset
+    selected for ``task``, the subagent system prompt, and its own isolated
+    checkpointer (so parallel subagents never share state)."""
     from langchain.agents import create_agent
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -126,7 +304,7 @@ def _build_subagent(model: str | None = None):
 
     return create_agent(
         model=_make_llm(model or _subagent_model(), **_subagent_llm_overrides()),
-        tools=_subagent_tools(),
+        tools=_subagent_tools(task),
         system_prompt=SUBAGENT_SYSTEM_PROMPT,
         checkpointer=MemorySaver(),
     )
@@ -155,7 +333,7 @@ async def run_subagent(task: str, model: str | None = None) -> str:
     for the caller to render. This is the seam tests monkeypatch to stay offline."""
     from langchain_core.messages import HumanMessage
 
-    graph = _build_subagent(model)
+    graph = _build_subagent(model, task)
     config = {
         "configurable": {"thread_id": "subagent"},
         "recursion_limit": _RECURSION_LIMIT,
@@ -210,7 +388,7 @@ async def _dispatch_subagent(task: str) -> str:
     Returns the subagent's final findings summary (cite-and-'as of'-dated)."""
     if not (task or "").strip():
         return "Give a task to delegate, e.g. 'Research AAPL's valuation and latest earnings.'"
-    return await _run_one(task.strip())
+    return _cap(await _run_one(task.strip()))
 
 
 async def _dispatch_subagents(tasks: str, mode: str = "parallel") -> str:
@@ -267,7 +445,7 @@ async def _dispatch_subagents(tasks: str, mode: str = "parallel") -> str:
     blocks = [header, ""]
     for i, (task, out) in enumerate(zip(task_list, results), 1):
         blocks.append(f"### Subagent {i}: {_label(task)}")
-        blocks.append(out)
+        blocks.append(_cap(out))
         blocks.append("")
     if skipped:
         blocks.append(

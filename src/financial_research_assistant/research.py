@@ -72,6 +72,22 @@ async def _gather(fns: dict, fake: bool, fake_label: str) -> list[tuple[str, str
     ]
 
 
+def summarize_charts(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Reduce any chart section to its summary stats.
+
+    The gather helpers return whatever each tool returns, so the price-history
+    section arrives as a ``ChartText`` — summary line plus ~300 tokens of braille
+    plot. That art is worth keeping in a report saved to disk for a human, but a
+    section set headed for the MODEL should carry only the numbers it can read.
+    Non-chart sections pass through untouched."""
+    from .tools import ChartText
+
+    return [
+        (label, text.summary if isinstance(text, ChartText) else text)
+        for label, text in sections
+    ]
+
+
 def gather_sections_sync(symbol: str) -> list[tuple[str, str]]:
     """Run every ticker section retrieval sequentially (for the sync tool path). A
     section that raises becomes a labeled error note rather than aborting the set."""
@@ -242,7 +258,9 @@ def research_report(symbol: str) -> str:
     from .reflection import recall_lessons
 
     sym = symbol.strip().upper()
-    sections = gather_sections_sync(symbol)
+    # Model-facing: keep the chart's stats, drop its art (see summarize_charts).
+    # The standalone `--research` path saves a report for a human and keeps both.
+    sections = summarize_charts(gather_sections_sync(symbol))
     header = (
         f"Research findings for {sym} — synthesize these into a "
         f"structured, cited markdown report (Summary, Valuation & Fundamentals, "
@@ -343,7 +361,9 @@ def bull_bear_debate(symbol: str) -> str:
     from .reflection import recall_lessons
 
     sym = symbol.strip().upper()
-    sections = gather_sections_sync(symbol)
+    # Model-facing: keep the chart's stats, drop its art (see summarize_charts).
+    # The standalone `--research` path saves a report for a human and keeps both.
+    sections = summarize_charts(gather_sections_sync(symbol))
     header = (
         f"Construct an adversarial bull-vs-bear analysis of {sym} using ONLY the "
         f"findings below. Write THREE parts:\n"
