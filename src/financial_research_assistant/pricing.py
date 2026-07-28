@@ -88,6 +88,18 @@ MODEL_CONTEXT: dict[str, int] = {
     "o3": 200_000,
     "gpt-4-turbo": 128_000,
     "gpt-3.5": 16_385,
+    # Current Claude models carry a 1M window; older ones (and Haiku 4.5) stay at
+    # 200k, which the bare "claude" fallback below covers. Longest prefix wins, so
+    # these must be spelled out per model rather than collapsed to "claude-opus" —
+    # Opus 4.5 and earlier are 200k, and would be wrong under a shared prefix.
+    "claude-fable-5": 1_000_000,
+    "claude-mythos-5": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
     "claude": 200_000,
     "gemini-1.5": 1_048_576,
     "gemini-2": 1_048_576,
@@ -104,6 +116,16 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o": (2.50, 10.00),
     "o3-mini": (1.10, 4.40),
     "o1-mini": (1.10, 4.40),
+    # The Opus tier repriced to $5/$25 with the 4.6 generation; the bare
+    # "claude-opus" key below keeps the old $15/$75 for Opus 3, which is what it
+    # was actually priced at. Longest prefix wins, so the specific keys take
+    # precedence over it.
+    "claude-fable-5": (10.00, 50.00),
+    "claude-mythos-5": (10.00, 50.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-opus-4-7": (5.00, 25.00),
+    "claude-opus-4-6": (5.00, 25.00),
     "claude-opus": (15.00, 75.00),
     "claude-sonnet": (3.00, 15.00),
     "claude-haiku": (1.00, 5.00),
@@ -113,9 +135,19 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gemini-1.5-flash": (0.075, 0.30),
 }
 
-# Cached input tokens bill at this fraction of the input rate (OpenAI charges
-# 0.25x for cached prompt reads on the gpt-4.1 family).
+# Cached input tokens bill at this fraction of the input rate. The rate is
+# provider-specific: OpenAI charges 0.25x for cached prompt reads on the gpt-4.1
+# family, Anthropic ~0.1x for a cache read. Applying the OpenAI figure to an
+# Anthropic run understates the saving from prompt caching by 2.5x, so
+# `_cache_discount` picks per model. Kept as a module constant because it is the
+# documented default and is referenced elsewhere.
 CACHE_DISCOUNT = 0.25
+ANTHROPIC_CACHE_DISCOUNT = 0.1
+
+
+def _cache_discount(model: str) -> float:
+    """Fraction of the input rate a cached token bills at, for ``model``."""
+    return ANTHROPIC_CACHE_DISCOUNT if model.startswith("claude") else CACHE_DISCOUNT
 
 
 def context_cap(model: str) -> int:
@@ -179,5 +211,5 @@ def cost_usd(model: str, tok_in: int, tok_out: int, tok_cache: int = 0) -> float
     cache = min(tok_cache, tok_in)  # cached tokens are a subset of input
     fresh_in = tok_in - cache
     return (
-        fresh_in * r[0] + cache * r[0] * CACHE_DISCOUNT + tok_out * r[1]
+        fresh_in * r[0] + cache * r[0] * _cache_discount(model) + tok_out * r[1]
     ) / 1_000_000
