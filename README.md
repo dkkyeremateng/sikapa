@@ -740,6 +740,33 @@ agent** (via `graph._make_llm`), so it honors `OPENAI_API_BASE` (local servers) 
 `EVAL_JUDGE_MODEL` to override the judge model (e.g. a stronger cross-family one).
 Results append to `eval/results.jsonl`.
 
+### A/B a code change against a commit (`eval/ab_compare.py`)
+
+`--ab` below measures a candidate **prompt addendum** — extra text layered onto
+the prompt. To measure an edit to the **code itself** (a trimmed system prompt, a
+reworded tool description, changed tool gating), use `ab_compare.py`, which scores
+the working tree against any git ref:
+
+```bash
+python eval/ab_compare.py                # working tree vs HEAD
+python eval/ab_compare.py --items 10     # cheap subset first
+python eval/ab_compare.py --repeat 3     # average out llm_judge noise
+python eval/ab_compare.py --ref main --tolerance 0.01
+```
+
+The baseline arm is a throwaway `git worktree` at the ref, loaded by pointing the
+child's `PYTHONPATH` at that checkout — so there is no frozen copy of the old
+prompt to maintain and no environment variable that could override the system
+prompt in production. Both arms get their **own `MEMORY_DIR`** (otherwise arm 1's
+answers are recalled into arm 2's prompt) and an empty prompt addendum, and each
+is preflighted with one cheap prompt so a misconfigured arm fails loudly instead
+of scoring 0.00 on everything and looking like a catastrophic regression. Exits
+non-zero if the mean drops past `--tolerance`, so it can gate a merge.
+
+Most of the dataset is `trajectory` items, which assert *which tool* a query
+should drive — exactly what a prompt or tool-description edit is most likely to
+break.
+
 ### Eval-driven self-improvement (learns from its own scores)
 
 The harness can close the loop — turn eval **failures** into a **proposed prompt
