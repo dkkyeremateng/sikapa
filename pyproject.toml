@@ -13,6 +13,13 @@ dependencies = [
     "langchain>=1.0,<2.0",
     "langchain-openai>=1.0",
     "langchain-mcp-adapters>=0.1",
+    # `langchain-mcp-adapters` only asks for `mcp>=1.9.2`, so a fresh resolve
+    # picks up mcp 2.x — which moved `RequestContext` out of
+    # `mcp.shared.context` and breaks the adapter on import, taking the whole
+    # live broker MCP session down with it. uv.lock already held this at 1.28.1,
+    # so locked installs were fine and a plain `pip install .` was not; the
+    # bound makes both agree. Lift it once the adapter supports mcp 2.x.
+    "mcp>=1.9.2,<2.0",
     "textual>=1.0",
     "python-dotenv>=1.0",
     "plotext>=5.2",
