@@ -225,6 +225,58 @@ async def test_tui_config_endpoint_follows_the_credential(monkeypatch, tmp_path)
         assert "api.openai.com" not in text
 
 
+def _header_text(app) -> str:
+    return str(app.query_one("#config", Static).render())
+
+
+async def test_tui_header_endpoint_follows_the_credential(monkeypatch, tmp_path):
+    """The header bar, not just /config: signed in to Anthropic it read
+    'https://api.openai.com/v1' — the one endpoint the request never reaches."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    from financial_research_assistant import auth
+
+    auth.set_credential(
+        "default",
+        {"provider": "anthropic-key", "type": "api_key", "key": "sk-ant-x",
+         "model_provider": "anthropic",
+         "models": [{"name": "claude-haiku-4-5-20251001"}]},
+    )
+    app = AgentApp(fake=False, session_id="hdrauth")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        text = _header_text(app)
+        assert "api.anthropic.com" in text
+        assert "api.openai.com" not in text
+        assert "claude-haiku-4-5-20251001" in text
+
+
+async def test_tui_header_updates_when_the_credential_changes(monkeypatch, tmp_path):
+    """Signing out has to redraw the header — otherwise it keeps naming a gateway
+    that is no longer in use."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("OPENAI_API_BASE", "http://env/v1")
+    from financial_research_assistant import auth
+
+    auth.set_credential(
+        "default",
+        {"provider": "openrouter", "type": "api_key", "key": "k",
+         "base_url": "https://openrouter.ai/api/v1"},
+    )
+
+    app = AgentApp(fake=False, session_id="hdrswap")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "openrouter.ai/api/v1" in _header_text(app)
+        box = app.query_one(CommandInput)
+        box.value = "/logout"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "http://env/v1" in _header_text(app)
+
+
 def _immediate(value):
     """Stand in for App.push_screen_wait, which needs a live modal."""
 
