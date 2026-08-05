@@ -15,6 +15,8 @@ Any local function with type hints and a docstring is picked up as a LangChain
 tool automatically.
 """
 
+from collections.abc import Callable
+from typing import Any
 import json
 import os
 import re
@@ -68,11 +70,14 @@ def position_weight(position_value: float, portfolio_value: float) -> float:
     return position_value / portfolio_value * 100.0
 
 
-def think(thought: str) -> str:
+def think(thought: str) -> str:  # pyright: ignore[reportUnusedParameter] - see below
     """Record a private reasoning step BEFORE acting — your research plan or how
     you're weighing the data. This is a scratchpad: it does not call anything or
     change state. Think out loud here so your reasoning is deliberate and visible
     (it renders as a 💭 panel in the TUI).
+
+    The argument is deliberately unread: the value of this tool is that writing
+    the thought puts it in the transcript, so the body has nothing left to do.
     """
     return "noted."
 
@@ -222,7 +227,7 @@ class ChartText(str):
         return obj
 
 
-def _chart_tool(fn):
+def _chart_tool(fn: Callable[..., Any]) -> Any:  # pyright: ignore[reportUnusedFunction] - used by catalog.py
     """Wrap a chart-returning function as a ``content_and_artifact`` tool: the
     model receives ``ChartText.summary``, the UI receives the full text as the
     artifact. A function that returns a plain ``str`` (an error or "no data"
@@ -237,7 +242,7 @@ def _chart_tool(fn):
     from langchain_core.tools import StructuredTool
 
     @functools.wraps(fn)
-    def _run(*args, **kwargs):
+    def _run(*args: Any, **kwargs: Any) -> tuple[Any, str | None]:
         out = fn(*args, **kwargs)
         if isinstance(out, ChartText):
             return out.summary, str(out)
@@ -304,7 +309,7 @@ def price_history_chart(symbol: str, days: int = 90) -> str:
 
 # --- Web search (stock & market news) --------------------------------------
 
-def _normalize_result(r: dict) -> dict:
+def _normalize_result(r: dict[str, Any]) -> dict[str, Any]:
     """Normalize a provider result into {title, url, source, date, snippet},
     tolerating both DuckDuckGo news (url/body/date/source), DuckDuckGo text
     (href/body) and Tavily (url/content/published_date) key shapes."""
@@ -317,7 +322,7 @@ def _normalize_result(r: dict) -> dict:
     }
 
 
-def _ddg_search(query: str, max_results: int) -> list[dict]:
+def _ddg_search(query: str, max_results: int) -> list[dict[str, Any]]:
     """Keyless DuckDuckGo search: news first (dated headlines), then a plain-text
     fallback so a query with no news still returns something."""
     from ddgs import DDGS
@@ -331,7 +336,7 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
     return [_normalize_result(r) for r in results]
 
 
-def _tavily_search(query: str, max_results: int, api_key: str) -> list[dict]:
+def _tavily_search(query: str, max_results: int, api_key: str) -> list[dict[str, Any]]:
     """Tavily news search (higher quality for LLMs; needs TAVILY_API_KEY)."""
     payload = json.dumps(
         {"api_key": api_key, "query": query, "topic": "news",
@@ -346,7 +351,7 @@ def _tavily_search(query: str, max_results: int, api_key: str) -> list[dict]:
     return [_normalize_result(r) for r in (data.get("results") or [])]
 
 
-def _format_search_results(query: str, results: list[dict]) -> str:
+def _format_search_results(query: str, results: list[dict[str, Any]]) -> str:
     """Render normalized results as a numbered, source-dated list for the model,
     framed as untrusted third-party content (web text can embed instructions —
     prompt injection — so the model is reminded to treat it as data only)."""
@@ -422,7 +427,7 @@ def import_ibkr_statement(path: str) -> str:
     except Exception as e:  # a malformed file must not abort the turn
         return f"Could not import statement: {type(e).__name__}: {e}"
 
-    def _fmt_amounts(amounts: dict) -> str:
+    def _fmt_amounts(amounts: dict[str, Any]) -> str:
         # Show each currency separately — summing USD + EUR would be meaningless.
         return ", ".join(f"{amt:.2f} {ccy}" for ccy, amt in sorted(amounts.items()))
 
@@ -1175,182 +1180,6 @@ def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY") -> str:
     )
 
 
-# The local tools the agent always has. `think` is added separately (only when
-# reasoning is enabled) — see graph.build_graph(think=...). IBKR market-data
-# tools are appended per turn via ibkr_tools_session().
-#
-# The four chart tools go through `_chart_tool` so the model gets only their
-# summary stats and the chart art travels to the UI as an artifact — same
-# functions, same output for direct callers, ~300 fewer tokens per call in the
-# model's context (and in every later step of the turn that replays it).
-TOOLS = [
-    current_date,
-    pct_change,
-    cagr,
-    position_weight,
-    _chart_tool(price_history_chart),
-    web_search,
-    import_ibkr_statement,
-    query_transactions,
-    query_portfolio,
-    _chart_tool(portfolio_value_history),
-    _chart_tool(portfolio_performance_chart),
-    realized_gains,
-    income_summary,
-    allocation,
-    _chart_tool(compare_prices),
-    portfolio_vs_benchmark,
-    risk_metrics,
-    export_data,
-    convert_currency,
-]
-
-# yfinance-backed reference tools (fundamentals, analyst ratings, earnings
-# calendar, dividend projection). Imported here so the graph picks them up from
-# the single TOOLS list; fundamentals.py imports back from this module lazily
-# (inside function bodies), so there is no import cycle.
-from .fundamentals import FUNDAMENTALS_TOOLS  # noqa: E402
-from .monitor import MONITOR_TOOLS  # noqa: E402
-from .analytics import ANALYTICS_TOOLS  # noqa: E402
-from .research import RESEARCH_TOOLS  # noqa: E402
-from .factors import FACTOR_TOOLS  # noqa: E402
-from .screener import SCREENER_TOOLS  # noqa: E402
-from .subagents import SUBAGENT_TOOLS  # noqa: E402
-from .edgar import EDGAR_TOOLS  # noqa: E402
-from .valuation import VALUATION_TOOLS  # noqa: E402
-from .options import OPTIONS_TOOLS  # noqa: E402
-from .documents import DOCUMENT_TOOLS  # noqa: E402
-from .alerts import ALERT_TOOLS  # noqa: E402
-
-TOOLS += FUNDAMENTALS_TOOLS
-TOOLS += MONITOR_TOOLS
-TOOLS += ANALYTICS_TOOLS
-TOOLS += RESEARCH_TOOLS
-TOOLS += FACTOR_TOOLS
-TOOLS += SCREENER_TOOLS
-TOOLS += SUBAGENT_TOOLS
-TOOLS += EDGAR_TOOLS
-TOOLS += VALUATION_TOOLS
-TOOLS += OPTIONS_TOOLS
-TOOLS += DOCUMENT_TOOLS
-TOOLS += ALERT_TOOLS
-
-
-# --- Capability gating -----------------------------------------------------
-#
-# Roughly a third of the tool schemas above describe tools that read a local
-# store which is usually EMPTY: the imported-statement database, ingested
-# documents, saved alert rules. Bound anyway, they cost their full schema on
-# every model call in every step of every turn, and the only thing the model can
-# do with them is call one and get back "nothing imported yet".
-#
-# So each such group is bound only once its store actually holds data. The
-# bootstrap tool of each group (`import_ibkr_statement`, `ingest_document`,
-# `add_alert`) stays bound unconditionally — that is how the store gets its first
-# row, and how a group turns itself on. Because the real graph is rebuilt once
-# per turn, importing a statement mid-conversation makes the whole statements
-# group appear on the very next turn.
-#
-# The matching system-prompt sections are gated on the same capability set (see
-# graph.py), so the model is never told about a tool it wasn't given.
-
-def _has_statements() -> bool:
-    """True when the statements DB holds at least one import. Opened read-only by
-    URI so the probe neither creates the file nor runs the schema migration (both
-    of which ``statements._connect`` would do)."""
-    import sqlite3
-
-    from . import statements
-
-    path = statements.db_path()
-    if not path.exists():
-        return False
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            return conn.execute("SELECT 1 FROM imports LIMIT 1").fetchone() is not None
-        finally:
-            conn.close()
-    except sqlite3.Error:  # missing table, locked, corrupt — treat as "no data"
-        return False
-
-
-def _has_documents() -> bool:
-    from . import documents
-
-    try:
-        return bool(documents._load_index())
-    except OSError:
-        return False
-
-
-def _has_alerts() -> bool:
-    from . import alerts
-
-    try:
-        return bool(alerts.load_alerts())
-    except OSError:
-        return False
-
-
-_CAPABILITY_PROBES = {
-    "statements": _has_statements,
-    "documents": _has_documents,
-    "alerts": _has_alerts,
-}
-
-# Tools dropped when their capability is absent. Deliberately excluded from these
-# sets (i.e. always bound):
-#   - `import_ibkr_statement` / `ingest_document` / `add_alert` — the bootstrap
-#     tools that create the data each group needs.
-#   - `factor_exposure` — takes a `symbol` and works fine with no portfolio; it
-#     only falls back to holdings when the symbol is omitted.
-_GATED_TOOLS: dict[str, frozenset[str]] = {
-    # Every one of these reads the local statements store (NOT the live broker
-    # session), so with no import they can only report that there's no data.
-    "statements": frozenset({
-        "query_transactions", "query_portfolio", "portfolio_value_history",
-        "portfolio_performance_chart", "realized_gains", "income_summary",
-        "allocation", "export_data", "portfolio_vs_benchmark", "tax_loss_harvest",
-        "portfolio_risk", "portfolio_lookthrough", "dividend_projection",
-        "portfolio_digest",
-    }),
-    "documents": frozenset({"ask_document", "list_documents", "forget_document"}),
-    "alerts": frozenset({"list_alerts", "remove_alert"}),
-}
-
-
-def tool_name(t) -> str:
-    """A tool's bound name, whether it's a StructuredTool or a plain function."""
-    return getattr(t, "name", None) or getattr(t, "__name__", "")
-
-
-def capabilities() -> frozenset[str]:
-    """Which optional local data sources currently hold data. A probe that raises
-    is treated as "absent" — a broken store must degrade to fewer tools, never
-    break graph construction."""
-    active = set()
-    for cap, probe in _CAPABILITY_PROBES.items():
-        try:
-            if probe():
-                active.add(cap)
-        except Exception:  # noqa: BLE001 — a bad probe must not break the graph
-            continue
-    return frozenset(active)
-
-
-def active_tools(caps: frozenset[str] | None = None, pool: list | None = None) -> list:
-    """``TOOLS`` minus the groups whose backing store is empty. ``caps`` lets a
-    caller reuse an already-computed capability set (graph.py computes it once and
-    passes it to both the toolset and the prompt); ``pool`` narrows the source list
-    (subagents pass their own reduced pool)."""
-    caps = capabilities() if caps is None else caps
-    drop: set[str] = set()
-    for cap, names in _GATED_TOOLS.items():
-        if cap not in caps:
-            drop |= names
-    return [t for t in (TOOLS if pool is None else pool) if tool_name(t) not in drop]
-
 
 # --- IBKR MCP tools (read-only) --------------------------------------------
 
@@ -1417,7 +1246,7 @@ def _is_readonly(name: str, extra_allow: frozenset[str] = frozenset()) -> bool:
     return name.startswith(_READ_PREFIXES)
 
 
-def filter_readonly(tools: list) -> list:
+def filter_readonly(tools: list[Any]) -> list[Any]:
     """Keep only read-only market-data tools from an MCP tool list, honoring any
     env-opted-in exceptions (``IBKR_ALLOW_AUTHENTICATE``)."""
     extra = _extra_allowed()
@@ -1444,14 +1273,14 @@ def _is_safe_extra(name: str) -> bool:
     return not name.startswith(_MUTATING_PREFIXES)
 
 
-def filter_safe(tools: list) -> list:
+def filter_safe(tools: list[Any]) -> list[Any]:
     """Keep only non-mutating tools from an extra MCP data server (denylist of
     write-verb prefixes) — permissive enough for noun-named data tools while still
     excluding anything that clearly changes state."""
     return [t for t in tools if _is_safe_extra(getattr(t, "name", ""))]
 
 
-def _extra_mcp_servers() -> dict:
+def _extra_mcp_servers() -> dict[str, Any]:
     """Additional MCP servers to mount alongside IBKR, parsed from
     ``EXTRA_MCP_SERVERS`` — a JSON object of ``{name: server_spec}`` in
     MultiServerMCPClient form, e.g.::
@@ -1489,7 +1318,7 @@ def _extra_mcp_servers() -> dict:
     }
 
 
-def _ibkr_server_config() -> dict | None:
+def _ibkr_server_config() -> dict[str, Any] | None:  # pyright: ignore[reportUnusedFunction] - used by brokers.py
     """Build a MultiServerMCPClient server spec from the environment, or None if
     no IBKR MCP endpoint is configured (agent then runs with local tools only).
 
@@ -1501,7 +1330,7 @@ def _ibkr_server_config() -> dict | None:
     url = os.environ.get("IBKR_MCP_URL")
     command = os.environ.get("IBKR_MCP_COMMAND")
     if url:
-        server: dict = {"url": url, "transport": "streamable_http"}
+        server: dict[str, Any] = {"url": url, "transport": "streamable_http"}
         token = os.environ.get("IBKR_MCP_TOKEN")
         if token:
             server["headers"] = {"Authorization": f"Bearer {token}"}
@@ -1549,12 +1378,12 @@ async def broker_tools_session():
     # Broker keys first (each carries its own read-only filter), then extra data
     # servers (write-verb denylist via filter_safe).
     filters = {key: filt for key, (_spec, filt) in brokers.items()}
-    servers = {
+    servers: dict[str, Any] = {
         **{key: spec for key, (spec, _filt) in brokers.items()},
         **extra,
     }
     client = MultiServerMCPClient(servers)
-    tools: list = []
+    tools: list[Any] = []
     async with contextlib.AsyncExitStack() as stack:
         for name in servers:
             session = await stack.enter_async_context(client.session(name))

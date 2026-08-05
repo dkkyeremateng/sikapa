@@ -179,7 +179,7 @@ def test_quick_llm_tier_resolution(monkeypatch):
     """quick_llm uses QUICK_MODEL (+ QUICK_* endpoint overrides) when set — the
     cheap tier for summarization — and falls back to the passed/primary model when
     unset, so behavior is unchanged by default."""
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     captured = {}
 
@@ -189,20 +189,20 @@ def test_quick_llm_tier_resolution(monkeypatch):
         captured.update(kw)
         return object()
 
-    monkeypatch.setattr(graph, "_make_llm", fake_make_llm)
+    monkeypatch.setattr(llm, "_make_llm", fake_make_llm)
 
     # Unset: falls back to the passed model, no endpoint overrides.
     for v in ("QUICK_MODEL", "QUICK_API_BASE", "QUICK_API_KEY", "QUICK_MODEL_PROVIDER"):
         monkeypatch.delenv(v, raising=False)
-    graph.quick_llm("primary-model")
+    llm.quick_llm("primary-model")
     assert captured == {"model": "primary-model", "provider": None,
-                        "base_url": None, "api_key": None}
+                        "base_url": None, "api_key": None, "scope": "quick"}
 
     # Set: QUICK_MODEL wins over the passed model, overrides are forwarded.
     monkeypatch.setenv("QUICK_MODEL", "cheap-mini")
     monkeypatch.setenv("QUICK_API_BASE", "http://localhost:11434/v1")
     monkeypatch.setenv("QUICK_MODEL_PROVIDER", "openai")
-    graph.quick_llm("primary-model")
+    llm.quick_llm("primary-model")
     assert captured["model"] == "cheap-mini"                 # quick tier wins
     assert captured["base_url"] == "http://localhost:11434/v1"
     assert captured["provider"] == "openai"
@@ -221,6 +221,8 @@ async def test_summarize_messages_uses_quick_tier(monkeypatch):
             seen["called"] = True
             return AIMessage(content="recap")
 
+    # Patch the name `graph` resolves, not `llm`'s: graph binds quick_llm at
+    # import, so patching the source module would not reach this call.
     monkeypatch.setattr(graph, "quick_llm", lambda model=None: seen.update(arg=model) or _FakeLLM())
     out = await graph.summarize_messages(
         [HumanMessage(content="hi"), AIMessage(content="hello")], model="primary"
@@ -272,14 +274,32 @@ def test_empty_model_env_falls_back_to_default(monkeypatch):
 
 def test_usage_delta_parses_flat_message_metadata():
     """_usage_delta reads a single message's flat usage_metadata (one call),
-    including cache-read details, and tolerates None."""
+    including both cache details, and tolerates None."""
     from financial_research_assistant.adapter import _usage_delta
 
-    assert _usage_delta(None) == (0, 0, 0)
-    assert _usage_delta({"input_tokens": 10, "output_tokens": 3}) == (10, 3, 0)
+    assert _usage_delta(None) == (0, 0, 0, 0)
+    assert _usage_delta({"input_tokens": 10, "output_tokens": 3}) == (10, 3, 0, 0)
     assert _usage_delta(
         {"input_tokens": 10, "output_tokens": 3, "input_token_details": {"cache_read": 4}}
-    ) == (10, 3, 4)
+    ) == (10, 3, 4, 0)
+    # cache_creation is what a cache WRITE costs; it bills at a different rate
+    # from both fresh input and a cache read, so it is counted separately.
+    assert _usage_delta({
+        "input_tokens": 10, "output_tokens": 3,
+        "input_token_details": {"cache_read": 4, "cache_creation": 5},
+    }) == (10, 3, 4, 5)
+
+
+def test_sum_usage_aggregates_both_cache_counters():
+    from financial_research_assistant.adapter import _sum_usage
+
+    assert _sum_usage(None) == (0, 0, 0, 0)
+    assert _sum_usage({
+        "modelA": {"input_tokens": 10, "output_tokens": 2,
+                   "input_token_details": {"cache_read": 3, "cache_creation": 4}},
+        "modelB": {"input_tokens": 20, "output_tokens": 5,
+                   "input_token_details": {"cache_creation": 6}},
+    }) == (30, 7, 3, 10)
 
 
 async def test_think_tool_calls_surface_as_reasoning_not_tool_panels():
@@ -350,6 +370,32 @@ def test_pricing_data_file_override(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_INPUT_COST_PER_1M", "2.0")
     monkeypatch.setenv("OPENAI_OUTPUT_COST_PER_1M", "6.0")
     assert rates("gpt-4o") == (2.0, 6.0)
+
+
+def test_malformed_pricing_data_file_degrades(monkeypatch, tmp_path):
+    """pricing.json is hand-edited, so a wrong shape must fall back to the
+    built-in tables rather than raise. A section holding a string used to reach
+    ``.items()`` and throw AttributeError out of a helper every cost lookup calls
+    — including the status bar's, mid-turn."""
+    import json as _json
+
+    from financial_research_assistant.pricing import _load_overrides, context_cap, rates
+
+    for var in ("OPENAI_CONTEXT_WINDOW", "OPENAI_INPUT_COST_PER_1M", "OPENAI_OUTPUT_COST_PER_1M"):
+        monkeypatch.delenv(var, raising=False)
+    f = tmp_path / "pricing.json"
+    monkeypatch.setenv("FINANCIAL_RESEARCH_PRICING_FILE", str(f))
+
+    for payload in (
+        {"pricing": "oops", "context": [1, 2]},   # sections of the wrong type
+        {"pricing": None, "context": None},        # explicit nulls
+        {},                                        # sections absent entirely
+        {"pricing": {"m": "not-a-pair"}, "context": {"m": "not-a-number"}},  # bad values
+    ):
+        f.write_text(_json.dumps(payload))
+        assert _load_overrides() == ({}, {}), payload
+        assert rates("gpt-4o") == (2.50, 10.00)    # built-in table, untouched
+        assert context_cap("gpt-4o") == 128_000
 
 
 async def test_think_reasoning_event_carries_duration():

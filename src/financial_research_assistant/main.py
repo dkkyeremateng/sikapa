@@ -13,10 +13,10 @@
 - ``--list-sessions``               -> list saved sessions and exit
 """
 
+from typing import Any
 import argparse
 import asyncio
 import json
-import os
 import sys
 
 from dotenv import load_dotenv
@@ -104,6 +104,35 @@ def cli() -> None:
         ),
     )
     parser.add_argument(
+        "--login",
+        nargs="?",
+        const="",
+        metavar="PROVIDER",
+        help=(
+            "sign in to a model provider and exit — stores the credential in "
+            "~/.financial-research-assistant/auth.json (0600), which outranks the "
+            "key in .env. Bare --login lists the providers. Pair with --tier to "
+            "give the cheap/subagent model its own credential; no model needed"
+        ),
+    )
+    parser.add_argument(
+        "--logout",
+        nargs="?",
+        const="",
+        metavar="PROVIDER",
+        help=(
+            "stop using the credential for --tier and exit; it stays stored, so "
+            "switching back needs no re-login. --logout PROVIDER removes that "
+            "provider's credential entirely"
+        ),
+    )
+    parser.add_argument(
+        "--tier",
+        default="default",
+        metavar="TIER",
+        help='with --login/--logout: which model tier ("default", "quick", "subagent")',
+    )
+    parser.add_argument(
         "--no-thinking",
         dest="think",
         action="store_false",
@@ -155,7 +184,7 @@ def cli() -> None:
     sys.exit(app.return_code or 0)
 
 
-def _run_subcommand(args) -> int | None:
+def _run_subcommand(args: argparse.Namespace) -> int | None:
     """Dispatch the model-free early-exit subcommands. Returns an exit code if one
     ran, or None to continue to the chat (TUI/headless) path."""
     if args.list_sessions:
@@ -190,10 +219,95 @@ def _run_subcommand(args) -> int | None:
     if args.research:
         return _handle_research(args)
 
+    if args.login is not None:
+        return _handle_login(args.login, args.tier)
+
+    if args.logout is not None:
+        return _handle_logout(args.tier, args.logout)
+
     return None
 
 
-def _handle_research(args) -> int:
+def _handle_login(provider: str, tier: str) -> int:
+    """Run a provider's OAuth flow from the terminal. The flow itself is shared
+    with the TUI — only these callbacks differ, which is the point of keeping them
+    UI-neutral."""
+    import webbrowser
+
+    from . import auth, oauth
+
+    if tier not in auth.SCOPES:
+        print(f"unknown tier: {tier} (one of {', '.join(auth.SCOPES)})", file=sys.stderr)
+        return 2
+    if not provider:
+        print("providers:")
+        for name, label in oauth.choices():
+            print(f"  {name:<14} {label}")
+        print("\nsign in with: --login openrouter")
+        return 0
+    if oauth.get(provider) is None:
+        print(
+            f"unknown provider: {provider} (try {', '.join(oauth.names())})",
+            file=sys.stderr,
+        )
+        return 2
+
+    def on_auth(url: str) -> None:
+        # Print before opening: on a headless box there is no browser to open and
+        # the URL is the only way through.
+        print(f"opening {url}", file=sys.stderr)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    import getpass
+
+    cb = oauth.LoginCallbacks(
+        on_auth=on_auth,
+        on_status=lambda s: print(s, file=sys.stderr),
+        on_device_code=lambda code, url: print(f"enter code {code} at {url}", file=sys.stderr),
+        on_prompt=lambda q: input(q),
+        # No echo, and it stays out of shell history and any terminal capture.
+        on_secret=lambda q: getpass.getpass(q),
+    )
+    try:
+        oauth.login(provider, cb, scope=tier)
+    except oauth.LoginError as exc:
+        print(f"login failed: {exc}", file=sys.stderr)
+        return 1
+    except (KeyboardInterrupt, EOFError):
+        print("\nlogin cancelled", file=sys.stderr)
+        return 1
+    print(f"signed in to {provider} ({tier} tier)")
+    return 0
+
+
+def _handle_logout(tier: str, provider: str = "") -> int:
+    from . import auth
+
+    if provider:
+        if auth.forget(provider):
+            print(f"forgot the {provider} credential")
+            return 0
+        print(
+            f"no stored credential for {provider} "
+            f"(configured: {', '.join(auth.providers()) or 'none'})",
+            file=sys.stderr,
+        )
+        return 2
+    if tier not in auth.SCOPES:
+        print(f"unknown tier: {tier} (one of {', '.join(auth.SCOPES)})", file=sys.stderr)
+        return 2
+    if auth.delete(tier):
+        # The credential is kept so the tier can be pointed back at it.
+        print(f"signed out ({tier} tier) — credential kept; --login or /models switches back")
+        return 0
+    print(f"no credential in use for the {tier} tier")
+    return 0
+
+
+def _handle_research(args: argparse.Namespace) -> int:
     """Deep-research report: gather → synthesize → save → reflect, then print.
     Needs a model (real synthesis); ``--fake`` produces an offline stub. The
     special value "portfolio" reports on the whole imported portfolio."""
@@ -261,8 +375,9 @@ async def _headless(
 
     model = "scripted-fake" if fake else _resolved_model(None)
     final = ""
-    tools: list[dict] = []  # ordered tool trajectory for --trace / trajectory eval
-    usage = {"tokens_in": 0, "tokens_out": 0, "tokens_cache": 0, "cost_usd": None}
+    tools: list[dict[str, Any]] = []  # ordered tool trajectory for --trace / trajectory eval
+    usage: dict[str, Any] = {"tokens_in": 0, "tokens_out": 0, "tokens_cache": 0,
+                             "tokens_cache_write": 0, "cost_usd": None}
     async for ev in traced(
         run_turn(prompt, session_id, fake=fake, think=think),
         user_msg=prompt, session_id=session_id, model=model, fake=fake,
@@ -285,17 +400,23 @@ async def _headless(
                 print("\a", end="", file=sys.stderr, flush=True)
             alerts.play_alert_sound()
             alerts.notify_desktop(ev.text)
-        elif ev.kind == "usage" and (ev.tokens_in or ev.tokens_out or ev.tokens_cache):
+        elif ev.kind == "usage" and (
+            ev.tokens_in or ev.tokens_out or ev.tokens_cache or ev.tokens_cache_write
+        ):
             # Usage streams as per-call deltas; accumulate so the trace + line
             # report the turn total, not just the last call.
             usage["tokens_in"] += ev.tokens_in
             usage["tokens_out"] += ev.tokens_out
             usage["tokens_cache"] += ev.tokens_cache
+            usage["tokens_cache_write"] += ev.tokens_cache_write
             cost = cost_usd(
-                model, usage["tokens_in"], usage["tokens_out"], usage["tokens_cache"]
+                model, usage["tokens_in"], usage["tokens_out"],
+                usage["tokens_cache"], usage["tokens_cache_write"],
             )
             usage["cost_usd"] = round(cost, 6) if cost is not None else None
             cache = f" / cache {usage['tokens_cache']}" if usage["tokens_cache"] else ""
+            if usage["tokens_cache_write"]:
+                cache += f" / cache-write {usage['tokens_cache_write']}"
             dollars = f" ≈ ${cost:.4f}" if cost is not None else ""
             print(
                 f"• tokens: in {usage['tokens_in']} / out {usage['tokens_out']}{cache}{dollars}",

@@ -30,6 +30,7 @@ evaluations run concurrently in a thread pool since they are network-bound.
 
 from __future__ import annotations
 
+from typing import Any
 import csv
 import io
 import urllib.request
@@ -171,7 +172,7 @@ def _near_high(
     within_pct: float,
     market_returns: dict[str, float] | None,
     market_down_pct: float,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Evaluate the proximity-to-high criterion for one ``symbol``.
 
     Finds the highest close over ``high_lookback_days`` (pass a large value for a
@@ -191,7 +192,7 @@ def _near_high(
     if high <= 0:
         return None
     window = series[-max(1, within_days):]
-    best: dict | None = None
+    best: dict[str, Any] | None = None
     for d, close in window:
         dist = (high - close) / high * 100.0  # 0 = at the high; smaller = closer
         if dist > within_pct:
@@ -229,7 +230,7 @@ def _beat_streak(symbol: str, need: int) -> int:
     return streak
 
 
-def _evaluate(sym: str, params: dict, market_returns: dict[str, float] | None) -> dict | None:
+def _evaluate(sym: str, params: dict[str, Any], market_returns: dict[str, float] | None) -> dict[str, Any] | None:
     """Measure one candidate against every active criterion. Returns a result dict
     (with the measured figures and a per-criterion pass flag) or None if the
     ticker has no usable data at all. Actual filtering happens in ``screen_stocks``
@@ -244,7 +245,7 @@ def _evaluate(sym: str, params: dict, market_returns: dict[str, float] | None) -
     if not name and mcap is None:
         return None
 
-    res: dict = {
+    res: dict[str, Any] = {
         "symbol": sym, "name": name or sym, "market_cap": mcap,
         "sector": sector, "price": _price(info),
         "high": None, "dist_pct": None, "near_high_date": None,
@@ -293,9 +294,10 @@ def _evaluate(sym: str, params: dict, market_returns: dict[str, float] | None) -
 
 
 def _parse_params(
-    min_market_cap_b, max_market_cap_b, near_high_pct, near_high_within_days,
-    high_lookback_days, market_down_pct, min_earnings_beats, sector,
-) -> dict:
+    min_market_cap_b: float, max_market_cap_b: float, near_high_pct: float,
+    near_high_within_days: int, high_lookback_days: int, market_down_pct: float,
+    min_earnings_beats: int, sector: str,
+) -> dict[str, Any]:
     """Coerce and clamp the raw criteria arguments into the internal params dict
     (market caps to dollars, negatives to 0, ints floored at sane minimums)."""
     return {
@@ -310,13 +312,13 @@ def _parse_params(
     }
 
 
-def _no_criteria(params: dict) -> bool:
+def _no_criteria(params: dict[str, Any]) -> bool:
     return (params["min_cap"] == 0 and params["max_cap"] == 0
             and params["near_high_pct"] == 0 and params["min_beats"] == 0
             and not params["sector"])
 
 
-def _criteria_summary(params: dict, market_symbol: str) -> str:
+def _criteria_summary(params: dict[str, Any], market_symbol: str) -> str:
     """One-line, human-readable description of the active criteria for the header."""
     crit: list[str] = []
     if params["min_cap"] > 0:
@@ -337,7 +339,7 @@ def _criteria_summary(params: dict, market_symbol: str) -> str:
     return " · ".join(crit)
 
 
-def _format_row(r: dict) -> str:
+def _format_row(r: dict[str, Any]) -> str:
     """Render one passing candidate as a table line with only its measured legs."""
     from .fundamentals import _money
 

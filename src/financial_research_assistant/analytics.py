@@ -286,7 +286,9 @@ def portfolio_risk(account: str = "", days: int = 365, benchmark: str = "SPY") -
     w = {s: value[s] / covered_value for s in covered}
     rets = {s: _returns(closes[s]) for s in covered}
     n = min(len(rets[s]) for s in covered)
-    port = [sum(w[s] * rets[s][i] for s in covered) for i in range(n)]
+    port: list[float] = [
+        float(sum(w[s] * rets[s][i] for s in covered)) for i in range(n)
+    ]
     if len(port) < 19:
         return "Not enough overlapping return history to compute portfolio risk."
 
@@ -373,7 +375,7 @@ def portfolio_lookthrough(account: str = "") -> str:
 
     sector_exp: dict[str, float] = defaultdict(float)
     stock_exp: dict[str, float] = defaultdict(float)
-    stock_src: dict[str, set] = defaultdict(set)
+    stock_src: dict[str, set[str]] = defaultdict(set)  # ticker -> source ETFs
     covered = 0.0  # base $ attributable to named single stocks
     n_funds = 0
     for sym, base_val in holdings:

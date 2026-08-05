@@ -316,6 +316,9 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── events.py      # AgentEvent contract shared by all interfaces
 │   ├── adapter.py     # run_turn(): framework -> AgentEvent stream
 │   ├── graph.py       # build_graph / build_real_graph -> compiled ReAct agent
+│   ├── auth.py        # 0600 credential store (providers x tiers) + secret redaction
+│   ├── oauth.py       # UI-neutral login flows: PKCE, paste-a-key, provider registry
+│   ├── codex_proxy.py # OpenAI-compatible shim over the ChatGPT Codex backend
 │   ├── tools.py       # local calculators + read-only broker MCP loader/filter
 │   ├── brokers.py     # pluggable broker-provider registry (IBKR + any other broker)
 │   ├── fundamentals.py# yfinance reference tools (valuation/ratings/earnings/dividends/etf)
@@ -333,7 +336,7 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── flex.py        # IBKR Flex Web Service pull (--flex-sync); XML parser is a seam
 │   ├── statements.py  # IBKR CSV + OFX/QFX parsers, format dispatch, SQLite store
 │   ├── tui.py         # Textual chat app
-│   └── main.py        # CLI entry (argparse): TUI / --prompt / --fake / --session
+│   └── main.py        # CLI entry (argparse): TUI / --prompt / --fake / --login
 ├── tests/test_smoke.py
 └── eval/              # evaluate.py + dataset.jsonl
 ```
@@ -358,7 +361,10 @@ Optional extras: `[ofx]` (import cross-broker OFX/QFX statements),
 
 ## Configure a model
 
-Copy `.env.example` to `.env` and fill in (loaded via python-dotenv):
+Two ways: **`/login`** stores credentials in a `0600` file outside `.env` and is
+the better default (see [Signing in](#signing-in-login)); or copy `.env.example`
+to `.env` and fill it in (loaded via python-dotenv). A stored credential outranks
+the environment, so the two never fight.
 
 - **Cloud (OpenAI):** set `OPENAI_API_KEY`; optionally `OPENAI_MODEL`
   (default `gpt-4.1-mini`).
@@ -368,8 +374,9 @@ Copy `.env.example` to `.env` and fill in (loaded via python-dotenv):
   (`anthropic`, `google_genai`, or `groq`) and that provider's key
   (`ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`), and install the extra
   (`uv pip install -e '.[anthropic]'`). These route through LangChain's
-  `init_chat_model`; each has a sensible default model (e.g. `claude-sonnet-4-5`)
+  `init_chat_model`; each has a sensible default model (e.g. `claude-sonnet-5`)
   so `MODEL_PROVIDER` alone is enough. The default/`openai` path is unchanged.
+  `/login anthropic-key` does the same thing without touching `.env`.
 - **No model at all:** pass `--fake` — a deterministic in-process graph replies
   with a `FAKE-OK` marker, fully offline (no model, no IBKR).
 
@@ -677,6 +684,9 @@ financial-research-assistant --prompt "hi" --fake   # headless, offline
 financial-research-assistant --session work         # separate conversation thread
 financial-research-assistant --resume work          # reopen session "work" (replays it)
 financial-research-assistant --list-sessions        # list saved sessions and exit
+financial-research-assistant --login                # list model providers, exit
+financial-research-assistant --login anthropic-key  # store a credential, exit
+financial-research-assistant --logout [PROVIDER]    # stop using / forget one, exit
 MEMORY_BACKEND=local financial-research-assistant --memory   # list long-term memory, exit
 python -m financial_research_assistant.main --prompt "hi" --fake   # module form
 ```
@@ -695,19 +705,24 @@ bubble (click to copy) and each reply as a left `● Agent` bubble. Every IBKR
 tool call appears as a collapsible panel titled `🛠 [Agent] get_price_snapshot
 ✅ (1.2s)` (expand for args + result); the model's reasoning renders as a
 collapsible `💭 thinking` panel (toggle with `/toggle_thinking`). A status bar
-shows `model · provider · ctx N% of CAP · in/out tok`, plus a spinner + elapsed timer
-while a turn runs. Type `/` for the command palette; **Esc** cancels a running
+shows `model · provider · ctx N% of CAP · in/out tok · cache R +W w · $cost`, plus a
+spinner + elapsed timer while a turn runs (cache reads and writes are listed
+separately — they bill at very different rates). Type `/` for the command palette; **Esc** cancels a running
 turn; typing while busy **queues** the message; **Ctrl+O**/**Ctrl+T** collapse
 all tool / thinking panels. `/compact` summarizes the older turns and rewrites
 the thread so the running context (and `ctx %`) shrinks while recent turns stay
 verbatim (this also happens automatically for **any** interface when
 `AGENT_AUTO_COMPACT` is set — see below). Commands: `/new`, `/compact`, `/clear`, `/sessions`,
-`/resume [NAME]`, `/model [NAME]`, `/config`, `/toggle_thinking`, `/copy`,
+`/resume [NAME]`, `/models [NAME]`, `/login [PROVIDER]`, `/logout [tier|PROVIDER]`,
+`/config`, `/toggle_thinking`, `/thinking on|off`, `/copy`,
 `/good [note]`, `/bad [note]`, `/memory [forget TEXT]`,
 `/export NAME.html|NAME.jsonl`, `/hotkeys`, `/theme`, `/help`, `/quit`. With
 long-term memory on, `/good`/`/bad` rate the last answer so the agent learns from
 it, and `/memory` reviews or prunes everything it has learned (facts, lessons,
-feedback) without leaving the chat. (The
+feedback) without leaving the chat. `/models` lists every model from every
+configured provider and switches provider + model together; `/config` shows
+what's stored, which provider is active, and the effective context window per
+model. (The
 fake graph has no tools, so tool panels appear only against a real model + IBKR;
 the reasoning panel shows in fake mode too.)
 
@@ -791,6 +806,141 @@ Crucially for a money tool, a learned change is never baked into code: it's a
 auditable (no model rewrites the prompt), and deleting the file reverts. The
 human stays in the loop — nothing changes behavior without an explicit `--apply`
 on a measured improvement.
+
+## Signing in (`/login`)
+
+Credentials can live outside `.env`, in a `0600` store at
+`~/.financial-research-assistant/auth.json`:
+
+```bash
+financial-research-assistant --login                          # list providers
+financial-research-assistant --login anthropic-key            # paste a key (masked)
+financial-research-assistant --login openrouter               # browser OAuth (PKCE)
+financial-research-assistant --login groq-key --tier quick    # just the cheap tier
+financial-research-assistant --logout                         # stop using it, keep it
+financial-research-assistant --logout groq-key                # forget it for good
+```
+
+In the TUI: `/login [PROVIDER] [tier]` (bare opens a picker), `/logout`,
+`/models` to switch, and `/config` to see what's stored — never the secret itself.
+
+**Why prefer it over `.env`.** A key in `.env` becomes a process environment
+variable that every subprocess inherits. The store is `0600`, per-provider, and
+redacted from trace spans, exported transcripts, and error text.
+
+### Several providers, several models
+
+Credentials are keyed by provider; each **model tier** records which one it uses.
+So `/login anthropic-key` then `/login groq-key` leaves both in place, and
+`/models` lists every model from every configured provider. Selecting one
+switches the active provider **and** the model together — a model only works with
+the key from its own lane, and setting one without the other is what produces
+`404 model: <name>`.
+
+Tiers are `default`, `quick`, and `subagent`, matching `QUICK_*` / `SUBAGENT_*`.
+A tier with nothing stored inherits `default`, so signing in once covers
+everything.
+
+`/logout [tier]` stops using a provider but keeps its credential, so switching
+back needs no re-login. `/logout PROVIDER` removes one for good.
+
+### What `/login` asks
+
+The key (masked; `getpass` when headless), then — for `openai-key` — a base URL,
+then the models this credential serves, then their context window. Blank accepts
+the suggestion, so a known provider is a few Enters. The endpoint is asked before
+the models because it decides which models exist.
+
+```json
+"anthropic-key": {
+  "models": [
+    {"name": "claude-haiku-4-5-20251001",
+     "input_cost": 1.0, "output_cost": 5.0,
+     "cache_write_cost": 1.25, "cache_read_cost": 0.1,
+     "context_window": 200000}
+  ]
+}
+```
+
+Everything is **per model**, because one key serves models that differ: an
+Anthropic key serves a 1M Sonnet and a 200k Haiku, so no credential-wide figure
+could be right for both. Entries are seeded from the built-in tables at login;
+the first model listed is that credential's default. Hand-editing one entry
+corrects that model alone.
+
+**Costs** are USD per 1M tokens. Models the tables cover are filled in
+automatically — which is why non-OpenAI providers need no input. A model they've
+never heard of, such as a gateway serving one under its own name, gets every
+field written as `0` so the shape to fill in is visible in the file. Strings
+(`"5.0"`) read the same as numbers.
+
+> **`0` means "not set", not "free."** An unpriced model shows no cost at all: a
+> confident `$0.00` on a gateway that bills real money is worse than a blank.
+> Both `input_cost` and `output_cost` must be non-zero, or the pair falls back to
+> the table rather than billing output at a guess.
+
+Cache reads and writes are billed **and displayed** separately
+(`cache 400000 +200000 w`) because they price in opposite directions — a write
+costs ~1.25x fresh input on Anthropic while a read costs ~0.1x, so one combined
+figure would hide which you paid for. Both are subsets of the input total, read
+from `input_token_details.cache_read` / `.cache_creation`.
+
+### Precedence
+
+Two chains, each resolving to exactly one winner:
+
+| | Credential |
+|---|---|
+| 1 | explicit CLI/API override |
+| 2 | **the store** |
+| 3 | environment (`OPENAI_API_KEY`, …) |
+
+The store outranks the environment deliberately: `load_dotenv()` turns a stale
+key in `.env` into a real environment variable, and ranked the other way it would
+silently shadow a fresh `/login` with no error to go on. The endpoint and the key
+always come from the *same* source, so a key is never paired with a mismatched
+`OPENAI_API_BASE`.
+
+| | Context window |
+|---|---|
+| 1 | `OPENAI_CONTEXT_WINDOW` (global; overrides everything) |
+| 2 | the model entry in `auth.json` |
+| 3 | the built-in per-model table (and `pricing.json`) |
+| 4 | a credential-wide `context_window` (older stores) |
+| 5 | 128k fallback |
+
+`/config` prints the effective window per model **and where it came from**, which
+is the fastest way to answer "I configured X but it shows Y". Note that
+`OPENAI_CONTEXT_WINDOW` is global and beats per-model values — if you set it for
+a gateway and later add per-model windows, unset it.
+
+The window matters beyond the `ctx %` gauge: tool-result clearing and
+auto-compaction both divide by it.
+
+A stored key may be a literal, `$VAR`, or `!command` (take it from a command's
+stdout, so it can live in 1Password/`pass`). `!command` is execution from a
+config file and stays off unless `FINANCIAL_RESEARCH_AUTH_ALLOW_EXEC=1`.
+
+### Providers
+
+| Provider | Status |
+|---|---|
+| `anthropic-key`, `google-key`, `groq-key`, `openai-key` | **Works.** Paste a vendor API key. `openai-key` also accepts a gateway base URL. |
+| `openrouter` | **Works.** PKCE mints a real API key billed from your credits; nothing expires, nothing to refresh. |
+| `codex` | **Works, with caveats.** ChatGPT OAuth routed through a local shim (`codex_proxy.py`) that speaks the Codex request shape. Since 4 Apr 2026 third-party traffic bills as *overage*, not against your ChatGPT plan. |
+| `anthropic` | **Haiku only.** Since 28 Apr 2026 Sonnet and Opus return a bare 429 (no `anthropic-ratelimit` headers — a hard block, not a quota) for third-party OAuth clients, and loading an extra-usage balance does **not** lift it: the gate is on a promotional-credit flag, not your balance. Use `anthropic-key` for Sonnet/Opus. |
+| `google` | **Blocked.** Banned Feb 2026 with account suspensions (incl. paid Ultra); Code Assist stopped serving the individual / AI Pro / AI Ultra tiers on 18 Jun 2026. Use `google-key`. |
+
+The blocked subscription flows are implemented and tested end to end — PKCE,
+exchange, storage, refresh — so they work the moment enforcement changes, and
+`/login` states the caveat before opening a browser. **None of them provides
+flat-rate subscription inference**; for that, point `OPENAI_API_BASE` at a local
+model or a flat-rate gateway.
+
+Adding a provider is a registration in `oauth.py`, not an edit to the TUI — flows
+receive UI-neutral callbacks (`on_auth`, `on_device_code`, `on_prompt`,
+`on_secret`, `on_status`), so one implementation serves the TUI, the CLI, and
+tests.
 
 ## Tracing (optional)
 

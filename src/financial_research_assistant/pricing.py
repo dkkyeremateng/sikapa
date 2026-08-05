@@ -7,169 +7,90 @@ Prices are USD per 1M tokens (input, output); override either with
 ``OPENAI_INPUT_COST_PER_1M`` / ``OPENAI_OUTPUT_COST_PER_1M`` for a custom
 gateway. Unknown models return ``None`` (no cost shown) rather than guessing.
 
-To update prices or add models WITHOUT editing this code, drop a
-``pricing.json`` data file (``FINANCIAL_RESEARCH_PRICING_FILE``, default
-``~/.financial-research-assistant/pricing.json``) — see ``_load_overrides``; its
-entries merge over the built-in tables. The per-model env vars above still win.
+The published tables themselves live in ``pricetables.py``; this module is the
+half that answers what THIS install will be charged, so it also consults the
+credential store and the environment. The pairs are deliberate: ``table_rates``
+vs ``rates``, ``known_context`` vs ``context_cap`` — the first of each is the
+vendor's published figure, the second is what actually applies here.
 
-Cached input tokens are billed at a fraction of the input rate
-(``CACHE_DISCOUNT``); ``tokens_in`` already includes the cached tokens, so
-``cost_usd`` discounts the cached portion rather than adding to it.
+To update prices or add models WITHOUT editing code, drop a ``pricing.json``
+(``FINANCIAL_RESEARCH_PRICING_FILE``, default
+``~/.financial-research-assistant/pricing.json``) — see
+``pricetables._load_overrides``; its entries merge over the built-in tables. The
+per-model env vars above still win.
+
+Cached input tokens are billed at their own rates — a cache READ at a fraction of
+the input rate, a cache WRITE at a premium on Anthropic. Both counts are subsets
+of ``tokens_in``, so ``cost_usd`` reprices those portions rather than adding to
+the total.
 """
 
 from __future__ import annotations
 
-import json
+from typing import Any
 import os
-from pathlib import Path
 
 
-def _pricing_file() -> Path:
-    """Location of the optional pricing/context override file. Defaults to
-    ``~/.financial-research-assistant/pricing.json``; override with
-    ``FINANCIAL_RESEARCH_PRICING_FILE``."""
-    raw = (os.environ.get("FINANCIAL_RESEARCH_PRICING_FILE") or "").strip()
-    if raw:
-        return Path(os.path.expandvars(raw)).expanduser()
-    return Path.home() / ".financial-research-assistant" / "pricing.json"
+from .pricetables import (
+    _cache_discount,
+    _load_overrides,
+    known_context,
+    table_cache_rates,
+    table_rates,
+)
 
 
-def _parse_pricing(raw: dict) -> dict[str, tuple[float, float]]:
-    out: dict[str, tuple[float, float]] = {}
-    for k, v in (raw or {}).items():
-        if isinstance(v, (list, tuple)) and len(v) == 2:
-            try:
-                out[str(k)] = (float(v[0]), float(v[1]))
-            except (TypeError, ValueError):
-                continue
-    return out
-
-
-def _parse_context(raw: dict) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for k, v in (raw or {}).items():
-        try:
-            n = int(v)
-        except (TypeError, ValueError):
-            continue
-        if n > 0:
-            out[str(k)] = n
-    return out
-
-
-def _load_overrides() -> tuple[dict[str, tuple[float, float]], dict[str, int]]:
-    """User pricing/context overrides from the data file, so prices can be updated
-    or a new model added WITHOUT editing this code. Returns ``(pricing, context)``
-    keyed by model prefix (same prefix-match semantics as the built-in tables);
-    file entries merge OVER the built-ins. Read fresh each call (the file is tiny
-    and lookups aren't hot) so an edit takes effect without a restart. Shape::
-
-        {"pricing": {"my-model": [1.0, 3.0]}, "context": {"my-model": 200000}}
-
-    An absent or malformed file yields no overrides (built-in behavior)."""
-    p = _pricing_file()
+def _stored_model_config(model: str) -> dict[str, Any] | None:
+    """The active credential's config for ``model``, if it serves it."""
     try:
-        if not p.exists():
-            return {}, {}
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}, {}
-    if not isinstance(data, dict):
-        return {}, {}
-    return _parse_pricing(data.get("pricing")), _parse_context(data.get("context"))
+        from .auth import model_config
 
-# Known context windows (prefix match); everything else falls back to 128k.
-# Non-OpenAI families are covered too so MODEL_PROVIDER=anthropic/google shows a
-# sensible ctx%. (Claude's 1M-token beta isn't the default, so 200k is used.)
-MODEL_CONTEXT: dict[str, int] = {
-    "gpt-4.1": 1_047_576,
-    "gpt-4o": 128_000,
-    "o1": 200_000,
-    "o3": 200_000,
-    "gpt-4-turbo": 128_000,
-    "gpt-3.5": 16_385,
-    # Current Claude models carry a 1M window; older ones (and Haiku 4.5) stay at
-    # 200k, which the bare "claude" fallback below covers. Longest prefix wins, so
-    # these must be spelled out per model rather than collapsed to "claude-opus" —
-    # Opus 4.5 and earlier are 200k, and would be wrong under a shared prefix.
-    "claude-fable-5": 1_000_000,
-    "claude-mythos-5": 1_000_000,
-    "claude-opus-5": 1_000_000,
-    "claude-opus-4-8": 1_000_000,
-    "claude-opus-4-7": 1_000_000,
-    "claude-opus-4-6": 1_000_000,
-    "claude-sonnet-5": 1_000_000,
-    "claude-sonnet-4-6": 1_000_000,
-    "claude": 200_000,
-    "gemini-1.5": 1_048_576,
-    "gemini-2": 1_048_576,
-    "llama-3": 128_000,
-}
-
-# USD per 1M tokens (input, output). Prefix match; longer keys are checked first
-# so "claude-haiku" wins over a bare "claude" if one were added.
-MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "gpt-4.1-mini": (0.40, 1.60),
-    "gpt-4.1-nano": (0.10, 0.40),
-    "gpt-4.1": (2.00, 8.00),
-    "gpt-4o-mini": (0.15, 0.60),
-    "gpt-4o": (2.50, 10.00),
-    "o3-mini": (1.10, 4.40),
-    "o1-mini": (1.10, 4.40),
-    # The Opus tier repriced to $5/$25 with the 4.6 generation; the bare
-    # "claude-opus" key below keeps the old $15/$75 for Opus 3, which is what it
-    # was actually priced at. Longest prefix wins, so the specific keys take
-    # precedence over it.
-    "claude-fable-5": (10.00, 50.00),
-    "claude-mythos-5": (10.00, 50.00),
-    "claude-opus-5": (5.00, 25.00),
-    "claude-opus-4-8": (5.00, 25.00),
-    "claude-opus-4-7": (5.00, 25.00),
-    "claude-opus-4-6": (5.00, 25.00),
-    "claude-opus": (15.00, 75.00),
-    "claude-sonnet": (3.00, 15.00),
-    "claude-haiku": (1.00, 5.00),
-    "gemini-2.5-pro": (1.25, 10.00),
-    "gemini-2.5-flash": (0.30, 2.50),
-    "gemini-1.5-pro": (1.25, 5.00),
-    "gemini-1.5-flash": (0.075, 0.30),
-}
-
-# Cached input tokens bill at this fraction of the input rate. The rate is
-# provider-specific: OpenAI charges 0.25x for cached prompt reads on the gpt-4.1
-# family, Anthropic ~0.1x for a cache read. Applying the OpenAI figure to an
-# Anthropic run understates the saving from prompt caching by 2.5x, so
-# `_cache_discount` picks per model. Kept as a module constant because it is the
-# documented default and is referenced elsewhere.
-CACHE_DISCOUNT = 0.25
-ANTHROPIC_CACHE_DISCOUNT = 0.1
+        return model_config(model)
+    except Exception:  # a broken store must never take a turn down
+        return None
 
 
-def _cache_discount(model: str) -> float:
-    """Fraction of the input rate a cached token bills at, for ``model``."""
-    return ANTHROPIC_CACHE_DISCOUNT if model.startswith("claude") else CACHE_DISCOUNT
+def explain_context_cap(model: str) -> tuple[int, str]:
+    """``(window, where it came from)`` — the same resolution ``context_cap`` does,
+    with the winning source named.
 
-
-def context_cap(model: str) -> int:
-    # An explicit window (e.g. for a custom gateway or an unlisted local model)
-    # wins over the built-in table, so ctx% is right without editing code.
+    Exists because the window is resolvable from four places and a stale value in
+    a losing one looks authoritative while doing nothing; "configured X, showing Y"
+    is otherwise unanswerable without reading the code.
+    """
     override = os.environ.get("OPENAI_CONTEXT_WINDOW")
     if override:
         try:
             n = int(override)
             if n > 0:
-                return n
+                return n, "env OPENAI_CONTEXT_WINDOW"
         except ValueError:
             pass
-    # Data-file overrides merge over the built-ins (file wins on a shared prefix),
-    # so a new/updated context window needs no code edit. Longest prefix wins, so a
-    # specific key ("gemini-2.5") beats a shorter one regardless of dict order.
-    _, context_override = _load_overrides()
-    table = {**MODEL_CONTEXT, **context_override}
-    for name in sorted(table, key=len, reverse=True):
-        if model.startswith(name):
-            return table[name]
-    return 128_000
+    stored = _stored_model_config(model)
+    if stored and stored.get("context_window"):
+        return int(stored["context_window"]), "auth.json model entry"
+    known = known_context(model)
+    if known:
+        _, context_override = _load_overrides()
+        where = "pricing.json" if any(
+            model.startswith(k) for k in context_override
+        ) else "built-in table"
+        return known, where
+    try:
+        from .auth import context_window as _stored_window
+
+        fallback = _stored_window(model)
+    except Exception:
+        fallback = None
+    if fallback:
+        return fallback, "auth.json credential-wide"
+    return 128_000, "default fallback"
+
+
+def context_cap(model: str) -> int:
+    """The context window to divide by. See ``explain_context_cap`` for the
+    resolution order and which source won."""
+    return explain_context_cap(model)[0]
 
 
 def context_pct(model: str, tokens_in: int) -> int:
@@ -190,26 +111,55 @@ def rates(model: str) -> tuple[float, float] | None:
             return float(ci), float(co)
         except ValueError:
             pass
+    # Rates recorded on the active credential for this exact model. Unlike the
+    # context window — where the per-model table is authoritative and the store
+    # only fills gaps — prices are the thing a gateway reseller changes, and the
+    # user entered these deliberately for the model they are actually billed for.
+    # Zero reads as "not set", not as free. The fields are written as 0 so the
+    # shape to fill in is visible in auth.json, and a model whose price nobody has
+    # entered must show no cost at all — a confident $0.00 on a gateway that bills
+    # real money is worse than a blank.
+    stored = _stored_model_config(model)
+    if stored and stored.get("input_cost") and stored.get("output_cost"):
+        return float(stored["input_cost"]), float(stored["output_cost"])
     # Data-file overrides merge over the built-ins (file wins on a shared prefix),
     # so updating a price or adding a model needs no code edit.
-    pricing_override, _ = _load_overrides()
-    table = {**MODEL_PRICING, **pricing_override}
-    for name in sorted(table, key=len, reverse=True):
-        if model.startswith(name):
-            return table[name]
-    return None
+    return table_rates(model)
 
 
-def cost_usd(model: str, tok_in: int, tok_out: int, tok_cache: int = 0) -> float | None:
-    """Turn cost in USD, discounting the cached portion of the input tokens.
+def cost_usd(
+    model: str,
+    tok_in: int,
+    tok_out: int,
+    tok_cache: int = 0,
+    tok_cache_write: int = 0,
+) -> float | None:
+    """Turn cost in USD, pricing the cached portions of the input separately.
+
+    ``tok_in`` is the total input; ``tok_cache`` (read from the cache) and
+    ``tok_cache_write`` (written into it) are subsets of it, billed at their own
+    rates — writing costs MORE than fresh input on Anthropic (~1.25x) while
+    reading costs far less (~0.1x), so folding either into the input rate
+    misreports a cache-heavy turn in both directions.
 
     Returns None when the model has no known/override pricing.
     """
     r = rates(model)
     if r is None:
         return None
-    cache = min(tok_cache, tok_in)  # cached tokens are a subset of input
-    fresh_in = tok_in - cache
+    # Both cache figures are subsets of input, and a token is either read from the
+    # cache or written to it — never both. Clamp so a provider reporting slightly
+    # inconsistent counts can't drive fresh_in negative and refund the turn.
+    cache = max(0, min(tok_cache, tok_in))
+    write = max(0, min(tok_cache_write, tok_in - cache))
+    fresh_in = tok_in - cache - write
+    # Explicit rates on the credential beat the multipliers: a reseller's cache
+    # pricing is not necessarily the upstream vendor's.
+    stored = _stored_model_config(model) or {}
+    read_rate = stored.get("cache_read_cost")
+    read_rate = float(read_rate) if read_rate else r[0] * _cache_discount(model)
+    write_rate = stored.get("cache_write_cost")
+    write_rate = float(write_rate) if write_rate else table_cache_rates(model, r[0])[0]
     return (
-        fresh_in * r[0] + cache * r[0] * _cache_discount(model) + tok_out * r[1]
+        fresh_in * r[0] + cache * read_rate + write * write_rate + tok_out * r[1]
     ) / 1_000_000

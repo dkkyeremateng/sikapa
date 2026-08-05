@@ -17,6 +17,7 @@ runs the full gather + a standalone synthesis + save.
 
 from __future__ import annotations
 
+from typing import Any
 import asyncio
 import os
 from datetime import datetime
@@ -25,7 +26,7 @@ from pathlib import Path
 # Report sections, each a (label, zero-arg callable) built for one ticker. Every
 # callable returns the tool's plain-text output (or its own "no data" message), so
 # a missing source degrades to a labeled gap rather than failing the report.
-def _section_fns(symbol: str) -> dict:
+def _section_fns(symbol: str) -> dict[str, Any]:
     from . import tools
     from . import fundamentals
 
@@ -41,7 +42,7 @@ def _section_fns(symbol: str) -> dict:
     }
 
 
-def _portfolio_section_fns(account: str = "") -> dict:
+def _portfolio_section_fns(account: str = "") -> dict[str, Any]:
     from . import tools
     from . import analytics, fundamentals, monitor
 
@@ -57,7 +58,7 @@ def _portfolio_section_fns(account: str = "") -> dict:
     }
 
 
-async def _gather(fns: dict, fake: bool, fake_label: str) -> list[tuple[str, str]]:
+async def _gather(fns: dict[str, Any], fake: bool, fake_label: str) -> list[tuple[str, str]]:
     """Run a label→callable map concurrently (each blocking fetch in a thread). A
     section that raises degrades to an 'unavailable' note. ``fake`` returns
     deterministic stubs with no network, for offline runs/tests."""
@@ -162,7 +163,7 @@ async def synthesize_report(
         return f"# Research report: {title}\n\nFAKE-OK synthesized from:\n{body}"
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from .graph import _make_llm
+    from .llm import _make_llm
 
     findings = "\n\n".join(f"## {label}\n{text}" for label, text in sections)
     lesson_block = ""
@@ -203,7 +204,7 @@ def save_report(symbol: str, report: str) -> Path:
 
 async def research_ticker(
     symbol: str, model: str | None = None, fake: bool = False
-) -> dict:
+) -> dict[str, Any]:
     """Full pipeline for one ticker: recall prior lessons, gather findings
     concurrently, synthesize a cited markdown report applying those lessons, save
     it, then reflect to learn new lessons for next time. Returns
@@ -225,7 +226,7 @@ async def research_ticker(
 
 async def research_portfolio(
     account: str = "", model: str | None = None, fake: bool = False
-) -> dict:
+) -> dict[str, Any]:
     """Full pipeline for the whole portfolio: recall prior lessons, gather
     portfolio-level findings (allocation, look-through exposure, benchmark, income,
     dividends, realized gains, upcoming events) concurrently, synthesize a cited

@@ -578,6 +578,7 @@ dependencies = [
     { name = "plotext" },
     { name = "python-dotenv" },
     { name = "textual" },
+    { name = "typing-extensions" },
     { name = "yfinance" },
 ]
 
@@ -628,6 +629,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "textual", specifier = ">=1.0" },
+    { name = "typing-extensions", specifier = ">=4.4" },
     { name = "yfinance", specifier = ">=0.2.40" },
 ]
 provides-extras = ["dev", "tracing", "anthropic", "google", "groq", "ofx", "documents"]

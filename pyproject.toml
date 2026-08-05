@@ -26,6 +26,10 @@ dependencies = [
     "ddgs>=9.0",
     "yfinance>=0.2.40",
     "numpy>=1.24",
+    # `typing_extensions.override` — `typing.override` is 3.12+ and this package
+    # supports 3.10. Already present transitively (pydantic/langchain); declared
+    # here because the package imports it directly.
+    "typing-extensions>=4.4",
 ]
 
 [project.optional-dependencies]
@@ -61,3 +65,69 @@ packages = ["src/financial_research_assistant"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+# Type checking: `uvx pyright`, `uvx basedpyright`, or the editor's Pylance over
+# the package. The tree is clean under all three at this setting — the few
+# genuinely-unknowable spots carry a narrow `# pyright: ignore[...]` naming the
+# reason, so a new diagnostic is a real signal rather than noise to scroll past.
+#
+# basedpyright defaults to its `recommended` mode, which is stricter than pyright
+# and turns on ~3000 diagnostics here. Everything below is switched off
+# deliberately and for a stated reason; every rule NOT listed stays on, so a new
+# rule in a future release surfaces rather than being silently swallowed.
+#
+# It all lives in one `[tool.pyright]` block on purpose. basedpyright REPLACES
+# this section with `[tool.basedpyright]` rather than merging the two, so
+# splitting the basedpyright-only rules out would mean duplicating `include` /
+# `venv` / every other rule and letting the copies drift. The cost is that plain
+# pyright prints "unrecognized setting" for the three rules it doesn't have
+# (reportAny, reportExplicitAny, reportUnannotatedClassAttribute) — informational
+# only; it still reports 0 errors.
+[tool.pyright]
+include = ["src/financial_research_assistant"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.10"
+# Bare `dict` / `set` / `tuple` say nothing about their contents; the editor
+# flags them by default, so match that here rather than have the two disagree.
+reportMissingTypeArgument = "error"
+
+# --- Untyped third-party surface ---------------------------------------------
+# yfinance, ddgs, plotext, mcp and much of langchain ship no (or partial) types,
+# so every value crossing those boundaries is Unknown and every annotation we
+# write to contain it is an explicit `Any`. Silencing these is not a statement
+# that the code is well-typed there — it is that the fix lives in stub files for
+# other people's packages, not in this tree. The boundaries are narrow and each
+# one is guarded at runtime (`_num`, `getattr(..., default)`, `try/except`).
+reportAny = "none"
+reportExplicitAny = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportUnknownVariableType = "none"
+reportMissingTypeStubs = "none"
+
+# --- Style mandates, not defects ---------------------------------------------
+# Discarding a return value (`log.write(...)`, `set_interval(...)`) is ordinary
+# here, long prompt strings are built with implicit concatenation on purpose, and
+# a declarative class body (`BINDINGS`, `AUTH_URL`, `DOTS`) reads better without
+# a type on every line.
+reportUnusedCallResult = "none"
+reportImplicitStringConcatenation = "none"
+reportUnannotatedClassAttribute = "none"
+# Only fires on `frozenset()` defaults, which are immutable — the mutable-default
+# footgun this rule exists to catch does not occur in this tree.
+reportCallInDefaultInitializer = "none"
+
+# --- Deliberate architecture -------------------------------------------------
+# `_name` marks "not part of the PACKAGE's public API"; sibling modules inside
+# the package share those helpers by design, and the test suite monkeypatches
+# them by that exact name (`tools._fetch_daily`, `tools._ibkr_server_config`).
+reportPrivateUsage = "none"
+# On, so a NEW accidental cycle is an error. The few that remain are each
+# deliberate and suppressed at the top of the file that starts the chain, with the
+# reason stated there: `__init__.py` (the `from . import x` idiom, which is an edge
+# to the package itself), `brokers.py` (the late-bound broker registry), and
+# `catalog.py` (a subagent's tool pool is by definition the catalog).
+reportImportCycles = "error"

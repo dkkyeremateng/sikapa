@@ -18,6 +18,7 @@ from financial_research_assistant.tui import (
     AgentMessageWidget,
     CommandInput,
     ModelScreen,
+    PromptScreen,
     ProcessingWidget,
     SelectScreen,
     ThinkingPanel,
@@ -163,6 +164,200 @@ async def test_tui_config_shows_configured_model(monkeypatch, tmp_path):
         await pilot.pause()
         # The model appears in the log only because /config printed it.
         assert "sentinel-model-x7" in log_text(app)
+
+
+async def test_tui_login_stores_credential(monkeypatch, tmp_path):
+    """/login PROVIDER runs the flow on a thread worker (a browser round-trip on
+    the event loop would freeze the UI) and stores the credential."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    from financial_research_assistant import auth, oauth
+
+    monkeypatch.setattr(oauth, "_post_json", lambda u, p, timeout=30.0: {"key": "sk-tui"})
+    monkeypatch.setattr(oauth, "LOGIN_TIMEOUT", 0.2)  # no browser in a test
+    monkeypatch.setattr("webbrowser.open", lambda _u: True)
+
+    app = AgentApp(fake=True, session_id="login")
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        # The paste fallback is what a test can drive; answer its modal.
+        monkeypatch.setattr(
+            AgentApp, "push_screen_wait", _immediate("pasted-code"), raising=False
+        )
+        box.value = "/login openrouter"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert "signed in to openrouter" in log_text(app)
+        assert auth.resolve_key() == "sk-tui"
+
+        # /config names the provider for that tier, never the secret.
+        box.value = "/config"
+        await pilot.press("enter")
+        await pilot.pause()
+        text = log_text(app)
+        assert "auth:default openrouter (api key)" in text
+        assert "sk-tui" not in text, "/config leaked the secret"
+
+
+async def test_tui_config_endpoint_follows_the_credential(monkeypatch, tmp_path):
+    """A stored credential pins its own endpoint and outranks the environment, so
+    /config must report that one — OPENAI_API_BASE alone would be wrong."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    from financial_research_assistant import auth
+
+    auth.set_credential(
+        "default",
+        {"provider": "openrouter", "type": "api_key", "key": "k",
+         "base_url": "https://openrouter.ai/api/v1"},
+    )
+    app = AgentApp(fake=False, session_id="cfgauth")
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        box.value = "/config"
+        await pilot.press("enter")
+        await pilot.pause()
+        text = log_text(app)
+        assert "openrouter.ai/api/v1" in text
+        assert "api.openai.com" not in text
+
+
+def _immediate(value):
+    """Stand in for App.push_screen_wait, which needs a live modal."""
+
+    async def _pushed(self, _screen):
+        return value
+
+    return _pushed
+
+
+async def test_tui_login_rejects_unknown_provider_and_tier(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+
+    app = AgentApp(fake=True, session_id="login2")
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        box.value = "/login nosuchprovider"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "unknown provider" in log_text(app)
+
+        box.value = "/login openrouter nosuchtier"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "unknown tier" in log_text(app)
+
+
+async def test_tui_login_failure_is_reported_not_raised(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    from financial_research_assistant import auth, oauth
+
+    def boom(*_a, **_k):
+        raise OSError("network is down")
+
+    monkeypatch.setattr(oauth, "_post_json", boom)
+    monkeypatch.setattr(oauth, "LOGIN_TIMEOUT", 0.2)
+    monkeypatch.setattr("webbrowser.open", lambda _u: True)
+    monkeypatch.setattr(AgentApp, "push_screen_wait", _immediate("code"), raising=False)
+
+    app = AgentApp(fake=True, session_id="login3")
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        box.value = "/login openrouter"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "login failed" in log_text(app)
+        assert "network is down" in log_text(app)
+        assert auth.get() is None  # a failed login stores nothing
+
+
+async def test_tui_login_api_key_input_is_masked(monkeypatch, tmp_path):
+    """A typed API key must not be echoed — the log gets exported."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    from financial_research_assistant import auth
+
+    app = AgentApp(fake=True, session_id="key-login")
+    async with app.run_test() as pilot:
+        app.query_one(CommandInput).value = "/login anthropic-key"
+        await pilot.press("enter")
+        # the worker blocks on the modal, so wait for the screen rather than the worker
+        for _ in range(50):
+            await pilot.pause()
+            if isinstance(app.screen, PromptScreen):
+                break
+        field = app.screen.query_one("#modal-input", Input)
+        assert field.password is True, "API key input is not masked"
+
+        field.value = "sk-ant-api-typed"
+        await pilot.pause()
+        await pilot.press("enter")
+
+        # Then the remaining questions (models, context window). Accept each with
+        # a blank answer rather than hard-coding how many there are, so adding one
+        # doesn't hang this test on an unanswered modal.
+        titles = []
+        while True:
+            for _ in range(50):
+                await pilot.pause()
+                if isinstance(app.screen, PromptScreen):
+                    break
+            if not isinstance(app.screen, PromptScreen):
+                break
+            titles.append(app.screen._title)
+            assert app.screen.query_one("#modal-input", Input).password is False, (
+                f"{app.screen._title!r} must not be masked — only the key is a secret"
+            )
+            await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert any("models" in t for t in titles)
+        assert any("context window" in t for t in titles)
+        assert auth.models() == [
+            "claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5-20251001",
+        ]
+        # suggested from the per-model table for claude-sonnet-5, the default
+        assert auth.context_window() == 1_000_000
+        assert auth.resolve_key() == "sk-ant-api-typed"
+        assert "sk-ant-api-typed" not in log_text(app), "key echoed into the log"
+        assert "signed in to anthropic-key" in log_text(app)
+
+
+async def test_tui_logout(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    from financial_research_assistant import auth
+
+    auth.set_credential("quick", {"provider": "openai", "type": "api_key", "key": "k"})
+
+    app = AgentApp(fake=True, session_id="logout")
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        box.value = "/logout quick"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "signed out (quick tier)" in log_text(app)
+        assert auth.get("quick") is None
+        assert auth.providers() == ["openai"]  # kept, so it can be switched back to
+
+        box.value = "/logout quick"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "no credential in use" in log_text(app)
+
+        # /logout PROVIDER removes it for good
+        box.value = "/logout openai"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "forgot the openai credential" in log_text(app)
+        assert auth.providers() == []
 
 
 async def test_tui_import_command_imports_statement(monkeypatch, tmp_path):
@@ -339,6 +534,14 @@ def test_footer_line_exact_rendering():
     full = _footer_line(m, "openai", 10, 20, 5, 50)
     assert full.plain == "local-model · openai · ctx 50% of 128k · in 10 / out 20 tok · cache 5"
 
+    # Cache reads and writes are separate line items: they bill at very different
+    # rates, so one combined figure would hide which you actually paid for.
+    with_write = _footer_line(m, "openai", 10, 20, 5, tokens_cache_write=7)
+    assert with_write.plain == "local-model · openai · in 10 / out 20 tok · cache 5 +7 w"
+
+    write_only = _footer_line(m, "openai", 10, 20, tokens_cache_write=7)
+    assert write_only.plain == "local-model · openai · in 10 / out 20 tok · +7 w"
+
 
 def test_footer_line_cost_and_thinking_segments():
     """A priced model appends a $cost segment; passing ``thinking`` appends a
@@ -505,42 +708,81 @@ async def test_toggle_collapse_flips_tool_and_thinking_panels(monkeypatch, tmp_p
         assert tool.collapsed is True
 
 
-# -- /model modal -----------------------------------------------------------
+# -- /models picker ---------------------------------------------------------
 
 
-async def test_model_command_opens_modal_and_sets_override(monkeypatch, tmp_path):
-    """/model with no arg opens the ModelScreen picker; typing a name + Enter
-    dismisses it and sets model_override."""
+async def test_models_lists_configured_models_and_selects_one(monkeypatch, tmp_path):
+    """/models with no arg lists every configured model — with where each came
+    from — and selecting one sets model_override."""
     monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
-    app = AgentApp(fake=True, session_id="model-modal")
+    monkeypatch.setenv("OPENAI_MODEL", "primary-model-x")
+    monkeypatch.setenv("QUICK_MODEL", "cheap-model-y")
+    app = AgentApp(fake=True, session_id="models-list")
     async with app.run_test() as pilot:
         box = app.query_one(CommandInput)
-        box.value = "/model"
+        box.value = "/models"
         await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, SelectScreen)
+
+        options = app.screen.query_one("#modal-list", OptionList)
+        labels = [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
+        blob = " | ".join(labels)
+        assert "primary-model-x" in blob and "OPENAI_MODEL" in blob
+        assert "cheap-model-y" in blob and "quick tier" in blob
+        assert "clear the override" in blob      # /models default, discoverable
+        assert "type a model name" in blob       # anything not listed
+
+        await pilot.press("enter")  # take the highlighted (first) entry
+        await pilot.pause()
+        assert not isinstance(app.screen, SelectScreen)
+        assert app.model_override == "primary-model-x"
+
+
+async def test_models_picker_can_fall_through_to_typing(monkeypatch, tmp_path):
+    """"type a model name…" opens the free-text modal, so a model that isn't
+    configured anywhere is still reachable."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="models-type")
+    async with app.run_test() as pilot:
+        app.query_one(CommandInput).value = "/models"
+        await pilot.press("enter")
+        await pilot.pause()
+        app.screen.dismiss(AgentApp._TYPE_A_MODEL)
         await pilot.pause()
         assert isinstance(app.screen, ModelScreen)
 
-        modal_input = app.screen.query_one("#modal-input", Input)
-        modal_input.value = "gpt-4o-custom"
+        app.screen.query_one("#modal-input", Input).value = "gpt-4o-custom"
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-        assert not isinstance(app.screen, ModelScreen)  # dismissed
+        assert not isinstance(app.screen, ModelScreen)
         assert app.model_override == "gpt-4o-custom"
 
 
-async def test_model_command_with_arg_sets_override_directly(monkeypatch, tmp_path):
-    """/model NAME sets model_override without opening the picker."""
+async def test_models_command_with_arg_sets_override_directly(monkeypatch, tmp_path):
+    """/models NAME sets model_override without opening the picker."""
     monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
     app = AgentApp(fake=True, session_id="model-arg")
     async with app.run_test() as pilot:
         box = app.query_one(CommandInput)
-        box.value = "/model gpt-4o-direct"
+        box.value = "/models gpt-4o-direct"
         await pilot.press("enter")
         await pilot.pause()
         assert app.model_override == "gpt-4o-direct"
-        assert not isinstance(app.screen, ModelScreen)  # no picker needed
+        assert not isinstance(app.screen, SelectScreen)  # no picker needed
         assert "gpt-4o-direct" in log_text(app)
+
+
+async def test_model_singular_still_works_as_an_alias(monkeypatch, tmp_path):
+    """Renaming the command must not silently swallow existing muscle memory."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="model-alias")
+    async with app.run_test() as pilot:
+        app.query_one(CommandInput).value = "/model gpt-4o-alias"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.model_override == "gpt-4o-alias"
 
 
 # -- /resume modal ----------------------------------------------------------
@@ -614,13 +856,18 @@ async def test_prompt_stays_focused_after_clicking_panel(monkeypatch, tmp_path):
 
 
 async def test_model_modal_input_keeps_focus(monkeypatch, tmp_path):
-    """The focus guard must NOT steal focus from a modal — the /model picker's
-    own input stays focused so typing goes to it."""
+    """The focus guard must NOT steal focus from a modal — the model name input
+    stays focused so typing goes to it. Reached via /models → "type a name…",
+    since the picker itself is now a list."""
     monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
     app = AgentApp(fake=True, session_id="focus-modal")
     async with app.run_test() as pilot:
-        app.query_one(CommandInput).value = "/model"
+        app.query_one(CommandInput).value = "/models"
         await pilot.press("enter")
+        await pilot.pause()
+        assert app.focused is app.screen.query_one("#modal-list", OptionList)
+
+        app.screen.dismiss(AgentApp._TYPE_A_MODEL)
         await pilot.pause()
         modal_input = app.screen.query_one("#modal-input", Input)
         await pilot.pause()

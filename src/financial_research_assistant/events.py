@@ -41,6 +41,12 @@ class AgentEvent:
     tokens_in: int = 0   # prompt tokens for the turn (usage events)
     tokens_out: int = 0  # completion tokens for the turn (usage events)
     tokens_cache: int = 0  # cache-read prompt tokens (when the provider reports it)
+    # Cache-WRITE prompt tokens: the portion of this call's input that was written
+    # into the prompt cache. Billed at a different rate from both fresh input and a
+    # cache read (Anthropic charges ~1.25x input to write, ~0.1x to read), so it is
+    # counted separately rather than folded into tokens_in. Like tokens_cache it is
+    # a SUBSET of tokens_in, not an addition to it.
+    tokens_cache_write: int = 0
     # Snapshot of the CURRENT context size (this turn's total input tokens), as
     # opposed to the additive per-call ``tokens_in`` delta. Drives the footer's
     # "ctx %" gauge, which must reflect how full the window is *now* — not the

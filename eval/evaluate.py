@@ -67,7 +67,7 @@ def _llm_judge(query: str, output: str, criteria: list[dict], fake: bool) -> flo
     keys.
 
     Real mode: score with the app's **configured** model via the same
-    ``graph._make_llm`` the agent uses — so it honors ``OPENAI_API_BASE`` (local
+    ``llm._make_llm`` the agent uses — so it honors ``OPENAI_API_BASE`` (local
     servers, whose key is a dummy), ``MODEL_PROVIDER`` (Anthropic/Google/…), and
     the ``OPENAI_*`` contract, instead of requiring a bare ``OPENAI_API_KEY``.
     ``EVAL_JUDGE_MODEL`` overrides the judge model (e.g. a stronger cross-family
@@ -78,7 +78,7 @@ def _llm_judge(query: str, output: str, criteria: list[dict], fake: bool) -> flo
     try:
         from langchain_core.messages import HumanMessage
 
-        from financial_research_assistant.graph import _make_llm
+        from financial_research_assistant.llm import _make_llm
     except Exception as e:  # package/langchain not importable
         print(f"  (llm_judge needs the package + langchain; scoring 0.0: {e})", file=sys.stderr)
         return 0.0

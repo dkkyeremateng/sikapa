@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from financial_research_assistant import edgar, fundamentals, tools, valuation
+from financial_research_assistant import catalog, edgar, fundamentals, tools, valuation
 
 
 # --- pure math ---------------------------------------------------------------
@@ -148,6 +148,6 @@ def test_dcf_unknown_ticker(monkeypatch):
 
 
 def test_dcf_valuation_registered():
-    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in tools.TOOLS}
+    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in catalog.TOOLS}
     assert "dcf_valuation" in names
     assert valuation.dcf_valuation in valuation.VALUATION_TOOLS

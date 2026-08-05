@@ -15,14 +15,18 @@ in-memory checkpointer (``MemorySaver``), so every invocation that reuses a
   the documented fallback.)
 """
 
+from typing import Any, Literal
 import os
 from contextlib import asynccontextmanager
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 
-from .tools import TOOLS, active_tools, capabilities, ibkr_tools_session
+from .catalog import active_tools, capabilities
+from .llm import _make_llm, quick_llm, resolved_model
+from .tools import ibkr_tools_session
 from .tools import think as think_tool  # aliased: `think` the param shadows it below
 
 # The base prompt: what EVERY turn needs, regardless of which optional data
@@ -305,107 +309,6 @@ def _build_fake_graph(think: bool = True):
     return g.compile(checkpointer=MemorySaver())
 
 
-def _make_llm(
-    model: str | None = None,
-    *,
-    provider: str | None = None,
-    base_url: str | None = None,
-    api_key: str | None = None,
-):
-    """Construct the chat model from env, shared by the ReAct agent, the standalone
-    summarizer (compaction), and subagents.
-
-    ``model`` / ``provider`` / ``base_url`` / ``api_key`` are optional overrides;
-    each falls back to its env var (``OPENAI_MODEL`` / ``MODEL_PROVIDER`` /
-    ``OPENAI_API_BASE`` / ``OPENAI_API_KEY``) when None. Passing none reproduces the
-    original env-only behavior exactly. Subagents use these overrides to point at a
-    SEPARATE OpenAI-compatible endpoint/key/model (``SUBAGENT_*``) while still going
-    through this one builder — so they get the same OpenAI-compatible support the
-    primary agent has.
-
-    Default (``MODEL_PROVIDER`` unset or ``openai``): an OpenAI-compatible
-    ``ChatOpenAI`` — cloud OpenAI, or any local server via ``OPENAI_API_BASE``
-    (llama.cpp / Ollama / LM Studio). This path is unchanged, so existing setups
-    behave identically.
-
-    Other providers (``MODEL_PROVIDER=anthropic`` | ``google_genai`` | ``groq`` |
-    …): built through LangChain's ``init_chat_model``, which reads that provider's
-    own key env var (``ANTHROPIC_API_KEY``, ``GOOGLE_API_KEY``, …). The provider's
-    integration package must be installed (e.g. ``pip install '.[anthropic]'``);
-    a missing one raises a clear ImportError that surfaces as an error event."""
-    provider = (provider or os.environ.get("MODEL_PROVIDER") or "openai").strip().lower()
-    model = model or os.environ.get("OPENAI_MODEL") or _default_model(provider)
-    if provider in ("", "openai"):
-        from langchain_openai import ChatOpenAI
-        from pydantic import SecretStr
-
-        base_url = base_url or os.environ.get("OPENAI_API_BASE") or None
-        api_key = api_key or os.environ.get("OPENAI_API_KEY") or ("dummy" if base_url else None)
-        return ChatOpenAI(
-            model=model,
-            base_url=base_url,
-            api_key=SecretStr(api_key) if api_key else None,
-        )
-    from langchain.chat_models import init_chat_model
-
-    return init_chat_model(model, model_provider=provider)
-
-
-def _quick_overrides() -> dict:
-    """Endpoint overrides for the 'quick' model tier (``QUICK_API_BASE`` /
-    ``QUICK_API_KEY`` / ``QUICK_MODEL_PROVIDER``); each unset value is None so
-    ``_make_llm`` falls back to the primary agent's config — exactly like the
-    ``SUBAGENT_*`` overrides."""
-    return {
-        "provider": os.environ.get("QUICK_MODEL_PROVIDER") or None,
-        "base_url": os.environ.get("QUICK_API_BASE") or None,
-        "api_key": os.environ.get("QUICK_API_KEY") or None,
-    }
-
-
-def quick_llm(model: str | None = None):
-    """Build the 'quick'/cheap model tier for summarization & extraction tasks
-    (context compaction, and any other high-volume, low-reasoning call) — the
-    deep-vs-quick split trading firms use to cut cost. ``QUICK_MODEL`` (+ optional
-    ``QUICK_API_BASE`` / ``QUICK_API_KEY`` / ``QUICK_MODEL_PROVIDER``) selects it and
-    takes precedence for these tasks; when ``QUICK_MODEL`` is unset it falls back to
-    ``model`` and then the primary agent's config, so unset = identical to today
-    (the primary model does the summarizing, no behavior change)."""
-    return _make_llm(
-        os.environ.get("QUICK_MODEL") or model or None, **_quick_overrides()
-    )
-
-
-# Sensible default model per provider when neither the caller nor OPENAI_MODEL
-# names one, so `MODEL_PROVIDER=anthropic` alone works without also setting a model.
-#
-# The Anthropic default stays on the balanced Sonnet tier (the tier this agent
-# was already pointed at) rather than jumping to Opus: this is a research
-# assistant doing multi-step tool calls, and Sonnet 5 reaches near-Opus quality
-# on agentic work at a fifth of the Opus input price. Set OPENAI_MODEL to
-# `claude-opus-5` for the hardest analysis.
-_PROVIDER_DEFAULT_MODEL = {
-    "anthropic": "claude-sonnet-5",
-    "google_genai": "gemini-2.5-flash",
-    "groq": "llama-3.3-70b-versatile",
-}
-
-
-def _default_model(provider: str) -> str:
-    return _PROVIDER_DEFAULT_MODEL.get(provider, "gpt-4.1-mini")
-
-
-def resolved_model(model: str | None = None) -> str:
-    """The model name ``_make_llm`` would actually build, for pricing, context-window,
-    and token-budget math — so a non-OpenAI provider's default is reflected rather
-    than a hardcoded gpt-4.1-mini."""
-    if model:
-        return model
-    env = os.environ.get("OPENAI_MODEL")
-    if env:
-        return env
-    provider = (os.environ.get("MODEL_PROVIDER") or "openai").strip().lower()
-    return _default_model(provider)
 
 
 # Fraction of the context window at which old TOOL RESULTS are replaced by a
@@ -445,17 +348,18 @@ def _clear_tool_results_fraction() -> float | None:
 # system) is written once per turn and read back on every later step. "1h" writes
 # at 2x and needs three-plus reads to break even, but survives a user thinking
 # between turns; worth setting for a slow-paced chat session.
-_CACHE_TTLS = ("5m", "1h")
+
+_CACHE_TTLS: tuple[Literal["5m"], Literal["1h"]] = ("5m", "1h")
 
 
-def _cache_ttl() -> str:
+def _cache_ttl() -> Literal["5m", "1h"]:
     """Prompt-cache TTL from ``ANTHROPIC_CACHE_TTL``; anything but ``1h`` reads as
     the ``5m`` default, since those are the only two values the API accepts."""
     raw = (os.environ.get("ANTHROPIC_CACHE_TTL") or "").strip().lower()
-    return raw if raw in _CACHE_TTLS else "5m"
+    return "1h" if raw == "1h" else "5m"
 
 
-def _caching_middleware() -> list:
+def _caching_middleware() -> list[Any]:
     """Anthropic prompt caching: tags the last system block and the last tool
     definition with a cache breakpoint, so the ~11k-token fixed prefix (tools then
     system — the order the API renders them in) is billed at cache-read rates on
@@ -484,7 +388,7 @@ def _caching_middleware() -> list:
     ]
 
 
-def _context_middleware(model: str | None) -> list:
+def _context_middleware(model: str | None) -> list[Any]:
     """Middleware that clears stale tool results once the thread crosses
     ``_clear_tool_results_fraction()`` of the context window. Returns an empty list
     when disabled or when the installed langchain lacks the middleware, so the
@@ -580,7 +484,7 @@ SUMMARY_SYSTEM_PROMPT = (
 )
 
 
-def _render_transcript(messages) -> str:
+def _render_transcript(messages: list[BaseMessage]) -> str:
     """Flatten a message list into a plain transcript for the summarizer."""
     lines: list[str] = []
     for m in messages:
@@ -599,7 +503,7 @@ def _render_transcript(messages) -> str:
     return "\n".join(lines)
 
 
-async def summarize_messages(messages, model: str | None = None) -> str:
+async def summarize_messages(messages: list[BaseMessage], model: str | None = None) -> str:
     """Summarize a run of conversation messages into a compact recap string. Uses
     the 'quick' model tier (``QUICK_MODEL``) when configured — summarization is a
     cheap task that doesn't need the primary reasoning model — else the primary
@@ -615,8 +519,8 @@ async def summarize_messages(messages, model: str | None = None) -> str:
 def _build_real_graph(
     model: str | None = None,
     think: bool = True,
-    extra_tools: list | None = None,
-    checkpointer=None,
+    extra_tools: list[Any] | None = None,
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
 ):
     from langchain.agents import create_agent
 
@@ -682,7 +586,8 @@ def _build_real_graph(
 
 @asynccontextmanager
 async def real_graph_session(
-    model: str | None = None, think: bool = True, checkpointer=None
+    model: str | None = None, think: bool = True,
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
 ):
     """Per-turn real graph. Opens the IBKR MCP session (via
     ``ibkr_tools_session``), compiles the ReAct agent with its read-only tools

@@ -10,7 +10,7 @@ from datetime import date
 
 import pytest
 
-from financial_research_assistant import options, tools
+from financial_research_assistant import catalog, options, tools
 
 
 # --- pure math ---------------------------------------------------------------
@@ -113,6 +113,6 @@ def test_explain_option_no_options(monkeypatch):
 
 
 def test_explain_option_registered():
-    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in tools.TOOLS}
+    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in catalog.TOOLS}
     assert "explain_option" in names
     assert options.explain_option in options.OPTIONS_TOOLS

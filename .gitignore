@@ -9,3 +9,6 @@ eval/results.jsonl
 docs/
 .claude/
 .DS_Store
+.agent/
+.playwright/
+.playwright-cli/

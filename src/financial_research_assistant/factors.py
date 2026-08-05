@@ -14,6 +14,7 @@ run, so tests exercise the regression offline with synthetic factors.
 
 from __future__ import annotations
 
+from typing import Any
 import io
 import re
 import urllib.request
@@ -28,11 +29,11 @@ _FF_URLS = {
           "F-F_Research_Data_5_Factors_2x3_daily_CSV.zip",
 }
 _FF_UA = "Mozilla/5.0 (compatible; financial-research-assistant)"
-_FF_CACHE: dict[bool, tuple] = {}
+_FF_CACHE: dict[bool, tuple[Any, ...]] = {}
 _DATA_ROW = re.compile(r"^\s*(\d{8}),(.*)$")
 
 
-def _parse_ff_csv(text: str) -> tuple[list[str], dict[str, dict]]:
+def _parse_ff_csv(text: str) -> tuple[list[str], dict[str, dict[str, Any]]]:
     """Parse a Fama-French daily CSV into ``(factor_names, {date_iso: {name:
     decimal}})``. Factor names exclude RF (kept per-row for excess returns). Values
     in the file are percent; they're divided by 100 here."""
@@ -41,7 +42,7 @@ def _parse_ff_csv(text: str) -> tuple[list[str], dict[str, dict]]:
     cols = [c.strip() for c in header.split(",")[1:]]  # drop the leading date col
     if not cols:
         return [], {}
-    by_date: dict[str, dict] = {}
+    by_date: dict[str, dict[str, Any]] = {}
     for ln in lines:
         m = _DATA_ROW.match(ln)
         if not m:
@@ -65,7 +66,7 @@ def _parse_ff_csv(text: str) -> tuple[list[str], dict[str, dict]]:
     return factor_names, by_date
 
 
-def _fetch_ff_factors(five_factor: bool = False) -> tuple[list[str], dict[str, dict]]:
+def _fetch_ff_factors(five_factor: bool = False) -> tuple[list[str], dict[str, dict[str, Any]]]:
     """Download + parse the Fama-French daily factors (cached per run). Returns
     ``([], {})`` on any failure so the caller shows a friendly message."""
     if five_factor in _FF_CACHE:

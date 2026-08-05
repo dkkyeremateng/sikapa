@@ -19,14 +19,16 @@ answer (so the 💭 panel is exercised offline), and a real reasoning model's
 ``reasoning_content`` deltas surface the same way.
 """
 
+from typing import Any
 import contextlib
 import itertools
 import json
 import os
 import time
-from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import RunnableConfig
 
 try:  # aggregates token usage across the model invocation(s) in the turn
     from langchain_core.callbacks import get_usage_metadata_callback
@@ -40,6 +42,36 @@ from .pricing import context_cap
 from .memory import get_memory, inject, recall_facts
 
 AGENT_NAME = "Agent"  # single-agent scaffold: one name, depth stays 0
+
+
+def describe_error(exc: BaseException) -> str:
+    """Flatten an exception to something a user can act on.
+
+    The graph runs inside anyio task groups (the MCP session), so a failure
+    anywhere arrives wrapped: ``str()`` gives "unhandled errors in a TaskGroup
+    (1 sub-exception)", which is true and useless — the actual 404 or auth error
+    is a leaf several levels down. Walk to the leaves and report those, keeping
+    the type name because "NotFoundError" vs "AuthenticationError" is usually the
+    whole diagnosis. Credentials are masked: an httpx error can carry the request
+    headers.
+    """
+    from .auth import redact
+
+    leaves: list[str] = []
+
+    def walk(e: BaseException, depth: int = 0) -> None:
+        subs = getattr(e, "exceptions", None)  # ExceptionGroup / anyio group
+        if subs and depth < 5:
+            for sub in subs:
+                walk(sub, depth + 1)
+            return
+        text = str(e).strip()
+        leaves.append(f"{type(e).__name__}: {text}" if text else type(e).__name__)
+
+    walk(exc)
+    # dict.fromkeys dedupes while keeping order — a fan-out often fails identically
+    # in several tasks at once.
+    return redact("; ".join(dict.fromkeys(leaves)) or type(exc).__name__)
 
 # Fake graphs are cached (cheap, and their MemorySaver keeps fake-mode history).
 # Real turns build the graph PER TURN inside a per-turn IBKR MCP session (see
@@ -171,13 +203,25 @@ def _delete_durable_thread(session_id: str) -> None:
         pass  # a locked/corrupt DB must not break /new
 
 
+def _forget_cached(store: dict[tuple[Any, ...], Any], session_id: str) -> None:
+    """Drop every entry of ``store`` whose key starts with ``session_id``.
+
+    The key list is materialized first: popping while iterating a dict raises.
+    """
+    for key in [k for k in store if k and k[0] == session_id]:
+        store.pop(key, None)
+
+
 def reset_session(session_id: str) -> None:
     """Drop any cached fake graph and checkpointer for ``session_id`` so its next
     turn starts with fresh conversation memory, and erase its durable checkpoint
     rows when durable mode is on. ``/new`` calls this."""
-    for store in (_fake_graphs, _checkpointers):
-        for key in [k for k in store if k[0] == session_id]:
-            store.pop(key, None)
+    # Each store is keyed by a differently-shaped tuple (fake graphs by
+    # (session, think); checkpointers by (session, model, think)), so iterating
+    # them together unions the key types and a key from one is not a valid key for
+    # the other. Both share the session id in slot 0, which is all this needs.
+    _forget_cached(_fake_graphs, session_id)
+    _forget_cached(_checkpointers, session_id)
     _last_input.pop(session_id, None)
     _delete_durable_thread(session_id)
 
@@ -208,7 +252,7 @@ def _resolved_model(model: str | None) -> str:
     actually builds — so a non-OpenAI provider's default is reflected, not a
     hardcoded gpt-4.1-mini. Delegates to graph.resolved_model, which the context
     middleware's trigger threshold also uses."""
-    from .graph import resolved_model
+    from .llm import resolved_model
 
     return resolved_model(model)
 
@@ -222,7 +266,7 @@ async def compact_session(
     model: str | None = None,
     think: bool = True,
     keep_last: int = COMPACT_KEEP_LAST,
-) -> dict:
+) -> dict[str, Any]:
     """Summarize the older messages in this thread and rewrite its checkpoint so
     the running context (and ctx%) shrinks, while recent turns stay verbatim and
     the conversation continues coherently.
@@ -234,7 +278,7 @@ async def compact_session(
     ``{"removed", "kept", "summary"}``; ``removed == 0`` means there was too little
     history to be worth compacting (a no-op).
     """
-    config = {"configurable": {"thread_id": session_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     if fake:
         # Fake mode has no model to summarize with; operate on the cached fake
         # graph's own checkpointer and stub the summary so /compact is exercised
@@ -250,7 +294,8 @@ async def compact_session(
         return await _rewrite_thread(graph, "model", config, fake, model, keep_last)
 
 
-async def _rewrite_thread(graph, as_node, config, fake, model, keep_last) -> dict:
+async def _rewrite_thread(graph: Any, as_node: str, config: RunnableConfig, fake: bool,
+                          model: str | None, keep_last: int) -> dict[str, Any]:
     """Read the thread's messages from ``graph``'s checkpoint, summarize all but
     the last ``keep_last`` (rounded to a user-message boundary), and rewrite the
     checkpoint to a single summary seed plus that verbatim tail."""
@@ -285,29 +330,34 @@ async def _rewrite_thread(graph, as_node, config, fake, model, keep_last) -> dic
     return {"removed": len(head), "kept": len(tail) + 1, "summary": summary}
 
 
-def _sum_usage(usage_metadata) -> tuple[int, int, int]:
-    """Sum input/output/cache-read tokens across every model in a usage dict."""
-    tin = tout = tcache = 0
+def _sum_usage(usage_metadata: dict[str, Any] | None) -> tuple[int, int, int, int]:
+    """Sum input/output/cache-read/cache-write tokens across every model in a
+    usage dict. Both cache figures are subsets of ``input_tokens``."""
+    tin = tout = tcache = twrite = 0
     for v in (usage_metadata or {}).values():
         tin += int(v.get("input_tokens", 0) or 0)
         tout += int(v.get("output_tokens", 0) or 0)
         details = v.get("input_token_details") or {}
         tcache += int(details.get("cache_read", 0) or 0)
-    return tin, tout, tcache
+        twrite += int(details.get("cache_creation", 0) or 0)
+    return tin, tout, tcache, twrite
 
 
-def _usage_delta(usage_metadata) -> tuple[int, int, int]:
+def _usage_delta(usage_metadata: dict[str, Any] | None) -> tuple[int, int, int, int]:
     """Tokens from a single message's flat ``usage_metadata`` (one model call),
     as opposed to ``_sum_usage`` which reads the callback's by-model aggregate.
     Used to emit a live ``usage`` event as each model call in a turn completes."""
     um = usage_metadata or {}
-    tin = int(um.get("input_tokens", 0) or 0)
-    tout = int(um.get("output_tokens", 0) or 0)
-    tcache = int((um.get("input_token_details") or {}).get("cache_read", 0) or 0)
-    return tin, tout, tcache
+    details = um.get("input_token_details") or {}
+    return (
+        int(um.get("input_tokens", 0) or 0),
+        int(um.get("output_tokens", 0) or 0),
+        int(details.get("cache_read", 0) or 0),
+        int(details.get("cache_creation", 0) or 0),
+    )
 
 
-def _chunk_text(chunk) -> str:
+def _chunk_text(chunk: BaseMessage) -> str:
     content = chunk.content
     if isinstance(content, str):
         return content
@@ -317,7 +367,7 @@ def _chunk_text(chunk) -> str:
     )
 
 
-def _snippet(value, limit: int) -> str:
+def _snippet(value: Any, limit: int) -> str:
     if not isinstance(value, str):
         try:
             value = json.dumps(value, ensure_ascii=False, default=str)
@@ -337,7 +387,7 @@ def _args_complete(args: str) -> bool:
     return True
 
 
-def _tool_start(cid: str, entry: dict) -> AgentEvent:
+def _tool_start(cid: str, entry: dict[str, Any]) -> AgentEvent:
     entry["announced"] = True
     return AgentEvent(
         "tool_start",
@@ -349,7 +399,7 @@ def _tool_start(cid: str, entry: dict) -> AgentEvent:
     )
 
 
-def _tool_end(cid: str, entry: dict, msg: ToolMessage) -> AgentEvent:
+def _tool_end(cid: str, entry: dict[str, Any], msg: ToolMessage) -> AgentEvent:
     ok = getattr(msg, "status", "success") != "error"
     dt = time.monotonic() - entry["started"]
     # Chart tools split their result: `content` is the summary the model sees,
@@ -382,7 +432,7 @@ def _think_text(args: str) -> str:
         return (args or "").strip() or "(thinking)"
 
 
-def _announce(cid: str, entry: dict) -> AgentEvent | None:
+def _announce(cid: str, entry: dict[str, Any]) -> AgentEvent | None:
     """The event to emit when a tool call is first seen: a ``tool_start`` for a
     real tool. For the think tool, return ``None`` and defer — its ``reasoning``
     event is emitted when the call's result returns, stamped with the step's
@@ -408,7 +458,7 @@ def _fired_alerts() -> list[AgentEvent]:
 TOOLS_NODE = "tools"  # create_agent's tool-executing node
 
 
-def _from_own_node(meta: dict | None) -> bool:
+def _from_own_node(meta: dict[str, Any] | None) -> bool:
     """True when a streamed chunk is the agent's OWN reply, rather than output
     from a model running inside one of its tools.
 
@@ -443,7 +493,7 @@ def _from_own_node(meta: dict | None) -> bool:
     return root == node
 
 
-async def _stream_events(graph, inputs, config):
+async def _stream_events(graph: Any, inputs: dict[str, Any], config: RunnableConfig):
     """Translate ``stream_mode="messages"`` output into AgentEvents.
 
     Yields "reasoning" for streamed model thinking, "token" for streamed
@@ -456,10 +506,10 @@ async def _stream_events(graph, inputs, config):
     pairing may break. Inspect raw chunk shape first when debugging
     orphaned tool_start or mismatched tool names.
     """
-    calls: dict[str, dict] = {}   # call_id -> {name, args, started, announced}
+    calls: dict[str, dict[str, Any]] = {}   # call_id -> {name, args, started, announced}
     by_index: dict[int, str] = {}  # streaming chunk index -> call_id
 
-    def register(cid: str | None, name: str, args: str) -> tuple[str, dict]:
+    def register(cid: str | None, name: str, args: str) -> tuple[str, dict[str, Any]]:
         cid = cid or f"call_{next(_call_ids)}"
         entry = calls.get(cid)
         if entry is None:
@@ -489,9 +539,12 @@ async def _stream_events(graph, inputs, config):
         # any provider that doesn't stream per-call usage. Deliberately NOT filtered
         # to the agent's own node: a subagent's tokens are billed too, so they must
         # count toward the turn's cost even though its text isn't shown.
-        din, dout, dcache = _usage_delta(getattr(chunk, "usage_metadata", None))
-        if din or dout or dcache:
-            yield AgentEvent("usage", "", tokens_in=din, tokens_out=dout, tokens_cache=dcache)
+        din, dout, dcache, dwrite = _usage_delta(getattr(chunk, "usage_metadata", None))
+        if din or dout or dcache or dwrite:
+            yield AgentEvent(
+                "usage", "", tokens_in=din, tokens_out=dout,
+                tokens_cache=dcache, tokens_cache_write=dwrite,
+            )
         if isinstance(chunk, ToolMessage):
             cid, entry = register(chunk.tool_call_id, chunk.name or "tool", "")
             if entry["name"] == THINK_TOOL:
@@ -595,7 +648,7 @@ async def run_turn(
     model factory for this session. ``think=False`` suppresses reasoning
     events (and the fake graph's reasoning), so no 💭 trace is produced.
     """
-    config = {"configurable": {"thread_id": session_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     # Long-term memory (opt-in via MEMORY_BACKEND): recall relevant durable facts
     # AND few-shot guidance from earlier feedback (👍/👎 on similar questions),
     # inject both into the prompt; remember the exchange after the answer.
@@ -638,7 +691,7 @@ async def run_turn(
             # complete AIMessage (no token chunks) carrying reasoning_content, so
             # the reasoning panel is exercised and the answer is read back below.
             parts: list[str] = []
-            emitted_in = emitted_out = emitted_cache = 0  # live usage already yielded
+            emitted_in = emitted_out = emitted_cache = emitted_write = 0  # live usage already yielded
             cb_ctx = (
                 get_usage_metadata_callback()
                 if get_usage_metadata_callback is not None
@@ -654,6 +707,7 @@ async def run_turn(
                         emitted_in += ev.tokens_in
                         emitted_out += ev.tokens_out
                         emitted_cache += ev.tokens_cache
+                        emitted_write += ev.tokens_cache_write
                     yield ev
                 if parts:
                     answer = "".join(parts)
@@ -663,7 +717,7 @@ async def run_turn(
                     # checkpointed, so read the answer back from graph state.
                     state = await graph.aget_state(config)
                     answer = state.values["messages"][-1].content
-                tokens_in, tokens_out, tokens_cache = _sum_usage(
+                tokens_in, tokens_out, tokens_cache, tokens_write = _sum_usage(
                     getattr(cb, "usage_metadata", None)
                 )
             if mem:
@@ -682,6 +736,7 @@ async def run_turn(
                 tokens_in=max(0, tokens_in - emitted_in),
                 tokens_out=max(0, tokens_out - emitted_out),
                 tokens_cache=max(0, tokens_cache - emitted_cache),
+                tokens_cache_write=max(0, tokens_write - emitted_write),
                 # Authoritative context size for this turn (same figure the
                 # auto-compaction threshold uses), so the footer's ctx% reflects
                 # how full the window is now — not the cumulative session input.
@@ -689,4 +744,4 @@ async def run_turn(
             )
             yield AgentEvent("final", answer)
     except Exception as e:  # surface as an event, never raise into the UI
-        yield AgentEvent("error", str(e))
+        yield AgentEvent("error", describe_error(e))

@@ -27,6 +27,7 @@ secret — never passed through the model); the **query id** from
 
 from __future__ import annotations
 
+from typing import Any
 import os
 import time
 import urllib.parse
@@ -49,7 +50,7 @@ class FlexError(Exception):
     statement never became ready)."""
 
 
-def _flex_get(url: str, params: dict, timeout: float) -> str:
+def _flex_get(url: str, params: dict[str, Any], timeout: float) -> str:
     """HTTP GET returning decoded text. Errors never include the token."""
     full = f"{url}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(full, headers={"User-Agent": "financial-research-assistant"})
@@ -57,12 +58,12 @@ def _flex_get(url: str, params: dict, timeout: float) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
-def _text(root, tag: str) -> str:
+def _text(root: Any, tag: str) -> str:
     el = root.find(tag)
     return (el.text or "").strip() if el is not None and el.text else ""
 
 
-def _parse_status(xml: str) -> dict:
+def _parse_status(xml: str) -> dict[str, Any]:
     """Parse a ``<FlexStatementResponse>`` into
     ``{status, reference_code, url, error_code, error_message}`` (missing → "")."""
     try:
@@ -85,7 +86,7 @@ def _root_tag(xml: str) -> str:
         return ""
 
 
-def _is_in_progress(status: dict) -> bool:
+def _is_in_progress(status: dict[str, Any]) -> bool:
     msg = status.get("error_message", "").lower()
     return (
         status.get("status") == "Warn"
@@ -158,7 +159,8 @@ def save_flex_xml(xml: str, query_id: str) -> Path:
     return dest
 
 
-def parse_flex_xml(xml: str) -> dict:  # noqa: ARG001 — seam, not yet implemented
+# `xml` unread: the seam is declared but not implemented (see the docstring).
+def parse_flex_xml(xml: str) -> dict[str, Any]:  # noqa: ARG001  # pyright: ignore[reportUnusedParameter]
     """Parse Flex XML into the internal statement dict (the shape
     ``statements.store_statement`` consumes). NOT YET IMPLEMENTED — pending
     validation against a real Flex statement, so the field mapping is correct

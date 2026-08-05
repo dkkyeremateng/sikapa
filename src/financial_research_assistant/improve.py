@@ -21,6 +21,7 @@ the subprocess orchestration lives in ``eval/evaluate.py`` which calls in here.
 
 from __future__ import annotations
 
+from typing import Any
 import os
 from pathlib import Path
 
@@ -35,8 +36,8 @@ def improve_dir() -> Path:
 
 
 def diagnose(
-    item: dict, score: float, tools: list[str], answer: str, floor: float = 1.0
-) -> dict | None:
+    item: dict[str, Any], score: float, tools: list[str], answer: str, floor: float = 1.0
+) -> dict[str, Any] | None:
     """Diagnose one under-performing eval item, or return None if it met ``floor``.
 
     Trajectory misses are the actionable signal: the dataset says which tool the
@@ -75,7 +76,7 @@ def diagnose(
 ADDENDUM_HEADER = "Additional tool-routing guidance (learned from evaluation runs):"
 
 
-def propose_addendum(diagnoses: list[dict]) -> str:
+def propose_addendum(diagnoses: list[dict[str, Any]]) -> str:
     """Build a candidate system-prompt addendum from routing diagnoses — one hint
     per missed tool (deduped), each anchored to an example query. Returns "" when
     there's nothing actionable (no routing misses)."""
@@ -105,7 +106,7 @@ def ab_decision(
 
 
 def render_report(
-    diagnoses: list[dict],
+    diagnoses: list[dict[str, Any]],
     addendum: str,
     stamp: str,
     mean: float | None = None,

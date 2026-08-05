@@ -20,7 +20,7 @@ re-renders are throttled to ~10 Hz so long replies stay cheap), prompt history
 Alt+↑ restores), Ctrl+O/Ctrl+T collapse all tool/thinking panels (click a
 collapsed panel to expand it), PgUp/PgDn·Shift+↑/↓·wheel scroll the log —
 streaming auto-follow pauses while you're scrolled up and resumes at the bottom —
-modal ``/resume`` and ``/model`` pickers, and ``/copy``, ``/export``,
+modal ``/resume`` and ``/models`` pickers, and ``/copy``, ``/export``,
 ``/hotkeys``, ``/theme`` commands. This scaffold is single-agent
 and conversational (no workspace), so ``/new`` starts a *new conversation* — a
 fresh session id with cleared memory — and sessions persist a transcript so
@@ -37,9 +37,12 @@ import html as _html
 import json
 import os
 import time
-from typing import cast
+from collections.abc import Callable
+from typing_extensions import override
+from typing import Any, cast
 from uuid import uuid4
 
+from rich.console import Console, ConsoleOptions, RenderResult
 from rich.text import Text
 from rich.markdown import CodeBlock, Markdown
 from rich.syntax import Syntax
@@ -47,11 +50,14 @@ from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.timer import Timer
+from textual.widget import Widget
 from textual.widgets import Collapsible, Footer, Header, Input, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 
 from . import alerts, sessions
 from .adapter import compact_session, reset_session, run_turn
+from .auth import redact as _redact
 from .events import AgentEvent, format_duration
 from .pricing import context_cap as _context_cap
 from .pricing import context_pct as _context_pct
@@ -67,8 +73,10 @@ _COMMANDS: list[tuple[str, str]] = [
     ("/clear", "clear the transcript view"),
     ("/sessions", "list saved sessions"),
     ("/resume", "resume a saved session (/resume NAME, or pick from a list)"),
-    ("/model", "switch the model for the next query (/model NAME, or a picker; /model default clears)"),
+    ("/models", "list the configured models and pick one (/models NAME sets it; /models default clears)"),
     ("/config", "show endpoint, model, mode"),
+    ("/login", "sign in to a model provider (/login [PROVIDER] [tier], or a picker)"),
+    ("/logout", "stop using a provider (/logout [tier]); /logout PROVIDER forgets it"),
     ("/import", "import a broker statement — IBKR CSV or OFX/QFX — into the store (/import PATH)"),
     ("/toggle_thinking", "enable/disable the reasoning trace (💭 panels)"),
     ("/thinking", "turn reasoning on or off (/thinking on|off, or toggle)"),
@@ -107,8 +115,20 @@ _LOG_CAP = 600
 
 
 def _provider_label() -> str:
-    """Human label for the active provider: the explicit MODEL_PROVIDER, else
-    'openai-compatible' when a custom base URL is set, else 'openai'."""
+    """Human label for the active provider: a stored credential's provider, else
+    the explicit MODEL_PROVIDER, else 'openai-compatible' when a custom base URL
+    is set, else 'openai'.
+
+    The credential comes first because it also wins in `_make_llm` — a footer
+    reading 'openai-compatible' after `/login anthropic` would be reporting a
+    client that is no longer being built.
+    """
+    from . import auth
+
+    stored_provider, _model = auth.routing()
+    if stored_provider:
+        cred = auth.get(auth.effective_scope() or auth.DEFAULT_SCOPE) or {}
+        return cred.get("provider") or stored_provider
     prov = (os.environ.get("MODEL_PROVIDER") or "").strip().lower()
     if prov and prov != "openai":
         return prov
@@ -158,6 +178,10 @@ def _footer_line(
     tokens_cache: int = 0,
     ctx_pct: int | None = None,
     thinking: bool | None = None,
+    *,
+    # Keyword-only and last: the positional order here is long-standing, and
+    # inserting a parameter mid-signature silently reassigns every caller's args.
+    tokens_cache_write: int = 0,
 ) -> Text:
     t = Text()
     t.append(model, style="bold")
@@ -168,10 +192,17 @@ def _footer_line(
         t.append(f"ctx {ctx_pct}% of {_fmt_tokens(_context_cap(model))}")
     t.append(" · ", style="dim")
     t.append(f"in {tokens_in} / out {tokens_out} tok", style="dim")
-    if tokens_cache:
+    if tokens_cache or tokens_cache_write:
         t.append(" · ", style="dim")
-        t.append(f"cache {tokens_cache}", style="dim")
-    cost = _cost(model, tokens_in, tokens_out, tokens_cache)
+        # Read and write are separate line items because they bill at very
+        # different rates; one combined "cache" figure would hide which you paid.
+        parts = []
+        if tokens_cache:
+            parts.append(f"cache {tokens_cache}")
+        if tokens_cache_write:
+            parts.append(f"+{tokens_cache_write} w")
+        t.append(" ".join(parts), style="dim")
+    cost = _cost(model, tokens_in, tokens_out, tokens_cache, tokens_cache_write)
     if cost is not None:
         t.append(" · ", style="dim")
         t.append(f"${cost:.4f}", style="dim")
@@ -182,7 +213,7 @@ def _footer_line(
     return t
 
 
-def _export_html(turns: list[dict], title: str) -> str:
+def _export_html(turns: list[dict[str, Any]], title: str) -> str:
     rows = []
     for turn in turns:
         q = _html.escape(turn.get("query", ""))
@@ -208,7 +239,7 @@ class CommandInput(Input):
     """Input with a slash-command palette (↑/↓ select, Tab/→ fill, Enter run)
     and prompt history (↑/↓ when the palette is closed)."""
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._history: list[str] = []
         self._history_index: int = -1
@@ -292,6 +323,9 @@ class ToolPanel(Collapsible):
     bracketed args/results can never raise ``MarkupError``."""
 
     DOTS = _SPINNER
+    # Set in `on_mount`, which never runs for a panel that is created and then
+    # dropped before mounting — so every stop path has to tolerate None.
+    _timer: Timer | None = None
 
     def __init__(self, ev: AgentEvent) -> None:
         self.tool_name = ev.tool or "tool"
@@ -325,7 +359,8 @@ class ToolPanel(Collapsible):
 
     def _tick(self) -> None:
         if self._done:
-            self._timer.stop()
+            if self._timer is not None:
+                self._timer.stop()
             return
         self._frame = (self._frame + 1) % len(self.DOTS)
         self.title = self._fmt_title(
@@ -334,9 +369,8 @@ class ToolPanel(Collapsible):
 
     def finish(self, ev: AgentEvent) -> None:
         self._done = True
-        timer = getattr(self, "_timer", None)
-        if timer is not None:
-            timer.stop()
+        if self._timer is not None:
+            self._timer.stop()
         self.result_log.clear()
         self.result_log.write(ev.detail or "(no result)")
         icon = "✅" if ev.ok else "❌"
@@ -415,7 +449,8 @@ class _FlushCodeBlock(CodeBlock):
     themed rectangle, with its column alignment preserved (wrapping would mangle
     it)."""
 
-    def __rich_console__(self, console, options):  # noqa: D401
+    @override
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:  # noqa: D401
         yield Syntax(
             str(self.text).rstrip(),
             self.lexer_name,
@@ -511,6 +546,8 @@ class ProcessingWidget(Static):
     first visible output; replaced by that output (or an error mark)."""
 
     DOTS = _SPINNER
+    # See ToolPanel: `on_mount` may never run, so None is a reachable state.
+    _timer: Timer | None = None
 
     def __init__(self, agent: str = "Agent") -> None:
         super().__init__(classes="agent-msg")
@@ -531,15 +568,13 @@ class ProcessingWidget(Static):
         ))
 
     def stop(self) -> None:
-        timer = getattr(self, "_timer", None)
-        if timer is not None:
-            timer.stop()
+        if self._timer is not None:
+            self._timer.stop()
         self.remove()
 
     def mark_error(self, msg: str) -> None:
-        timer = getattr(self, "_timer", None)
-        if timer is not None:
-            timer.stop()
+        if self._timer is not None:
+            self._timer.stop()
         self.update(Text.assemble(
             (f"{self.agent}: ", "bold"), (f"✖ {msg}", "red"),
         ))
@@ -555,6 +590,7 @@ class SelectScreen(ModalScreen[str | None]):
         self._title = title
         self._items = items
 
+    @override
     def compose(self) -> ComposeResult:
         with Vertical(id="modal"):
             yield Static(self._title, id="modal-title")
@@ -584,6 +620,7 @@ class ModelScreen(ModalScreen[str | None]):
         super().__init__()
         self._current = current
 
+    @override
     def compose(self) -> ComposeResult:
         with Vertical(id="modal"):
             yield Static(
@@ -603,7 +640,38 @@ class ModelScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class AgentApp(App):
+class PromptScreen(ModalScreen[str | None]):
+    """Modal single-field prompt for an arbitrary question; Esc cancels.
+
+    Used by the OAuth ``on_prompt`` callback — the paste-the-code path when no
+    browser on this machine can reach the login flow's loopback server.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, password: bool = False) -> None:
+        super().__init__()
+        self._title = title
+        self._password = password
+
+    @override
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal"):
+            yield Static(self._title, id="modal-title")
+            # An API key must not be echoed into a log that gets exported.
+            yield Input(id="modal-input", password=self._password)
+
+    def on_mount(self) -> None:
+        self.query_one("#modal-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class AgentApp(App[Any]):
     TITLE = "Financial Research Assistant"
     SUB_TITLE = "IBKR market data · research-only"
     # Textual's own palette (Ctrl+P) would swallow our command keys; ours is the
@@ -717,6 +785,7 @@ class AgentApp(App):
         self._tok_in = 0    # cumulative session input tokens (drives $cost)
         self._tok_out = 0
         self._tok_cache = 0
+        self._tok_cache_write = 0
         self._turn_in = 0   # this turn's input total — the current context size (drives ctx%)
         self._ctx_pct = 0
         self._busy = False
@@ -727,6 +796,7 @@ class AgentApp(App):
         self._last_user = ""  # last submitted query, for /good and /bad feedback
         self._tools_collapsed = True
         self._think_collapsed = True
+        self._mouse_released = False  # F2 toggles terminal mouse capture
         self._turn_worker = None
         self._compacting = False  # /compact runs under _busy but on its own worker
         self._processing: ProcessingWidget | None = None
@@ -735,6 +805,7 @@ class AgentApp(App):
         # the log; scrolling up pauses it, scrolling back down resumes it.
         self._follow = True
 
+    @override
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(_config_line(self.fake, self.model_override), id="config")
@@ -766,7 +837,7 @@ class AgentApp(App):
         if self.once:
             self._start_turn(self.once)
 
-    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+    def on_descendant_blur(self, _event: events.DescendantBlur) -> None:
         """Keep the prompt focused on the main screen. Clicking a collapsible
         panel (or otherwise moving focus) would otherwise steal focus from the
         input; bounce it straight back so typing always lands in the prompt —
@@ -812,7 +883,7 @@ class AgentApp(App):
         other."""
         self._line(f"🔔 {text}", "bold yellow")
 
-        def best_effort(fn) -> None:
+        def best_effort(fn: Callable[[], object]) -> None:
             try:
                 fn()
             except Exception:  # noqa: BLE001 - the transcript line already landed
@@ -840,7 +911,9 @@ class AgentApp(App):
         excess = len(kids) - _LOG_CAP
         if excess > 0:
             for w in kids[:excess]:
-                w._trimming = True
+                # Marker attribute so a widget already being removed isn't
+                # counted again; Textual widgets carry a __dict__.
+                w._trimming = True  # pyright: ignore[reportAttributeAccessIssue]
                 w.remove()
 
     def _log_pinned(self) -> bool:
@@ -857,7 +930,7 @@ class AgentApp(App):
         if self._follow:
             log.scroll_end(animate=False)
 
-    def _mount_stream(self, widget) -> None:
+    def _mount_stream(self, widget: Widget) -> None:
         """Mount a widget produced by the running turn, trimming the oldest
         log entries and following the stream only while the user is at the
         bottom."""
@@ -917,6 +990,7 @@ class AgentApp(App):
         t = _footer_line(
             model, provider, self._tok_in, self._tok_out, self._tok_cache, ctx,
             thinking=self.show_thinking,
+            tokens_cache_write=self._tok_cache_write,
         )
         if self._busy:
             t.append("   ", style="dim")
@@ -1021,6 +1095,10 @@ class AgentApp(App):
                 self._line(f"  {c:<18} {d}", "dim")
         elif cmd == "/config":
             self._show_config()
+        elif cmd == "/login":
+            self._login(arg)
+        elif cmd == "/logout":
+            self._logout(arg)
         elif cmd == "/import":
             self._import(arg)
         elif cmd == "/toggle_thinking":
@@ -1042,7 +1120,9 @@ class AgentApp(App):
                 self._resume(arg)
             else:
                 self._pick_session()
-        elif cmd == "/model":
+        # "/model" stays as an unlisted alias: it was the name for a long time and
+        # silently failing on muscle memory is worse than one extra branch.
+        elif cmd in ("/models", "/model"):
             if arg:
                 self._set_model(arg)
             else:
@@ -1083,7 +1163,7 @@ class AgentApp(App):
     def _reset_tokens(self) -> None:
         """Zero the running token/ctx counters so the status bar reflects a fresh
         or just-compacted context (they rebuild on the next turn's usage event)."""
-        self._tok_in = self._tok_out = self._tok_cache = 0
+        self._tok_in = self._tok_out = self._tok_cache = self._tok_cache_write = 0
         self._turn_in = 0
         self._ctx_pct = 0
         self._render_statusbar()
@@ -1129,8 +1209,14 @@ class AgentApp(App):
             self._line(f"  summary: {res['summary'][:200]}", "dim")
 
     def _show_config(self) -> None:
+        from . import auth
+
+        # A stored credential can pin its own endpoint, and outranks the env — so
+        # reporting OPENAI_API_BASE alone would show the wrong one after /login.
         endpoint = "offline" if self.fake else (
-            os.environ.get("OPENAI_API_BASE") or "https://api.openai.com/v1"
+            auth.base_url()
+            or os.environ.get("OPENAI_API_BASE")
+            or "https://api.openai.com/v1"
         )
         model, _ = _model_provider(self.fake, self.model_override)
         self._line("configuration:", "bold")
@@ -1138,6 +1224,34 @@ class AgentApp(App):
         self._line(f"  model      {model}", "dim")
         self._line(f"  mode       {'FAKE' if self.fake else 'live'}", "dim")
         self._line(f"  session    {self.session_id}", "dim")
+        for scope in auth.SCOPES:
+            stored = auth.describe(scope)
+            if stored != "none" or scope == auth.DEFAULT_SCOPE:
+                self._line(f"  auth:{scope:<6} {stored}", "dim")
+        # The EFFECTIVE window per model, not what any one field says. It is
+        # resolved from several places (model entry, table, credential-wide), and
+        # without this a stale value in the wrong one looks authoritative while
+        # doing nothing.
+        from .pricing import explain_context_cap
+
+        for name in auth.models():
+            window, source = explain_context_cap(name)
+            # Naming the source is the point: the value resolves from four places
+            # and "I configured X but it shows Y" is otherwise unanswerable.
+            self._line(f"  ctx        {name}  {window:,}  ← {source}", "dim")
+        stale = auth.get(auth.effective_scope() or auth.DEFAULT_SCOPE) or {}
+        if stale.get("context_window") and auth.models():
+            self._line(
+                "  note       credential-wide context_window is ignored while models "
+                "set their own — edit the model entry", "dim yellow",
+            )
+        configured = auth.providers()
+        if configured:
+            # Several can be configured at once; name the others so switching is
+            # discoverable rather than something you have to remember.
+            current = auth.active()
+            names = ", ".join(f"{n}*" if n == current else n for n in configured)
+            self._line(f"  providers  {names}   (* active · switch with /models)", "dim")
 
     def _import(self, arg: str) -> None:
         """Import a broker statement — IBKR CSV or OFX/QFX, auto-detected —
@@ -1171,6 +1285,109 @@ class AgentApp(App):
         style = "dim red" if failed else "dim"
         for line in summary.splitlines():
             self._line(f"  {line}", style)
+
+    # --- credentials ---------------------------------------------------------
+
+    def _login(self, arg: str) -> None:
+        """``/login [PROVIDER] [tier]`` — bare opens a provider picker.
+
+        The optional second word is the model tier the credential is for
+        (``quick`` / ``subagent``), so the cheap tier can hold its own key while
+        the primary agent keeps another.
+        """
+        from . import auth, oauth
+
+        parts = arg.split()
+        provider = parts[0] if parts else ""
+        scope = parts[1] if len(parts) > 1 else auth.DEFAULT_SCOPE
+        if scope not in auth.SCOPES:
+            self._line(f"unknown tier: {scope} (one of {', '.join(auth.SCOPES)})", "dim red")
+            return
+        if not provider:
+            self.push_screen(
+                SelectScreen("Sign in to (↑/↓ Enter, Esc cancel)", oauth.choices()),
+                lambda name: self._login(f"{name} {scope}") if name else None,
+            )
+            return
+        if oauth.get(provider) is None:
+            self._line(f"unknown provider: {provider} (try {', '.join(oauth.names())})", "dim red")
+            return
+        self._line(f"• signing in to {provider} …", "dim")
+        self.run_login(provider, scope)
+
+    @work(thread=True, group="login")
+    def run_login(self, provider: str, scope: str) -> None:
+        """Run the flow off the event loop.
+
+        A login blocks on a browser round-trip that can take minutes; on the event
+        loop that would freeze the whole UI, including the log it is writing to.
+        Own worker group so starting a turn can't cancel a half-finished sign-in.
+        """
+        import webbrowser
+
+        from . import oauth
+
+        def on_auth(url: str) -> None:
+            # Show it as well as opening it: on a headless/SSH terminal there is
+            # nothing to open, and the URL is the only way forward.
+            self.call_from_thread(self._line, f"  opening {url}", "dim")
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+        def on_prompt(question: str) -> str:
+            return self.call_from_thread(self.push_screen_wait, PromptScreen(question)) or ""
+
+        def on_secret(question: str) -> str:
+            return self.call_from_thread(
+                self.push_screen_wait, PromptScreen(question, password=True)
+            ) or ""
+
+        cb = oauth.LoginCallbacks(
+            on_auth=on_auth,
+            on_secret=on_secret,
+            on_status=lambda s: self.call_from_thread(self._line, f"  {s}", "dim"),
+            on_device_code=lambda code, url: self.call_from_thread(
+                self._line, f"  enter code {code} at {url}", "bold"
+            ),
+            on_prompt=on_prompt,
+        )
+        try:
+            oauth.login(provider, cb, scope=scope)
+        except oauth.LoginError as exc:
+            self.call_from_thread(self._line, f"  login failed: {exc}", "dim red")
+            return
+        except Exception as exc:  # a provider bug must not kill the app
+            self.call_from_thread(self._line, f"  login failed: {exc!r}", "dim red")
+            return
+        self.call_from_thread(self._login_done, provider, scope)
+
+    def _login_done(self, provider: str, scope: str) -> None:
+        self._line(f"signed in to {provider} ({scope} tier)", "dim")
+        self._line("takes effect on the next query; /config shows it", "dim")
+
+    def _logout(self, arg: str) -> None:
+        """``/logout [tier]`` stops using a provider but keeps its credential, so
+        switching back needs no re-login. ``/logout PROVIDER`` removes it for good.
+        The two never collide: tier names are fixed and provider names are not."""
+        from . import auth
+
+        target = arg.strip() or auth.DEFAULT_SCOPE
+        if target in auth.providers():
+            if auth.forget(target):
+                self._line(f"forgot the {target} credential", "dim")
+            return
+        if target not in auth.SCOPES:
+            self._line(
+                f"unknown tier or provider: {target} "
+                f"(tiers: {', '.join(auth.SCOPES)})", "dim red",
+            )
+            return
+        if auth.delete(target):
+            self._line(f"signed out ({target} tier) — credential kept, /models switches back", "dim")
+        else:
+            self._line(f"no credential in use for the {target} tier", "dim")
 
     def _show_sessions(self) -> None:
         found = sessions.list_sessions()
@@ -1217,21 +1434,57 @@ class AgentApp(App):
         self._line(f"resumed session: {self.session_id}", "dim")
         self._replay_transcript(self.session_id)
 
-    def _pick_model(self) -> None:
-        cur, _ = _model_provider(self.fake, self.model_override)
-        self.push_screen(ModelScreen(cur), self._on_pick_model)
+    #: Sentinel option id for "not in the list — let me type one".
+    _TYPE_A_MODEL = "\x00type"
 
-    def _on_pick_model(self, model: str | None) -> None:
+    def _pick_model(self) -> None:
+        """List every configured model, with where each came from, and mark the
+        active one. Falls back to the free-text prompt for anything not listed."""
+        from .llm import active_lane_note, configured_models
+
+        cur, _ = _model_provider(self.fake, self.model_override)
+        # The option id carries the provider alongside the model: a model is only
+        # usable with the credential from its own lane, so selecting one has to
+        # switch the active provider too.
+        items = [
+            (f"{provider}\x00{model}", f"{model}   ·   {label}" + ("   ←" if model == cur else ""))
+            for model, label, provider in configured_models()
+        ]
+        items.append(("\x00default", "default   ·   clear the override"))
+        items.append((self._TYPE_A_MODEL, "type a model name…"))
+        note = active_lane_note()
+        title = f"Model — {note}" if note else "Model (↑/↓ Enter, Esc cancel)"
+        self.push_screen(SelectScreen(title, items), self._on_pick_model)
+
+    def _on_pick_model(self, choice: str | None) -> None:
+        if not choice:
+            return
+        if choice == self._TYPE_A_MODEL:
+            cur, _ = _model_provider(self.fake, self.model_override)
+            self.push_screen(ModelScreen(cur), self._on_typed_model)
+            return
+        provider, _, model = choice.partition("\x00")
+        self._set_model(model, provider or None)
+
+    def _on_typed_model(self, model: str | None) -> None:
         if model:
             self._set_model(model)
 
-    def _set_model(self, model: str) -> None:
+    def _set_model(self, model: str, provider: str | None = None) -> None:
+        from . import auth
+
+        # Switch the credential first: a model only works with the key from its own
+        # lane, so setting one without the other is the mismatch that produced
+        # "404 model: <name>".
+        switched = ""
+        if provider and provider != auth.active() and auth.activate(provider):
+            switched = f" · provider {provider}"
         if model.lower() in ("default", "none", "-"):
             self.model_override = None
             note = "model override cleared — using the configured default"
         else:
             self.model_override = model
-            note = f"model set to {model} (applies to the next query)"
+            note = f"model set to {model}{switched} (applies to the next query)"
         self.query_one("#config", Static).update(
             _config_line(self.fake, self.model_override)
         )
@@ -1302,11 +1555,11 @@ class AgentApp(App):
         active = [e for e in entries if not e.get("superseded")]
         archived = [e for e in entries if e.get("superseded")]
 
-        def _key(e):  # kind label, marking archived stale values
+        def _key(e: dict[str, Any]) -> str:  # kind label, marking archived stale values
             k = e.get("kind", "note")
             return f"{k}·superseded" if e.get("superseded") else k
 
-        groups: dict[str, list] = {}
+        groups: dict[str, list[Any]] = {}
         for e in active + archived:  # active first, archived tier last
             groups.setdefault(_key(e), []).append(e)
         self._line(
@@ -1347,11 +1600,14 @@ class AgentApp(App):
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             if name.endswith(".jsonl"):
-                dest.write_text(
-                    "\n".join(json.dumps(t) for t in turns) + "\n", encoding="utf-8"
-                )
+                # An export leaves the machine (that's what it's for), so mask any
+                # credential a tool argument or an error text happened to carry.
+                body = "\n".join(json.dumps(t) for t in turns) + "\n"
+                dest.write_text(_redact(body), encoding="utf-8")
             else:
-                dest.write_text(_export_html(turns, self.session_id), encoding="utf-8")
+                dest.write_text(
+                    _redact(_export_html(turns, self.session_id)), encoding="utf-8"
+                )
         except OSError as e:
             self._line(f"export failed: {e}", "dim red")
             return
@@ -1364,8 +1620,12 @@ class AgentApp(App):
             self.theme = order[(order.index(cur) + 1) % 2] if cur in order else order[1]
             self._line(f"theme: {self.theme}", "dim")
         except Exception:
-            self.dark = not getattr(self, "dark", True)
-            self._line(f"theme: {'dark' if self.dark else 'light'}", "dim")
+            # Pre-1.0 Textual fallback: `App.dark` predates the `theme` reactive
+            # and doesn't exist on the version we pin, so reach it dynamically
+            # rather than declaring an attribute that would shadow the base class.
+            dark = not getattr(self, "dark", True)
+            setattr(self, "dark", dark)
+            self._line(f"theme: {'dark' if dark else 'light'}", "dim")
 
     def _replay_transcript(self, session_id: str) -> None:
         turns = sessions.read_transcript(session_id)
@@ -1412,7 +1672,7 @@ class AgentApp(App):
         if not callable(disable) or not callable(enable):
             self._line("mouse toggle isn't supported by this terminal", "yellow")
             return
-        self._mouse_released = not getattr(self, "_mouse_released", False)
+        self._mouse_released = not self._mouse_released
         try:
             if self._mouse_released:
                 disable()
@@ -1554,6 +1814,7 @@ class AgentApp(App):
                     self._tok_in += ev.tokens_in
                     self._tok_out += ev.tokens_out
                     self._tok_cache += ev.tokens_cache
+                    self._tok_cache_write += ev.tokens_cache_write
                     self._turn_in += ev.tokens_in
                     if ev.context_tokens >= 0:
                         self._turn_in = ev.context_tokens

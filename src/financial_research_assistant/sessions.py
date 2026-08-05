@@ -16,6 +16,7 @@ MemorySaver is always fresh per process.
 
 from __future__ import annotations
 
+from typing import Any
 import json
 import os
 import time
@@ -29,7 +30,8 @@ def store_dir() -> Path:
     (``~/.<package-name>/sessions``), so a renamed agent keeps its own store
     instead of sharing the scaffold's; override with the
     ``FINANCIAL_RESEARCH_SESSIONS_DIR`` env var."""
-    default = Path.home() / f".{__package__.replace('_', '-')}" / "sessions"
+    pkg = (__package__ or "financial_research_assistant").replace("_", "-")
+    default = Path.home() / f".{pkg}" / "sessions"
     return Path(os.environ.get("FINANCIAL_RESEARCH_SESSIONS_DIR") or default)
 
 
@@ -46,12 +48,12 @@ def log_turn(session_id: str, query: str, answer: str) -> None:
         f.write(json.dumps(rec) + "\n")
 
 
-def read_transcript(session_id: str) -> list[dict]:
+def read_transcript(session_id: str) -> list[dict[str, Any]]:
     """Every recorded turn, oldest first; tolerant of partial/corrupt lines."""
     path = _transcript_path(session_id)
     if not path.exists():
         return []
-    turns: list[dict] = []
+    turns: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -63,7 +65,7 @@ def read_transcript(session_id: str) -> list[dict]:
     return turns
 
 
-def list_sessions() -> list[dict]:
+def list_sessions() -> list[dict[str, Any]]:
     """Saved sessions under the store, most-recently-modified first.
 
     Each entry: ``{name, turns, mtime}`` where ``name`` is the session id
@@ -72,7 +74,7 @@ def list_sessions() -> list[dict]:
     base = store_dir()
     if not base.exists():
         return []
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for p in sorted(base.glob("*.jsonl")):
         if not p.is_file():
             continue

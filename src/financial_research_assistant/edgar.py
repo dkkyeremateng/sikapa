@@ -25,6 +25,7 @@ than aborting the turn — and the helpers are trivially monkeypatched in tests.
 
 from __future__ import annotations
 
+from typing import Any
 import html
 import json
 import os
@@ -51,7 +52,7 @@ _PER_SHARE = "USD/shares"  # XBRL unit key for per-share concepts (EPS)
 # Same-process caches (cleared at process exit): the ticker→CIK map is a ~1MB file
 # worth fetching once, and companyfacts/submissions are large per-company blobs.
 _TICKER_CIK: dict[str, str] = {}
-_JSON_CACHE: dict[str, dict] = {}
+_JSON_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _edgar_ua() -> str:
@@ -62,7 +63,7 @@ def _request(url: str):
     return urllib.request.Request(url, headers={"User-Agent": _edgar_ua()})
 
 
-def _fetch_json(url: str, timeout: float = 20.0) -> dict:
+def _fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
     """GET a JSON document from SEC with the required User-Agent, a same-process
     cache, and one retry; ``{}`` on any failure (network, non-JSON, unknown)."""
     if url in _JSON_CACHE:
@@ -122,14 +123,14 @@ def _filing_url(cik: str, accession: str, doc: str) -> str:
     return _ARCHIVE_URL.format(cik=cik_int, acc=acc, doc=doc or "")
 
 
-def _num(v):
+def _num(v: Any) -> float | None:
     try:
         return float(v)
     except (TypeError, ValueError):
         return None
 
 
-def _money(v) -> str:
+def _money(v: Any) -> str:
     """Compact money formatting: 383.29B / 12.3M / 1,234 / n/a."""
     n = _num(v)
     if n is None:
@@ -149,11 +150,11 @@ def _no_cik(sym: str) -> str:
 
 # --- Recent filings (shared submissions accessor) --------------------------
 
-def _fetch_submissions(cik: str) -> dict:
+def _fetch_submissions(cik: str) -> dict[str, Any]:
     return _fetch_json(_SUBMISSIONS_URL.format(cik=cik))
 
 
-def _submission_recent(cik: str) -> tuple[str, list[dict]]:
+def _submission_recent(cik: str) -> tuple[str, list[dict[str, Any]]]:
     """(entity name, recent filings) from the submissions feed. Each filing is
     ``{date, form, accession, doc, desc, items}`` (``items`` = 8-K item codes)."""
     sub = _fetch_submissions(cik)
@@ -165,7 +166,7 @@ def _submission_recent(cik: str) -> tuple[str, list[dict]]:
     descs = recent.get("primaryDocDescription") or []
     items = recent.get("items") or []
 
-    def at(seq, i):
+    def at(seq: list[Any], i: int) -> Any:
         return seq[i] if i < len(seq) else ""
 
     out = [
@@ -176,7 +177,7 @@ def _submission_recent(cik: str) -> tuple[str, list[dict]]:
     return sub.get("name") or "", out
 
 
-def _filter_forms(filings: list[dict], ft: str, limit: int) -> list[dict]:
+def _filter_forms(filings: list[dict[str, Any]], ft: str, limit: int) -> list[dict[str, Any]]:
     """The first ``limit`` filings whose form matches ``ft`` (prefix, empty = any)."""
     out = []
     for f in filings:
@@ -302,7 +303,7 @@ _KEY_CONCEPTS: list[tuple[str, list[str], str]] = [
 ]
 
 
-def _fetch_company_facts(cik: str) -> dict:
+def _fetch_company_facts(cik: str) -> dict[str, Any]:
     return _fetch_json(_COMPANY_FACTS_URL.format(cik=cik))
 
 
@@ -317,7 +318,7 @@ def _duration_days(start: str, end: str) -> int | None:
         return None
 
 
-def _is_annual_period(e: dict) -> bool:
+def _is_annual_period(e: dict[str, Any]) -> bool:
     """True for a 10-K full-year flow period (~365 days) or an instantaneous
     balance-sheet value (no period start). Excludes quarters and odd spans, which
     is what keeps a same-year quarter out of the annual series."""
@@ -330,7 +331,7 @@ def _is_annual_period(e: dict) -> bool:
     return dur is not None and 320 <= dur <= 400
 
 
-def _annual_facts(facts: dict, tags: list[str], unit: str) -> list[dict]:
+def _annual_facts(facts: dict[str, Any], tags: list[str], unit: str) -> list[dict[str, Any]]:
     """Annual values for a concept as ``[{fy, val, end}]`` newest-first. Merges the
     fallback tags (a company can switch tags across years, e.g. NVDA's revenue
     ``RevenueFromContractWithCustomerExcludingAssessedTax`` → ``Revenues``), keys by
@@ -338,7 +339,7 @@ def _annual_facts(facts: dict, tags: list[str], unit: str) -> list[dict]:
     year and so is shared by every comparative period in a 10-K — and keeps the
     most-recently-filed value per year (so restatements win)."""
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
-    raw: list[dict] = []
+    raw: list[dict[str, Any]] = []
     for tag in tags:
         node = gaap.get(tag)
         if node:
@@ -348,10 +349,10 @@ def _annual_facts(facts: dict, tags: list[str], unit: str) -> list[dict]:
             for y in sorted(by_year, reverse=True)]
 
 
-def _bucket_annual(raw: list[dict]) -> dict[str, dict]:
+def _bucket_annual(raw: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Bucket raw XBRL entries by period-end year, keeping the annual (10-K,
     full-year) value most recently filed for each year."""
-    by_year: dict[str, dict] = {}
+    by_year: dict[str, dict[str, Any]] = {}
     for e in raw:
         if not _is_annual_period(e):
             continue
@@ -364,18 +365,18 @@ def _bucket_annual(raw: list[dict]) -> dict[str, dict]:
     return by_year
 
 
-def _fmt_val(val, unit: str) -> str:
+def _fmt_val(val: Any, unit: str) -> str:
     if unit == _PER_SHARE:
         n = _num(val)
         return f"{n:.2f}" if n is not None else "n/a"
     return _money(val)
 
 
-def _annual_series(facts: dict, years: int) -> tuple[dict, list]:
+def _annual_series(facts: dict[str, Any], years: int) -> tuple[dict[str, Any], list[int]]:
     """Per-concept annual rows keyed by fiscal year, plus the newest ``years``
     fiscal years present across all concepts."""
-    series: dict[str, dict] = {}
-    fys: list = []
+    series: dict[str, dict[str, Any]] = {}
+    fys: list[int] = []
     for label, tags, unit in _KEY_CONCEPTS:
         rows = {r["fy"]: r for r in _annual_facts(facts, tags, unit)[:years]}
         series[label] = rows
@@ -385,7 +386,7 @@ def _annual_series(facts: dict, years: int) -> tuple[dict, list]:
     return series, sorted(fys, reverse=True)[:years]
 
 
-def _financials_summary(facts: dict, sym: str, name: str, cik: str, years: int) -> str:
+def _financials_summary(facts: dict[str, Any], sym: str, name: str, cik: str, years: int) -> str:
     series, fys = _annual_series(facts, years)
     if not fys:
         return f"No annual (10-K) XBRL figures found for {sym} (CIK {int(cik)})."
@@ -407,7 +408,7 @@ def _financials_summary(facts: dict, sym: str, name: str, cik: str, years: int) 
     return "\n".join(lines)
 
 
-def _margin_line(series: dict, key, label: str | None = None) -> str:
+def _margin_line(series: dict[str, Any], key: Any, label: str | None = None) -> str:
     """Gross/net margin for one period. ``key`` indexes the per-concept row dicts
     (a fiscal year for annual, a period-end date for quarterly); ``label`` is the
     row's display prefix (defaults to ``FY<key>`` so the annual callers are
@@ -423,7 +424,7 @@ def _margin_line(series: dict, key, label: str | None = None) -> str:
     return f"  {label if label is not None else 'FY' + str(key)}: {' · '.join(parts) if parts else 'n/a'}"
 
 
-def _margin_lines(series: dict, fys: list) -> list[str]:
+def _margin_lines(series: dict[str, Any], fys: list[int]) -> list[str]:
     rev_rows = series[_REVENUE]
     out = [_margin_line(series, fy) for fy in fys]
     ordered = [fy for fy in fys if fy in rev_rows]
@@ -459,7 +460,7 @@ def sec_financials(symbol: str, concept: str = "", years: int = 4) -> str:
     return _financials_summary(facts, sym, name, cik, years)
 
 
-def _one_concept(facts: dict, sym: str, name: str, concept: str, years: int) -> str:
+def _one_concept(facts: dict[str, Any], sym: str, name: str, concept: str, years: int) -> str:
     """History for a single us-gaap concept tag (annual 10-K values)."""
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
     node = gaap.get(concept)
@@ -484,7 +485,7 @@ def _one_concept(facts: dict, sym: str, name: str, concept: str, years: int) -> 
 
 # --- Quarterly financials (10-Q XBRL) --------------------------------------
 
-def _is_quarterly_period(e: dict) -> bool:
+def _is_quarterly_period(e: dict[str, Any]) -> bool:
     """True for a 10-Q single-quarter flow period (~90 days) or an instantaneous
     balance-sheet value from a 10-Q. Excludes the 6-/9-month year-to-date spans a
     10-Q also carries, so only discrete quarters enter the series."""
@@ -497,11 +498,11 @@ def _is_quarterly_period(e: dict) -> bool:
     return dur is not None and 80 <= dur <= 100
 
 
-def _bucket_quarterly(raw: list[dict]) -> dict[str, dict]:
+def _bucket_quarterly(raw: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Bucket raw XBRL entries by period-END date — quarters within a year need
     distinct keys, unlike the annual bucketing by year — keeping the most recently
     filed value per quarter-end so restatements win."""
-    by_end: dict[str, dict] = {}
+    by_end: dict[str, dict[str, Any]] = {}
     for e in raw:
         if not _is_quarterly_period(e):
             continue
@@ -514,12 +515,12 @@ def _bucket_quarterly(raw: list[dict]) -> dict[str, dict]:
     return by_end
 
 
-def _quarterly_facts(facts: dict, tags: list[str], unit: str) -> list[dict]:
+def _quarterly_facts(facts: dict[str, Any], tags: list[str], unit: str) -> list[dict[str, Any]]:
     """Quarterly values for a concept as ``[{end, val}]`` newest-first, keyed by
     period-end date. Same tag-fallback/merge logic as ``_annual_facts`` but for the
     10-Q single-quarter periods."""
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
-    raw: list[dict] = []
+    raw: list[dict[str, Any]] = []
     for tag in tags:
         node = gaap.get(tag)
         if node:
@@ -529,11 +530,11 @@ def _quarterly_facts(facts: dict, tags: list[str], unit: str) -> list[dict]:
             for end in sorted(by_end, reverse=True)]
 
 
-def _quarterly_series(facts: dict, quarters: int) -> tuple[dict, list]:
+def _quarterly_series(facts: dict[str, Any], quarters: int) -> tuple[dict[str, Any], list[Any]]:
     """Per-concept quarterly rows keyed by period-end date, plus the newest
     ``quarters`` distinct quarter-end dates present across all concepts."""
-    series: dict[str, dict] = {}
-    ends: list = []
+    series: dict[str, dict[str, Any]] = {}
+    ends: list[Any] = []
     for label, tags, unit in _KEY_CONCEPTS:
         rows = {r["end"]: r for r in _quarterly_facts(facts, tags, unit)[:quarters]}
         series[label] = rows
@@ -543,7 +544,7 @@ def _quarterly_series(facts: dict, quarters: int) -> tuple[dict, list]:
     return series, sorted(ends, reverse=True)[:quarters]
 
 
-def _q_growth_lines(series: dict, ends: list) -> list[str]:
+def _q_growth_lines(series: dict[str, Any], ends: list[Any]) -> list[str]:
     """Most-recent revenue QoQ (vs the immediately prior quarter) and YoY (vs the
     quarter ending ~1 year earlier) growth. Both are matched by DATE, not by list
     position — a fiscal-year-end quarter is absent from the 10-Q series (it's a 10-K
@@ -589,7 +590,7 @@ def _q_growth_lines(series: dict, ends: list) -> list[str]:
     return out
 
 
-def _quarterly_summary(facts: dict, sym: str, name: str, cik: str, quarters: int) -> str:
+def _quarterly_summary(facts: dict[str, Any], sym: str, name: str, cik: str, quarters: int) -> str:
     series, ends = _quarterly_series(facts, quarters)
     if not ends:
         return (f"No quarterly (10-Q) XBRL figures found for {sym} (CIK {int(cik)}). "
@@ -616,7 +617,7 @@ def _quarterly_summary(facts: dict, sym: str, name: str, cik: str, quarters: int
     return "\n".join(lines)
 
 
-def _one_concept_quarterly(facts: dict, sym: str, name: str, concept: str, quarters: int) -> str:
+def _one_concept_quarterly(facts: dict[str, Any], sym: str, name: str, concept: str, quarters: int) -> str:
     """Quarterly history for a single us-gaap concept tag (10-Q periods)."""
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
     node = gaap.get(concept)
@@ -666,7 +667,7 @@ def sec_quarterly_financials(symbol: str, concept: str = "", quarters: int = 8) 
 
 # --- Full-text search across filings ---------------------------------------
 
-def _fts(query: str, forms: str, cik: str | None) -> dict:
+def _fts(query: str, forms: str, cik: str | None) -> dict[str, Any]:
     params = {"q": query}
     if forms.strip():
         params["forms"] = forms.strip()
@@ -675,14 +676,14 @@ def _fts(query: str, forms: str, cik: str | None) -> dict:
     return _fetch_json(_FTS_URL.format(qs=urllib.parse.urlencode(params)))
 
 
-def _fts_header(query: str, sym: str, forms: str, total) -> str:
+def _fts_header(query: str, sym: str, forms: str, total: int | None) -> str:
     scope = f" · {sym}" if sym else ""
     form_note = f" · forms {forms}" if forms.strip() else ""
     total_note = f"  (~{total} total hits)" if total else ""
     return f"SEC full-text search · {query!r}{scope}{form_note}{total_note}"
 
 
-def _format_fts_hit(hit: dict, fallback_cik: str | None) -> list[str]:
+def _format_fts_hit(hit: dict[str, Any], fallback_cik: str | None) -> list[str]:
     src = hit.get("_source") or {}
     acc, _, doc = (hit.get("_id") or "").partition(":")
     ciks = src.get("ciks") or []
@@ -937,10 +938,10 @@ def _parse_symbols(symbols: str, limit: int = 6) -> list[str]:
     return seen[:limit]
 
 
-def _latest_annuals(facts: dict) -> tuple[dict, int | None]:
+def _latest_annuals(facts: dict[str, Any]) -> tuple[dict[str, Any], int | None]:
     """{concept label: (fy, value, unit)} for each key line item's most recent
     annual (10-K) value, plus the company's latest fiscal year."""
-    out: dict = {}
+    out: dict[str, Any] = {}
     latest_fy = None
     for label, tags, unit in _KEY_CONCEPTS:
         rows = _annual_facts(facts, tags, unit)
@@ -963,7 +964,7 @@ def _resolve_matrix_concept(concept: str) -> tuple[list[str], str]:
     return [concept.strip()], "USD"
 
 
-def _company_facts_map(syms: list[str]) -> tuple[dict, list[str]]:
+def _company_facts_map(syms: list[str]) -> tuple[dict[str, Any], list[str]]:
     """Fetch XBRL facts for each resolvable ticker; return (sym→facts, missing)."""
     facts_by_sym, missing = {}, []
     for s in syms:
@@ -976,7 +977,7 @@ def _company_facts_map(syms: list[str]) -> tuple[dict, list[str]]:
     return facts_by_sym, missing
 
 
-def _margin_row(label: str, num_key: str, per: dict, resolved: list, col: int) -> str:
+def _margin_row(label: str, num_key: str, per: dict[str, Any], resolved: list[Any], col: int) -> str:
     cells = []
     for s in resolved:
         vals = per[s][0]
@@ -986,7 +987,7 @@ def _margin_row(label: str, num_key: str, per: dict, resolved: list, col: int) -
     return f"{label:<20}" + "".join(cells)
 
 
-def _matrix_default(per: dict, resolved: list) -> list[str]:
+def _matrix_default(per: dict[str, Any], resolved: list[Any]) -> list[str]:
     col = 15
     header = f"{'':<20}" + "".join(
         f"{(s + ' FY' + str(per[s][1] or '?')):>{col}}" for s in resolved
@@ -1003,7 +1004,7 @@ def _matrix_default(per: dict, resolved: list) -> list[str]:
     return lines
 
 
-def _matrix_concept(facts_by_sym: dict, resolved: list, concept: str, years: int) -> list[str]:
+def _matrix_concept(facts_by_sym: dict[str, Any], resolved: list[Any], concept: str, years: int) -> list[str]:
     tags, unit = _resolve_matrix_concept(concept)
     series = {
         s: {r["fy"]: r["val"] for r in _annual_facts(facts_by_sym[s], tags, unit)}
@@ -1020,7 +1021,7 @@ def _matrix_concept(facts_by_sym: dict, resolved: list, concept: str, years: int
     return lines
 
 
-def _prepare_matrix(symbols: str) -> tuple[dict, list, list, str | None]:
+def _prepare_matrix(symbols: str) -> tuple[dict[str, Any], list[Any], list[Any], str | None]:
     """Resolve tickers to XBRL facts. Returns (facts_by_sym, resolved, missing,
     error) — ``error`` is a friendly message when fewer than two companies resolve,
     else None."""
@@ -1156,7 +1157,7 @@ def filing_tone_trend(symbol: str, years: int = 3) -> str:
 
 # --- Market-wide metric leaders (XBRL frames) ------------------------------
 
-def _fetch_frame(tag: str, unit: str, year: int) -> list[dict]:
+def _fetch_frame(tag: str, unit: str, year: int) -> list[dict[str, Any]]:
     """One us-gaap concept across ALL filers for a period, via the XBRL frames API.
     Tries the duration frame (CY{year}) first, then the instantaneous one
     (CY{year}Q4I) for balance-sheet concepts; returns the raw fact list."""
@@ -1197,6 +1198,11 @@ def sec_metric_rank(symbol: str, concept: str = "Revenue", year: int = 0) -> str
         return (f"{sym} didn't report us-gaap:{tag} for CY{year} (it may use a different "
                 f"tag or a non-calendar fiscal period). Try another year or concept/tag.")
     myval = _num(mine.get("val"))
+    if myval is None:
+        # The company reported the tag but with a value that won't parse; ranking
+        # against it would compare float > None and raise mid-tool.
+        return (f"{sym} reported us-gaap:{tag} for CY{year} without a usable numeric "
+                f"value, so it can't be ranked. Try another year or concept/tag.")
     vals = sorted((v for v in (_num(e.get("val")) for e in facts) if v is not None), reverse=True)
     total = len(vals)
     rank = sum(1 for v in vals if v > myval) + 1
@@ -1228,7 +1234,7 @@ _INSIDER_CODES = {
 _OPEN_MARKET = {"P", "S"}
 
 
-def _xml_leaf(node, path: str) -> str:
+def _xml_leaf(node: Any, path: str) -> str:
     """Text of ``path`` under ``node`` — the ownership schema wraps most leaves in a
     ``<value>`` child (e.g. ``<transactionShares><value>50</value></...>``), but a
     few (transactionCode) are bare, so try ``<value>`` then the element's own text."""
@@ -1241,7 +1247,7 @@ def _xml_leaf(node, path: str) -> str:
     return ((v.text if v is not None else el.text) or "").strip()
 
 
-def _parse_ownership_xml(xml_text: str) -> dict | None:
+def _parse_ownership_xml(xml_text: str) -> dict[str, Any] | None:
     """Parse a Form 3/4/5 ownership XML into ``{owner, roles, txns[]}`` (non-
     derivative transactions only). Returns None if it isn't a parseable ownership
     document. No namespaces in this schema, so plain ElementTree paths work."""
@@ -1279,7 +1285,7 @@ def _parse_ownership_xml(xml_text: str) -> dict | None:
     return {"owner": owner, "roles": roles, "txns": txns}
 
 
-def _ownership_xml(cik: str, accession: str, primary_doc: str) -> dict | None:
+def _ownership_xml(cik: str, accession: str, primary_doc: str) -> dict[str, Any] | None:
     """Fetch and parse a filing's ownership XML. Tries the primary document (a Form 4's
     is usually the XML itself, sometimes under an ``xsl…/`` render path we strip to the
     basename); on miss, reads the accession's ``index.json`` and picks the ownership

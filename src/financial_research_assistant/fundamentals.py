@@ -16,12 +16,13 @@ the helpers are trivially monkeypatched in tests, keeping them offline.
 
 from __future__ import annotations
 
-import os
+from collections.abc import Callable
+from typing import Any
 
 # Same-process caches (cleared at process exit): yfinance's ``.info`` is a slow
 # quoteSummary round-trip, so a tool that touches several holdings (dividend
 # projection) doesn't refetch the same ticker.
-_INFO_CACHE: dict[str, dict] = {}
+_INFO_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _ticker(symbol: str):
@@ -30,7 +31,7 @@ def _ticker(symbol: str):
     return yf.Ticker(symbol.strip().upper())
 
 
-def _fetch_info(symbol: str) -> dict:
+def _fetch_info(symbol: str) -> dict[str, Any]:
     """yfinance ``.info`` (valuation/profile/analyst summary) as a dict, cached;
     ``{}`` on any failure or unknown ticker."""
     sym = symbol.strip().upper()
@@ -45,7 +46,7 @@ def _fetch_info(symbol: str) -> dict:
     return info
 
 
-def _fetch_calendar(symbol: str) -> dict:
+def _fetch_calendar(symbol: str) -> dict[str, Any]:
     """yfinance ``.calendar`` — next earnings date + dividend/ex-dividend dates;
     ``{}`` on failure."""
     try:
@@ -54,7 +55,7 @@ def _fetch_calendar(symbol: str) -> dict:
         return {}
 
 
-def _fetch_earnings_history(symbol: str, limit: int = 6) -> list[dict]:
+def _fetch_earnings_history(symbol: str, limit: int = 6) -> list[dict[str, Any]]:
     """Recent + upcoming earnings as a list of ``{date, estimate, reported,
     surprise}`` dicts (newest first), converting yfinance's DataFrame to plain
     data and NaN to None; ``[]`` on failure."""
@@ -70,7 +71,9 @@ def _fetch_earnings_history(symbol: str, limit: int = 6) -> list[dict]:
         df = df.head(limit)
     except Exception:  # noqa: BLE001
         pass
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
+    # yfinance is untyped, so `df` widens to dict; the `.empty` guard above
+    # already returned for anything that isn't a DataFrame.
     for idx, row in df.iterrows():
         out.append({
             "date": _row_date(idx),
@@ -81,7 +84,7 @@ def _fetch_earnings_history(symbol: str, limit: int = 6) -> list[dict]:
     return out
 
 
-def _fetch_price_targets(symbol: str) -> dict:
+def _fetch_price_targets(symbol: str) -> dict[str, Any]:
     """yfinance ``.analyst_price_targets`` (current/low/mean/median/high);
     ``{}`` on failure."""
     try:
@@ -90,21 +93,27 @@ def _fetch_price_targets(symbol: str) -> dict:
         return {}
 
 
-def _fetch_rating_changes(symbol: str, limit: int = 6) -> list[dict]:
+def _fetch_rating_changes(symbol: str, limit: int = 6) -> list[dict[str, Any]]:
     """Recent analyst upgrades/downgrades as ``{date, firm, from, to, action}``
     dicts (newest first); ``[]`` on failure."""
     try:
         df = _ticker(symbol).upgrades_downgrades
     except Exception:  # noqa: BLE001
         return []
-    if df is None or getattr(df, "empty", True):
+    # yfinance's stubs say this is always a DataFrame; in practice it returns None
+    # for tickers with no coverage, so the guard is load-bearing at runtime.
+    if df is None or getattr(df, "empty", True):  # pyright: ignore[reportUnnecessaryComparison]
         return []
+    # yfinance is untyped, so `df` widens to Unknown/dict for a checker. The guard
+    # above already returned for anything without `.empty`, i.e. anything that
+    # isn't a DataFrame — name that once here instead of at each use below.
+    frame: Any = df
     try:
-        df = df.sort_index(ascending=False).head(limit)
+        frame = frame.sort_index(ascending=False).head(limit)
     except Exception:  # noqa: BLE001
         pass
-    out: list[dict] = []
-    for idx, row in df.iterrows():
+    out: list[dict[str, Any]] = []
+    for idx, row in frame.iterrows():
         out.append({
             "date": _row_date(idx)[:10],
             "firm": str(row.get("Firm") or ""),
@@ -115,13 +124,13 @@ def _fetch_rating_changes(symbol: str, limit: int = 6) -> list[dict]:
     return out
 
 
-def _row_date(idx) -> str:
+def _row_date(idx: Any) -> str:
     """ISO date string from a pandas row index (Timestamp) or any label."""
     d = getattr(idx, "date", None)
     return str(d() if callable(d) else idx)
 
 
-def _num(v):
+def _num(v: Any) -> float | None:
     """A float, or None for missing / NaN."""
     import math
 
@@ -132,7 +141,7 @@ def _num(v):
     return None if math.isnan(f) else f
 
 
-def _money(v) -> str:
+def _money(v: Any) -> str:
     """Compact money formatting: 4.62T / 12.3B / 45.6M / 1,234."""
     n = _num(v)
     if n is None:
@@ -143,12 +152,12 @@ def _money(v) -> str:
     return f"{n:,.0f}"
 
 
-def _fmt(v, spec: str = ".2f", suffix: str = "") -> str:
+def _fmt(v: Any, spec: str = ".2f", suffix: str = "") -> str:
     n = _num(v)
     return f"{n:{spec}}{suffix}" if n is not None else "n/a"
 
 
-def _price(info: dict):
+def _price(info: dict[str, Any]):
     """Best available current price from an info dict."""
     return _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
 
@@ -375,26 +384,26 @@ def _parse_symbols(symbols: str, limit: int = 4) -> list[str]:
 # format spec). The extractor pulls from a ticker's yfinance ``.info`` dict; a
 # missing field renders "n/a" via ``_fmt``/``_money``. Kept declarative so the
 # row set is easy to extend without touching the render loop.
-def _pe_fwd(info: dict):
+def _pe_fwd(info: dict[str, Any]):
     return _num(info.get("forwardPE"))
 
 
-def _peg(info: dict):
+def _peg(info: dict[str, Any]):
     # yfinance moved PEG under different keys across versions; try both.
     return _num(info.get("trailingPegRatio")) or _num(info.get("pegRatio"))
 
 
-def _rev_growth(info: dict):
+def _rev_growth(info: dict[str, Any]):
     g = _num(info.get("revenueGrowth"))
     return g * 100.0 if g is not None else None
 
 
-def _margin(info: dict):
+def _margin(info: dict[str, Any]):
     m = _num(info.get("profitMargins"))
     return m * 100.0 if m is not None else None
 
 
-def _div_yield(info: dict):
+def _div_yield(info: dict[str, Any]):
     rate, price = _num(info.get("dividendRate")), _price(info)
     return (rate / price * 100.0) if (rate and price) else None
 
@@ -414,7 +423,8 @@ _COMPARE_ROWS = [
 ]
 
 
-def _compare_cell(info: dict, extract, spec: str) -> str:
+def _compare_cell(info: dict[str, Any], extract: Callable[[dict[str, Any]], Any],
+                  spec: str) -> str:
     """Render one table cell: the extracted value formatted per ``spec`` (``money``
     uses the compact T/B/M scale), or 'n/a' when missing."""
     val = extract(info)
@@ -475,7 +485,7 @@ def compare_stocks(symbols: str) -> str:
     return "\n".join(lines)
 
 
-def _fetch_fund_data(symbol: str) -> dict:
+def _fetch_fund_data(symbol: str) -> dict[str, Any]:
     """ETF/fund sector weights + top holdings via yfinance ``funds_data``, as
     ``{sectors: {name: weight}, holdings: [(symbol, name, weight), …]}``; ``{}`` for
     a non-fund or on failure."""
@@ -484,7 +494,8 @@ def _fetch_fund_data(symbol: str) -> dict:
         sectors = dict(fd.sector_weightings or {})
         holdings = []
         th = fd.top_holdings
-        if th is not None and not getattr(th, "empty", True):
+        # Typed as a DataFrame, returns None for funds without a holdings table.
+        if th is not None and not getattr(th, "empty", True):  # pyright: ignore[reportUnnecessaryComparison]
             for idx, row in th.iterrows():
                 holdings.append((
                     str(idx), str(row.get("Name") or ""), _num(row.get("Holding Percent")),

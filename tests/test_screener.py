@@ -7,7 +7,7 @@ offline here by monkeypatching those on their source modules — the screener
 imports them lazily at call time, so patching the module attribute takes effect.
 """
 
-from financial_research_assistant import fundamentals, screener, tools
+from financial_research_assistant import catalog, fundamentals, screener, tools
 
 
 # Ten aligned trading sessions shared by the stock and the market index, so a
@@ -218,5 +218,5 @@ def test_fetch_sp500_parses_ticker_column_and_normalizes(monkeypatch):
 
 
 def test_screen_stocks_registered_as_tool():
-    names = {getattr(t, "__name__", "") for t in tools.TOOLS}
+    names = {getattr(t, "__name__", "") for t in catalog.TOOLS}
     assert "screen_stocks" in names

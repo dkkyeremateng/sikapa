@@ -248,7 +248,7 @@ def test_digest_surfaces_triggered_alerts(monkeypatch, tmp_path):
 
 
 def test_alert_tools_registered():
-    from financial_research_assistant.tools import TOOLS
+    from financial_research_assistant.catalog import TOOLS
 
     names = {getattr(t, "name", getattr(t, "__name__", "")) for t in TOOLS}
     assert {"add_alert", "list_alerts", "remove_alert"} <= names

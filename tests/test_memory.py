@@ -321,7 +321,7 @@ async def test_prior_lessons_injected_into_synthesis(monkeypatch):
 
     cap = _CapLLM()
     monkeypatch.setattr(
-        "financial_research_assistant.graph._make_llm", lambda model=None: cap
+        "financial_research_assistant.llm._make_llm", lambda model=None: cap
     )
     out = await research.synthesize_report(
         "AAPL", [("Fundamentals", "P/E 30")], lessons=["Check AAPL ETF exposure next time"]
