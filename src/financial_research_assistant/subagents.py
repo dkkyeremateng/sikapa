@@ -29,6 +29,7 @@ labeled note rather than aborting the primary turn.
 
 from __future__ import annotations
 
+from typing import Any
 import asyncio
 import os
 
@@ -82,7 +83,7 @@ def _subagent_model() -> str | None:
     return (os.environ.get("SUBAGENT_MODEL") or "").strip() or None
 
 
-def _subagent_llm_overrides() -> dict:
+def _subagent_llm_overrides() -> dict[str, Any]:
     """OpenAI-compatible (and provider) overrides for subagents, each read from a
     ``SUBAGENT_*`` env var. Any left unset is passed as None, so ``_make_llm``
     falls back to the PRIMARY agent's setting — meaning subagents inherit the same
@@ -269,7 +270,7 @@ def _selected_names(task: str) -> frozenset[str] | None:
     return frozenset(keep) if matched else None
 
 
-def _subagent_tools(task: str = "") -> list:
+def _subagent_tools(task: str = "") -> list[Any]:
     """The local research tools a subagent gets: ``tools.TOOLS`` minus the dispatch
     tools (the hard recursion guard), minus groups whose backing store is empty
     (``active_tools``), minus groups this ``task`` doesn't implicate. Imported
@@ -303,14 +304,16 @@ def _build_subagent(model: str | None = None, task: str = ""):
     from .graph import _make_llm
 
     return create_agent(
-        model=_make_llm(model or _subagent_model(), **_subagent_llm_overrides()),
+        model=_make_llm(
+            model or _subagent_model(), scope="subagent", **_subagent_llm_overrides()
+        ),
         tools=_subagent_tools(task),
         system_prompt=SUBAGENT_SYSTEM_PROMPT,
         checkpointer=MemorySaver(),
     )
 
 
-def _final_text(result) -> str:
+def _final_text(result: Any) -> str:
     """Pull the subagent's final answer (last AI message text) out of the graph
     result, falling back to the last message's content."""
     from langchain_core.messages import AIMessage
@@ -333,8 +336,10 @@ async def run_subagent(task: str, model: str | None = None) -> str:
     for the caller to render. This is the seam tests monkeypatch to stay offline."""
     from langchain_core.messages import HumanMessage
 
+    from langchain_core.runnables import RunnableConfig
+
     graph = _build_subagent(model, task)
-    config = {
+    config: RunnableConfig = {
         "configurable": {"thread_id": "subagent"},
         "recursion_limit": _RECURSION_LIMIT,
     }
@@ -458,7 +463,7 @@ async def _dispatch_subagents(tasks: str, mode: str = "parallel") -> str:
 # Register the async coroutines as StructuredTools (coroutine-only, so they are
 # awaited by the async tool node; name/description/args are inferred from the
 # function signature + docstring, matching the plain-function tools elsewhere).
-def _make_tools() -> list:
+def _make_tools() -> list[Any]:
     from langchain_core.tools import StructuredTool
 
     return [

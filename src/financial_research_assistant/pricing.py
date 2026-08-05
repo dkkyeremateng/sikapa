@@ -12,13 +12,15 @@ To update prices or add models WITHOUT editing this code, drop a
 ``~/.financial-research-assistant/pricing.json``) — see ``_load_overrides``; its
 entries merge over the built-in tables. The per-model env vars above still win.
 
-Cached input tokens are billed at a fraction of the input rate
-(``CACHE_DISCOUNT``); ``tokens_in`` already includes the cached tokens, so
-``cost_usd`` discounts the cached portion rather than adding to it.
+Cached input tokens are billed at their own rates — a cache READ at a fraction of
+the input rate (``CACHE_DISCOUNT``), a cache WRITE at a premium on Anthropic
+(``ANTHROPIC_CACHE_WRITE_MULTIPLIER``). Both counts are subsets of ``tokens_in``,
+so ``cost_usd`` reprices those portions rather than adding to the total.
 """
 
 from __future__ import annotations
 
+from typing import Any
 import json
 import os
 from pathlib import Path
@@ -34,9 +36,19 @@ def _pricing_file() -> Path:
     return Path.home() / ".financial-research-assistant" / "pricing.json"
 
 
-def _parse_pricing(raw: dict) -> dict[str, tuple[float, float]]:
+def _parse_pricing(raw: object) -> dict[str, tuple[float, float]]:
+    """``{"model": [in, out]}`` → the rate table, dropping anything unusable.
+
+    Typed ``object`` because the argument comes straight from a hand-edited JSON
+    file: the key can be absent (None) or hold a string, a list, anything. The
+    ``dict`` annotation this had was a promise the call site could not keep, and
+    it hid a real crash — a non-dict section raised AttributeError out of
+    ``_load_overrides``, which callers treat as always-succeeding.
+    """
     out: dict[str, tuple[float, float]] = {}
-    for k, v in (raw or {}).items():
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
         if isinstance(v, (list, tuple)) and len(v) == 2:
             try:
                 out[str(k)] = (float(v[0]), float(v[1]))
@@ -45,9 +57,13 @@ def _parse_pricing(raw: dict) -> dict[str, tuple[float, float]]:
     return out
 
 
-def _parse_context(raw: dict) -> dict[str, int]:
+def _parse_context(raw: object) -> dict[str, int]:
+    """``{"model": tokens}`` → the context table, dropping anything unusable.
+    Same tolerance as ``_parse_pricing``, and for the same reason."""
     out: dict[str, int] = {}
-    for k, v in (raw or {}).items():
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
         try:
             n = int(v)
         except (TypeError, ValueError):
@@ -150,26 +166,100 @@ def _cache_discount(model: str) -> float:
     return ANTHROPIC_CACHE_DISCOUNT if model.startswith("claude") else CACHE_DISCOUNT
 
 
-def context_cap(model: str) -> int:
-    # An explicit window (e.g. for a custom gateway or an unlisted local model)
-    # wins over the built-in table, so ctx% is right without editing code.
-    override = os.environ.get("OPENAI_CONTEXT_WINDOW")
-    if override:
-        try:
-            n = int(override)
-            if n > 0:
-                return n
-        except ValueError:
-            pass
-    # Data-file overrides merge over the built-ins (file wins on a shared prefix),
-    # so a new/updated context window needs no code edit. Longest prefix wins, so a
-    # specific key ("gemini-2.5") beats a shorter one regardless of dict order.
+# Anthropic bills a cache WRITE at 1.25x the input rate (5-minute TTL); OpenAI's
+# compatible endpoints don't charge separately for one, so the write rate there is
+# just the input rate. Seeds a credential's config at login AND backs `cost_usd`
+# when the credential names no explicit write rate.
+ANTHROPIC_CACHE_WRITE_MULTIPLIER = 1.25
+
+
+def table_rates(model: str) -> tuple[float, float] | None:
+    """The table's (input, output) per-1M rates, or None when nothing matches.
+
+    Separate from ``rates`` because that one also consults the environment and the
+    credential store; seeding a credential's config needs the table's own answer,
+    not one derived from a credential that doesn't exist yet.
+    """
+    pricing_override, _ = _load_overrides()
+    table = {**MODEL_PRICING, **pricing_override}
+    for name in sorted(table, key=len, reverse=True):
+        if model.startswith(name):
+            return table[name]
+    return None
+
+
+def table_cache_rates(model: str, input_rate: float) -> tuple[float, float]:
+    """(cache write, cache read) per-1M rates implied by the table for ``model``."""
+    write = input_rate * ANTHROPIC_CACHE_WRITE_MULTIPLIER if model.startswith("claude") else input_rate
+    return round(write, 6), round(input_rate * _cache_discount(model), 6)
+
+
+def _stored_model_config(model: str) -> dict[str, Any] | None:
+    """The active credential's config for ``model``, if it serves it."""
+    try:
+        from .auth import model_config
+
+        return model_config(model)
+    except Exception:  # a broken store must never take a turn down
+        return None
+
+
+def known_context(model: str) -> int | None:
+    """The table's window for ``model``, or None when nothing matches.
+
+    Distinct from ``context_cap``, which always answers — callers that need to
+    know whether the answer is real (a login suggesting a default, say) cannot
+    tell the 128k fallback from a genuine 128k entry.
+    """
     _, context_override = _load_overrides()
     table = {**MODEL_CONTEXT, **context_override}
     for name in sorted(table, key=len, reverse=True):
         if model.startswith(name):
             return table[name]
-    return 128_000
+    return None
+
+
+def explain_context_cap(model: str) -> tuple[int, str]:
+    """``(window, where it came from)`` — the same resolution ``context_cap`` does,
+    with the winning source named.
+
+    Exists because the window is resolvable from four places and a stale value in
+    a losing one looks authoritative while doing nothing; "configured X, showing Y"
+    is otherwise unanswerable without reading the code.
+    """
+    override = os.environ.get("OPENAI_CONTEXT_WINDOW")
+    if override:
+        try:
+            n = int(override)
+            if n > 0:
+                return n, "env OPENAI_CONTEXT_WINDOW"
+        except ValueError:
+            pass
+    stored = _stored_model_config(model)
+    if stored and stored.get("context_window"):
+        return int(stored["context_window"]), "auth.json model entry"
+    known = known_context(model)
+    if known:
+        _, context_override = _load_overrides()
+        where = "pricing.json" if any(
+            model.startswith(k) for k in context_override
+        ) else "built-in table"
+        return known, where
+    try:
+        from .auth import context_window as _stored_window
+
+        fallback = _stored_window(model)
+    except Exception:
+        fallback = None
+    if fallback:
+        return fallback, "auth.json credential-wide"
+    return 128_000, "default fallback"
+
+
+def context_cap(model: str) -> int:
+    """The context window to divide by. See ``explain_context_cap`` for the
+    resolution order and which source won."""
+    return explain_context_cap(model)[0]
 
 
 def context_pct(model: str, tokens_in: int) -> int:
@@ -190,26 +280,55 @@ def rates(model: str) -> tuple[float, float] | None:
             return float(ci), float(co)
         except ValueError:
             pass
+    # Rates recorded on the active credential for this exact model. Unlike the
+    # context window — where the per-model table is authoritative and the store
+    # only fills gaps — prices are the thing a gateway reseller changes, and the
+    # user entered these deliberately for the model they are actually billed for.
+    # Zero reads as "not set", not as free. The fields are written as 0 so the
+    # shape to fill in is visible in auth.json, and a model whose price nobody has
+    # entered must show no cost at all — a confident $0.00 on a gateway that bills
+    # real money is worse than a blank.
+    stored = _stored_model_config(model)
+    if stored and stored.get("input_cost") and stored.get("output_cost"):
+        return float(stored["input_cost"]), float(stored["output_cost"])
     # Data-file overrides merge over the built-ins (file wins on a shared prefix),
     # so updating a price or adding a model needs no code edit.
-    pricing_override, _ = _load_overrides()
-    table = {**MODEL_PRICING, **pricing_override}
-    for name in sorted(table, key=len, reverse=True):
-        if model.startswith(name):
-            return table[name]
-    return None
+    return table_rates(model)
 
 
-def cost_usd(model: str, tok_in: int, tok_out: int, tok_cache: int = 0) -> float | None:
-    """Turn cost in USD, discounting the cached portion of the input tokens.
+def cost_usd(
+    model: str,
+    tok_in: int,
+    tok_out: int,
+    tok_cache: int = 0,
+    tok_cache_write: int = 0,
+) -> float | None:
+    """Turn cost in USD, pricing the cached portions of the input separately.
+
+    ``tok_in`` is the total input; ``tok_cache`` (read from the cache) and
+    ``tok_cache_write`` (written into it) are subsets of it, billed at their own
+    rates — writing costs MORE than fresh input on Anthropic (~1.25x) while
+    reading costs far less (~0.1x), so folding either into the input rate
+    misreports a cache-heavy turn in both directions.
 
     Returns None when the model has no known/override pricing.
     """
     r = rates(model)
     if r is None:
         return None
-    cache = min(tok_cache, tok_in)  # cached tokens are a subset of input
-    fresh_in = tok_in - cache
+    # Both cache figures are subsets of input, and a token is either read from the
+    # cache or written to it — never both. Clamp so a provider reporting slightly
+    # inconsistent counts can't drive fresh_in negative and refund the turn.
+    cache = max(0, min(tok_cache, tok_in))
+    write = max(0, min(tok_cache_write, tok_in - cache))
+    fresh_in = tok_in - cache - write
+    # Explicit rates on the credential beat the multipliers: a reseller's cache
+    # pricing is not necessarily the upstream vendor's.
+    stored = _stored_model_config(model) or {}
+    read_rate = stored.get("cache_read_cost")
+    read_rate = float(read_rate) if read_rate else r[0] * _cache_discount(model)
+    write_rate = stored.get("cache_write_cost")
+    write_rate = float(write_rate) if write_rate else table_cache_rates(model, r[0])[0]
     return (
-        fresh_in * r[0] + cache * r[0] * _cache_discount(model) + tok_out * r[1]
+        fresh_in * r[0] + cache * read_rate + write * write_rate + tok_out * r[1]
     ) / 1_000_000

@@ -223,6 +223,7 @@ def test_subagent_openai_compatible_overrides(monkeypatch):
         "provider": "openai",
         "base_url": "http://localhost:11434/v1",
         "api_key": "local-key",
+        "scope": "subagent",
     }
 
 
@@ -241,6 +242,65 @@ def test_make_llm_openai_compatible_override_reaches_chatopenai(monkeypatch):
     graph._make_llm("m", base_url="http://sub/v1", api_key="sub-key")
     assert seen["base_url"] == "http://sub/v1"  # override wins over OPENAI_API_BASE
     assert seen["model"] == "m"
+
+
+def test_make_llm_overrides_reach_non_openai_provider(monkeypatch):
+    """Regression: the non-OpenAI path used to accept base_url/api_key and drop
+    them, so SUBAGENT_*/QUICK_* were silent no-ops for anthropic/google/groq."""
+    from financial_research_assistant import graph
+
+    seen = {}
+
+    def fake_init(model, **kw):
+        seen.update(kw, model=model)
+        return object()
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init)
+    graph._make_llm(
+        "claude-sonnet-5",
+        provider="anthropic",
+        base_url="http://gateway/v1",
+        api_key="gw-key",
+    )
+    assert seen == {
+        "model": "claude-sonnet-5",
+        "model_provider": "anthropic",
+        "base_url": "http://gateway/v1",
+        "api_key": "gw-key",
+    }
+
+
+def test_make_llm_non_openai_without_overrides_is_unchanged(monkeypatch):
+    """No override => the original env-only call, so existing setups are untouched."""
+    from financial_research_assistant import graph
+
+    seen = {}
+    monkeypatch.setattr(
+        "langchain.chat_models.init_chat_model",
+        lambda model, **kw: seen.update(kw, model=model) or object(),
+    )
+    monkeypatch.setenv("MODEL_PROVIDER", "anthropic")
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    graph._make_llm()
+    assert seen == {"model": "claude-sonnet-5", "model_provider": "anthropic"}
+
+
+def test_make_llm_non_openai_falls_back_when_kwargs_rejected(monkeypatch):
+    """A provider integration that doesn't take base_url/api_key must not take the
+    turn down — fall back to the env-only construction instead of raising."""
+    from financial_research_assistant import graph
+
+    calls = []
+
+    def picky_init(model, **kw):
+        calls.append(kw)
+        if "base_url" in kw:
+            raise TypeError("unexpected keyword argument 'base_url'")
+        return "LLM"
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", picky_init)
+    assert graph._make_llm("m", provider="groq", base_url="http://x/v1") == "LLM"
+    assert len(calls) == 2 and "base_url" not in calls[1]
 
 
 def test_dispatch_tools_registered_with_async_impl():
