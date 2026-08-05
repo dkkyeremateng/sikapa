@@ -24,8 +24,10 @@ they stabilize. Verify against your backend's expected schema.
 from __future__ import annotations
 
 import os
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
+from .auth import redact
 from .events import AgentEvent
 from .pricing import cost_usd
 
@@ -48,13 +50,13 @@ def _get_tracer():
         return _tracer
     _configured = True
     try:
-        from opentelemetry import trace
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+        from opentelemetry import trace  # pyright: ignore[reportMissingImports]  (optional extra)
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # pyright: ignore[reportMissingImports]  (optional extra)
             OTLPSpanExporter,
         )
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.resources import Resource  # pyright: ignore[reportMissingImports]  (optional extra)
+        from opentelemetry.sdk.trace import TracerProvider  # pyright: ignore[reportMissingImports]  (optional extra)
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor  # pyright: ignore[reportMissingImports]  (optional extra)
     except Exception:  # opentelemetry not installed → stay a no-op
         _tracer = None
         return None
@@ -88,7 +90,7 @@ async def traced(
             yield ev
         return
 
-    from opentelemetry.trace import Status, StatusCode
+    from opentelemetry.trace import Status, StatusCode  # pyright: ignore[reportMissingImports]  (optional extra)
 
     with tracer.start_as_current_span(f"invoke_agent {SERVICE_NAME}") as span:
         span.set_attribute("gen_ai.operation.name", "invoke_agent")
@@ -98,7 +100,8 @@ async def traced(
         span.set_attribute("gen_ai.input.messages", user_msg[:2000])
         tool_spans: dict[str, Any] = {}
         final_text = ""
-        tok_in = tok_out = tok_cache = 0  # usage arrives as per-call deltas; sum them
+        # usage arrives as per-call deltas; sum them
+        tok_in = tok_out = tok_cache = tok_write = 0
         try:
             async for ev in events:
                 if ev.kind == "tool_start":
@@ -108,30 +111,33 @@ async def traced(
                     if ev.call_id:
                         ts.set_attribute("gen_ai.tool.call.id", ev.call_id)
                     if ev.detail:
-                        ts.set_attribute("gen_ai.tool.call.arguments", ev.detail[:2000])
+                        ts.set_attribute("gen_ai.tool.call.arguments", redact(ev.detail[:2000]))
                     tool_spans[ev.call_id or ev.tool] = ts
                 elif ev.kind == "tool_end":
                     ts = tool_spans.pop(ev.call_id or ev.tool, None)
                     if ts is not None:
                         if ev.detail:
-                            ts.set_attribute("gen_ai.tool.call.result", ev.detail[:2000])
+                            ts.set_attribute("gen_ai.tool.call.result", redact(ev.detail[:2000]))
                         ts.set_status(Status(StatusCode.OK if ev.ok else StatusCode.ERROR))
                         ts.end()
                 elif ev.kind == "usage":
                     tok_in += ev.tokens_in
                     tok_out += ev.tokens_out
                     tok_cache += ev.tokens_cache
+                    tok_write += ev.tokens_cache_write
                     span.set_attribute("gen_ai.usage.input_tokens", tok_in)
                     span.set_attribute("gen_ai.usage.output_tokens", tok_out)
                     if tok_cache:
                         span.set_attribute("gen_ai.usage.cached_input_tokens", tok_cache)
-                    cost = cost_usd(model, tok_in, tok_out, tok_cache)
+                    if tok_write:
+                        span.set_attribute("gen_ai.usage.cache_creation_input_tokens", tok_write)
+                    cost = cost_usd(model, tok_in, tok_out, tok_cache, tok_write)
                     if cost is not None:
                         span.set_attribute("gen_ai.usage.cost_usd", round(cost, 6))
                 elif ev.kind == "final":
                     final_text = ev.text
                 elif ev.kind == "error":
-                    span.set_status(Status(StatusCode.ERROR, ev.text[:200]))
+                    span.set_status(Status(StatusCode.ERROR, redact(ev.text[:200])))
                 yield ev
             if final_text:
                 span.set_attribute("gen_ai.output.messages", final_text[:2000])

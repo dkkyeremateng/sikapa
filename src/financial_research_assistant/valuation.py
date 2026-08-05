@@ -23,6 +23,7 @@ monkeypatch the same attributes the rest of the suite does.
 
 from __future__ import annotations
 
+from typing import Any
 import math
 
 # --- Cash-flow-statement XBRL tags -------------------------------------------
@@ -49,7 +50,7 @@ _GROWTH_FLOOR, _GROWTH_CAP = -0.05, 0.20  # clamp a *derived* stage-1 growth
 
 
 # --- Small formatting/parse helpers (self-contained, no network) -------------
-def _num(v):
+def _num(v: Any) -> float | None:
     """A float, or None for missing / NaN."""
     try:
         f = float(v)
@@ -58,7 +59,7 @@ def _num(v):
     return None if math.isnan(f) else f
 
 
-def _money(v) -> str:
+def _money(v: Any) -> str:
     """Compact money: 4.62T / 12.3B / 45.6M / 1,234."""
     n = _num(v)
     if n is None:
@@ -69,12 +70,12 @@ def _money(v) -> str:
     return f"{n:,.0f}"
 
 
-def _pct(v) -> str:
+def _pct(v: Any) -> str:
     n = _num(v)
     return f"{n * 100:.1f}%" if n is not None else "n/a"
 
 
-def _as_rate(v) -> float:
+def _as_rate(v: Any) -> float:
     """Interpret a rate knob leniently: 12 or 0.12 both mean 12%. A magnitude
     above 1 is read as a percentage (the model often passes whole numbers)."""
     n = _num(v) or 0.0
@@ -82,9 +83,13 @@ def _as_rate(v) -> float:
 
 
 # --- Pure DCF math (no network; exhaustively unit-tested) --------------------
-def _cagr(first: float, last: float, periods: int):
+def _cagr(first: float | None, last: float | None, periods: int) -> float | None:
     """Compound annual growth rate first→last over ``periods`` years, or None when
-    it isn't defined (non-positive endpoints or no span)."""
+    it isn't defined (non-positive endpoints or no span).
+
+    The endpoints are optional because they come from as-reported filings, where a
+    missing line item is normal — the None guard below is load-bearing, not
+    defensive padding."""
     if periods <= 0 or first is None or last is None or first <= 0 or last <= 0:
         return None
     return (last / first) ** (1.0 / periods) - 1.0
@@ -103,7 +108,7 @@ def _present_values(flows: list[float], discount: float) -> list[float]:
     return [cf / (1.0 + discount) ** (i + 1) for i, cf in enumerate(flows)]
 
 
-def _terminal_value(last_fcf: float, terminal_growth: float, discount: float):
+def _terminal_value(last_fcf: float, terminal_growth: float, discount: float) -> float | None:
     """Gordon-growth terminal value at the end of the horizon, or None when the
     discount rate doesn't exceed terminal growth (the perpetuity diverges)."""
     if discount <= terminal_growth:
@@ -112,7 +117,7 @@ def _terminal_value(last_fcf: float, terminal_growth: float, discount: float):
 
 
 def _dcf(base_fcf: float, growth: float, years: int,
-         discount: float, terminal_growth: float):
+         discount: float, terminal_growth: float) -> dict[str, Any] | None:
     """Enterprise value from a two-stage DCF, or None if terminal value diverges.
     Returns the full breakdown so the caller can show every intermediate figure."""
     flows = _project_fcf(base_fcf, growth, years)
@@ -130,15 +135,17 @@ def _dcf(base_fcf: float, growth: float, years: int,
     }
 
 
-def _per_share(ev: float, net_debt: float, shares):
+def _per_share(ev: float, net_debt: float, shares: float | None) -> float | None:
     """Equity value per share, or None when shares are unknown."""
     if not shares or shares <= 0:
         return None
     return (ev - net_debt) / shares
 
 
-def _sensitivity(base_fcf, growth, years, net_debt, shares,
-                 discount, terminal_growth):
+def _sensitivity(
+    base_fcf: float, growth: float, years: int, net_debt: float,
+    shares: float | None, discount: float, terminal_growth: float,
+) -> tuple[list[float], list[float], list[list[float | None]]]:
     """Intrinsic-per-share grid over ±discount (rows) × ±terminal-growth (cols)."""
     discounts = [round(discount + d, 4) for d in (-0.02, -0.01, 0.0, 0.01, 0.02)]
     tgs = [round(terminal_growth + d, 4) for d in (-0.01, -0.005, 0.0, 0.005, 0.01)]
@@ -154,7 +161,7 @@ def _sensitivity(base_fcf, growth, years, net_debt, shares,
 
 
 # --- Data gather (network; lazy-imported so tests monkeypatch the source) -----
-def _fcf_history(cik: str, years: int) -> list[dict]:
+def _fcf_history(cik: str, years: int) -> list[dict[str, Any]]:
     """As-reported FCF per fiscal year, newest-first: operating cash flow − capex.
     Keeps one extra year beyond ``years`` as a CAGR base. Rows lacking operating
     cash flow are skipped (capex missing counts as 0 outflow)."""
@@ -175,7 +182,7 @@ def _fcf_history(cik: str, years: int) -> list[dict]:
     return rows[: years + 1]
 
 
-def _snapshot(symbol: str) -> dict:
+def _snapshot(symbol: str) -> dict[str, Any]:
     """Live net-debt / shares / price snapshot from Yahoo (keyless)."""
     from . import fundamentals
 
@@ -191,7 +198,7 @@ def _snapshot(symbol: str) -> dict:
 
 
 # --- Assumption resolution ---------------------------------------------------
-def _resolve_growth(growth_rate, history: list[dict]) -> tuple[float, str]:
+def _resolve_growth(growth_rate: Any, history: list[dict[str, Any]]) -> tuple[float, str]:
     """Stage-1 growth: an explicit knob wins; else derive a CAGR from the FCF
     history (clamped to a sane band); else a conservative default."""
     g = _as_rate(growth_rate)
@@ -210,7 +217,8 @@ def _resolve_growth(growth_rate, history: list[dict]) -> tuple[float, str]:
 
 
 # --- Report rendering --------------------------------------------------------
-def _assumptions_block(growth, growth_src, discount, terminal_growth, years) -> list[str]:
+def _assumptions_block(growth: float, growth_src: str, discount: float,
+                       terminal_growth: float, years: int) -> list[str]:
     return [
         "Assumptions:",
         f"  Stage-1 FCF growth : {_pct(growth):>7}  ({growth_src})",
@@ -220,7 +228,7 @@ def _assumptions_block(growth, growth_src, discount, terminal_growth, years) -> 
     ]
 
 
-def _projection_block(res: dict, base_fy: int) -> list[str]:
+def _projection_block(res: dict[str, Any], base_fy: int) -> list[str]:
     lines = ["", f"{'Year':<8}{'Projected FCF':>16}{'PV of FCF':>16}"]
     for i, (cf, pv) in enumerate(zip(res["flows"], res["pv_flows"]), start=1):
         lines.append(f"{('+' + str(i)):<8}{_money(cf):>16}{_money(pv):>16}")
@@ -229,7 +237,8 @@ def _projection_block(res: dict, base_fy: int) -> list[str]:
     return lines
 
 
-def _valuation_block(res, net_debt, snap) -> tuple[list[str], float | None]:
+def _valuation_block(res: dict[str, Any], net_debt: float,
+                     snap: dict[str, Any]) -> tuple[list[str], float | None]:
     ev = res["enterprise_value"]
     equity = ev - net_debt
     intrinsic = _per_share(ev, net_debt, snap["shares"])
@@ -254,7 +263,8 @@ def _valuation_block(res, net_debt, snap) -> tuple[list[str], float | None]:
     return lines, intrinsic
 
 
-def _sensitivity_block(base_fcf, growth, years, net_debt, snap, discount, tg) -> list[str]:
+def _sensitivity_block(base_fcf: float, growth: float, years: int, net_debt: float,
+                       snap: dict[str, Any], discount: float, tg: float) -> list[str]:
     if not snap["shares"] or snap["shares"] <= 0:
         return []
     discounts, tgs, grid = _sensitivity(
@@ -268,7 +278,9 @@ def _sensitivity_block(base_fcf, growth, years, net_debt, snap, discount, tg) ->
     return lines
 
 
-def _render(sym, snap, history, growth, growth_src, discount, tg, years, res) -> str:
+def _render(sym: str, snap: dict[str, Any], history: list[dict[str, Any]],
+            growth: float, growth_src: str, discount: float, tg: float,
+            years: int, res: dict[str, Any]) -> str:
     net_debt = snap["total_debt"] - snap["total_cash"]
     base_fy = history[0]["fy"]
     lines = [f"DCF intrinsic valuation · {snap['name']} ({sym}) — two-stage FCF model", ""]

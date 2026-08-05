@@ -20,10 +20,21 @@ thing is exercised offline in tests.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
 from datetime import date, datetime
 
+# The two market-data sources the digest reads through. They are parameters
+# rather than direct imports so tests can drive the whole scan offline.
+FetchDaily = Callable[[str, int], list[tuple[str, float]]]
+FetchCalendar = Callable[[str], dict[str, Any]]
+# A price mover, an upcoming earnings date, an upcoming ex-dividend date.
+Mover = dict[str, Any]
+Earnings = tuple[date, str, Any]
+ExDiv = tuple[date, str]
 
-def _as_date(v):
+
+def _as_date(v: Any) -> date | None:
     """Coerce a calendar value (``datetime.date``/``datetime``/ISO-ish string) to a
     ``date``, or None if it can't be parsed."""
     if isinstance(v, datetime):
@@ -38,7 +49,7 @@ def _as_date(v):
     return None
 
 
-def _next_earnings(cal: dict):
+def _next_earnings(cal: dict[str, Any]):
     """The earliest earnings date from a yfinance calendar dict, or None."""
     ed = cal.get("Earnings Date")
     if isinstance(ed, (list, tuple)):
@@ -47,7 +58,10 @@ def _next_earnings(cal: dict):
     return _as_date(ed)
 
 
-def _scan_one(sym, lookback_days, move_threshold, horizon, today, fetch_daily, fetch_calendar):
+def _scan_one(
+    sym: str, lookback_days: int, move_threshold: float, horizon: int, today: date,
+    fetch_daily: FetchDaily, fetch_calendar: FetchCalendar,
+) -> tuple[Mover | None, Earnings | None, ExDiv | None]:
     """Scan one holding → ``(mover|None, earnings|None, exdiv|None)``. Independent
     per symbol, so several run concurrently in ``_scan_holdings``."""
     mover = earn = exdiv = None
@@ -69,8 +83,11 @@ def _scan_one(sym, lookback_days, move_threshold, horizon, today, fetch_daily, f
     return mover, earn, exdiv
 
 
-def _scan_holdings(symbols, lookback_days, move_threshold, earnings_within, today,
-                   fetch_daily, fetch_calendar):
+def _scan_holdings(
+    symbols: list[str], lookback_days: int, move_threshold: float,
+    earnings_within: int, today: date,
+    fetch_daily: FetchDaily, fetch_calendar: FetchCalendar,
+) -> tuple[list[Mover], list[Earnings], list[ExDiv]]:
     """Per-holding scan → ``(movers, earnings, exdivs)``, each already sorted for
     display (movers by absolute move, the dated lists chronologically). Holdings are
     scanned concurrently (network-bound) with output order preserved."""
@@ -98,7 +115,7 @@ def _scan_holdings(symbols, lookback_days, move_threshold, earnings_within, toda
     return movers, earnings, exdivs
 
 
-def _alert_section(symbols, lookback_days, today) -> list[str]:
+def _alert_section(symbols: list[str], lookback_days: int, today: date) -> list[str]:
     """The 🔔 triggered-alerts block, or ``[]`` when no rules are set."""
     from . import alerts
 
@@ -114,7 +131,7 @@ def _alert_section(symbols, lookback_days, today) -> list[str]:
     return out
 
 
-def _movers_section(movers, move_threshold) -> list[str]:
+def _movers_section(movers: list[Mover], move_threshold: float) -> list[str]:
     out = ["", f"## 📈 Movers (±{move_threshold:g}% over the window)"]
     if not movers:
         out.append("- none beyond the threshold")
@@ -127,7 +144,7 @@ def _movers_section(movers, move_threshold) -> list[str]:
     return out
 
 
-def _earnings_section(earnings, earnings_within) -> list[str]:
+def _earnings_section(earnings: list[Earnings], earnings_within: int) -> list[str]:
     out = ["", f"## 📅 Upcoming earnings (next {earnings_within}d)"]
     if not earnings:
         out.append("- none scheduled in the window")
@@ -141,7 +158,7 @@ def _earnings_section(earnings, earnings_within) -> list[str]:
     return out
 
 
-def _exdivs_section(exdivs, earnings_within) -> list[str]:
+def _exdivs_section(exdivs: list[ExDiv], earnings_within: int) -> list[str]:
     out = ["", f"## 💵 Upcoming ex-dividends (next {earnings_within}d)"]
     if exdivs:
         out += [f"- {sym:<6} {xd.isoformat()}" for xd, sym in exdivs]
@@ -150,7 +167,7 @@ def _exdivs_section(exdivs, earnings_within) -> list[str]:
     return out
 
 
-def _news_section(movers) -> list[str]:
+def _news_section(movers: list[Mover]) -> list[str]:
     from .tools import web_search
 
     out = ["", "## 📰 Headlines for movers"]

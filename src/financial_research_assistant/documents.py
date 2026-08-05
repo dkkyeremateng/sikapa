@@ -23,6 +23,7 @@ carries a ``[doc · p.N]`` tag so the answer is traceable to the source.
 
 from __future__ import annotations
 
+from typing import Any
 import json
 import os
 import re
@@ -65,7 +66,7 @@ def _extract_pages(path: Path) -> list[tuple[int, str]]:
 
 def _extract_pdf(path: Path) -> list[tuple[int, str]]:
     try:
-        from pypdf import PdfReader
+        from pypdf import PdfReader  # pyright: ignore[reportMissingImports]  (optional extra)
     except ModuleNotFoundError as e:
         raise DocumentSupportError(
             "Reading PDFs needs the optional 'documents' extra. Install it with:  "
@@ -133,7 +134,7 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "doc"
 
 
-def _load_index() -> list[dict]:
+def _load_index() -> list[dict[str, Any]]:
     path = _index_path()
     if not path.exists():
         return []
@@ -148,7 +149,7 @@ def _load_index() -> list[dict]:
     return out
 
 
-def _write_index(records: list[dict]) -> None:
+def _write_index(records: list[dict[str, Any]]) -> None:
     path = _index_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
@@ -156,14 +157,14 @@ def _write_index(records: list[dict]) -> None:
             fh.write(json.dumps(r) + "\n")
 
 
-def _store_chunks(doc: str, rows: list[dict]) -> None:
+def _store_chunks(doc: str, rows: list[dict[str, Any]]) -> None:
     """Replace any existing chunks for ``doc`` with ``rows`` (re-ingest overwrites)."""
     kept = [r for r in _load_index() if r.get("doc") != doc]
     _write_index(kept + rows)
 
 
 # --- Embedding ---------------------------------------------------------------
-def _embed_chunks(texts: list[str]) -> list[list | None]:
+def _embed_chunks(texts: list[str]) -> list[list[Any] | None]:
     """Embed chunk texts, returning a parallel list (vectors or None per chunk).
     All-None when no embeddings endpoint is configured (keyword-only mode)."""
     try:
@@ -176,7 +177,7 @@ def _embed_chunks(texts: list[str]) -> list[list | None]:
     return list(vecs)
 
 
-def _maybe_backfill_embeddings(records: list[dict], all_records: list[dict]) -> None:
+def _maybe_backfill_embeddings(records: list[dict[str, Any]], all_records: list[dict[str, Any]]) -> None:
     """Embed any chunks in ``records`` that still lack a vector — IF an embeddings
     endpoint is now available — and persist the whole index. So a document ingested
     in keyword-only mode (no endpoint at ingest time) upgrades to semantic search on
@@ -213,7 +214,7 @@ def _keyword_score(query: str, text: str) -> tuple[int, int]:
     return (matched, occ)
 
 
-def _rank(query: str, records: list[dict], k: int) -> list[dict]:
+def _rank(query: str, records: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
     """Rank chunks for a query: cosine over embedded chunks when the query can be
     embedded, else keyword overlap. Keyword is always the fallback so retrieval
     works with no embeddings endpoint."""
@@ -228,7 +229,7 @@ def _rank(query: str, records: list[dict], k: int) -> list[dict]:
     return [r for _, r in scored[:k]]
 
 
-def _semantic_rank(query: str, records: list[dict], k: int) -> list[dict] | None:
+def _semantic_rank(query: str, records: list[dict[str, Any]], k: int) -> list[dict[str, Any]] | None:
     """Cosine rank over records that carry a ``vec``; None if the query can't be
     embedded (caller then falls back to keyword)."""
     try:
@@ -243,7 +244,7 @@ def _semantic_rank(query: str, records: list[dict], k: int) -> list[dict] | None
     return [r for _, r in scored[:k]]
 
 
-def _cite(r: dict) -> str:
+def _cite(r: dict[str, Any]) -> str:
     page = r.get("page")
     return f"[{r['doc']}" + (f" · p.{page}" if page else "") + "]"
 
@@ -355,7 +356,7 @@ def list_documents() -> str:
     records = _load_index()
     if not records:
         return "No documents ingested yet. Use ingest_document(path) to load one."
-    by_doc: dict[str, dict] = {}
+    by_doc: dict[str, dict[str, Any]] = {}
     for r in records:
         d = by_doc.setdefault(r["doc"], {"chunks": 0, "embedded": False, "pages": set()})
         d["chunks"] += 1

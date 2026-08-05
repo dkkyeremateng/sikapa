@@ -15,6 +15,8 @@ Any local function with type hints and a docstring is picked up as a LangChain
 tool automatically.
 """
 
+from collections.abc import Callable
+from typing import Any
 import json
 import os
 import re
@@ -68,11 +70,14 @@ def position_weight(position_value: float, portfolio_value: float) -> float:
     return position_value / portfolio_value * 100.0
 
 
-def think(thought: str) -> str:
+def think(thought: str) -> str:  # pyright: ignore[reportUnusedParameter] - see below
     """Record a private reasoning step BEFORE acting — your research plan or how
     you're weighing the data. This is a scratchpad: it does not call anything or
     change state. Think out loud here so your reasoning is deliberate and visible
     (it renders as a 💭 panel in the TUI).
+
+    The argument is deliberately unread: the value of this tool is that writing
+    the thought puts it in the transcript, so the body has nothing left to do.
     """
     return "noted."
 
@@ -222,7 +227,7 @@ class ChartText(str):
         return obj
 
 
-def _chart_tool(fn):
+def _chart_tool(fn: Callable[..., Any]) -> Any:
     """Wrap a chart-returning function as a ``content_and_artifact`` tool: the
     model receives ``ChartText.summary``, the UI receives the full text as the
     artifact. A function that returns a plain ``str`` (an error or "no data"
@@ -237,7 +242,7 @@ def _chart_tool(fn):
     from langchain_core.tools import StructuredTool
 
     @functools.wraps(fn)
-    def _run(*args, **kwargs):
+    def _run(*args: Any, **kwargs: Any) -> tuple[Any, str | None]:
         out = fn(*args, **kwargs)
         if isinstance(out, ChartText):
             return out.summary, str(out)
@@ -304,7 +309,7 @@ def price_history_chart(symbol: str, days: int = 90) -> str:
 
 # --- Web search (stock & market news) --------------------------------------
 
-def _normalize_result(r: dict) -> dict:
+def _normalize_result(r: dict[str, Any]) -> dict[str, Any]:
     """Normalize a provider result into {title, url, source, date, snippet},
     tolerating both DuckDuckGo news (url/body/date/source), DuckDuckGo text
     (href/body) and Tavily (url/content/published_date) key shapes."""
@@ -317,7 +322,7 @@ def _normalize_result(r: dict) -> dict:
     }
 
 
-def _ddg_search(query: str, max_results: int) -> list[dict]:
+def _ddg_search(query: str, max_results: int) -> list[dict[str, Any]]:
     """Keyless DuckDuckGo search: news first (dated headlines), then a plain-text
     fallback so a query with no news still returns something."""
     from ddgs import DDGS
@@ -331,7 +336,7 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
     return [_normalize_result(r) for r in results]
 
 
-def _tavily_search(query: str, max_results: int, api_key: str) -> list[dict]:
+def _tavily_search(query: str, max_results: int, api_key: str) -> list[dict[str, Any]]:
     """Tavily news search (higher quality for LLMs; needs TAVILY_API_KEY)."""
     payload = json.dumps(
         {"api_key": api_key, "query": query, "topic": "news",
@@ -346,7 +351,7 @@ def _tavily_search(query: str, max_results: int, api_key: str) -> list[dict]:
     return [_normalize_result(r) for r in (data.get("results") or [])]
 
 
-def _format_search_results(query: str, results: list[dict]) -> str:
+def _format_search_results(query: str, results: list[dict[str, Any]]) -> str:
     """Render normalized results as a numbered, source-dated list for the model,
     framed as untrusted third-party content (web text can embed instructions —
     prompt injection — so the model is reminded to treat it as data only)."""
@@ -422,7 +427,7 @@ def import_ibkr_statement(path: str) -> str:
     except Exception as e:  # a malformed file must not abort the turn
         return f"Could not import statement: {type(e).__name__}: {e}"
 
-    def _fmt_amounts(amounts: dict) -> str:
+    def _fmt_amounts(amounts: dict[str, Any]) -> str:
         # Show each currency separately — summing USD + EUR would be meaningless.
         return ", ".join(f"{amt:.2f} {ccy}" for ccy, amt in sorted(amounts.items()))
 
@@ -1183,7 +1188,7 @@ def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY") -> str:
 # summary stats and the chart art travels to the UI as an artifact — same
 # functions, same output for direct callers, ~300 fewer tokens per call in the
 # model's context (and in every later step of the turn that replays it).
-TOOLS = [
+TOOLS: list[Callable[..., Any]] = [
     current_date,
     pct_change,
     cagr,
@@ -1222,18 +1227,20 @@ from .options import OPTIONS_TOOLS  # noqa: E402
 from .documents import DOCUMENT_TOOLS  # noqa: E402
 from .alerts import ALERT_TOOLS  # noqa: E402
 
-TOOLS += FUNDAMENTALS_TOOLS
-TOOLS += MONITOR_TOOLS
-TOOLS += ANALYTICS_TOOLS
-TOOLS += RESEARCH_TOOLS
-TOOLS += FACTOR_TOOLS
-TOOLS += SCREENER_TOOLS
-TOOLS += SUBAGENT_TOOLS
-TOOLS += EDGAR_TOOLS
-TOOLS += VALUATION_TOOLS
-TOOLS += OPTIONS_TOOLS
-TOOLS += DOCUMENT_TOOLS
-TOOLS += ALERT_TOOLS
+# `.extend` rather than `+=`: both mutate in place, but `+=` reads as a rebind of
+# an upper-case (i.e. constant) name to a type checker, which flags every line.
+TOOLS.extend(FUNDAMENTALS_TOOLS)
+TOOLS.extend(MONITOR_TOOLS)
+TOOLS.extend(ANALYTICS_TOOLS)
+TOOLS.extend(RESEARCH_TOOLS)
+TOOLS.extend(FACTOR_TOOLS)
+TOOLS.extend(SCREENER_TOOLS)
+TOOLS.extend(SUBAGENT_TOOLS)
+TOOLS.extend(EDGAR_TOOLS)
+TOOLS.extend(VALUATION_TOOLS)
+TOOLS.extend(OPTIONS_TOOLS)
+TOOLS.extend(DOCUMENT_TOOLS)
+TOOLS.extend(ALERT_TOOLS)
 
 
 # --- Capability gating -----------------------------------------------------
@@ -1320,7 +1327,7 @@ _GATED_TOOLS: dict[str, frozenset[str]] = {
 }
 
 
-def tool_name(t) -> str:
+def tool_name(t: Any) -> str:
     """A tool's bound name, whether it's a StructuredTool or a plain function."""
     return getattr(t, "name", None) or getattr(t, "__name__", "")
 
@@ -1339,7 +1346,7 @@ def capabilities() -> frozenset[str]:
     return frozenset(active)
 
 
-def active_tools(caps: frozenset[str] | None = None, pool: list | None = None) -> list:
+def active_tools(caps: frozenset[str] | None = None, pool: list[Any] | None = None) -> list[Any]:
     """``TOOLS`` minus the groups whose backing store is empty. ``caps`` lets a
     caller reuse an already-computed capability set (graph.py computes it once and
     passes it to both the toolset and the prompt); ``pool`` narrows the source list
@@ -1417,7 +1424,7 @@ def _is_readonly(name: str, extra_allow: frozenset[str] = frozenset()) -> bool:
     return name.startswith(_READ_PREFIXES)
 
 
-def filter_readonly(tools: list) -> list:
+def filter_readonly(tools: list[Any]) -> list[Any]:
     """Keep only read-only market-data tools from an MCP tool list, honoring any
     env-opted-in exceptions (``IBKR_ALLOW_AUTHENTICATE``)."""
     extra = _extra_allowed()
@@ -1444,14 +1451,14 @@ def _is_safe_extra(name: str) -> bool:
     return not name.startswith(_MUTATING_PREFIXES)
 
 
-def filter_safe(tools: list) -> list:
+def filter_safe(tools: list[Any]) -> list[Any]:
     """Keep only non-mutating tools from an extra MCP data server (denylist of
     write-verb prefixes) — permissive enough for noun-named data tools while still
     excluding anything that clearly changes state."""
     return [t for t in tools if _is_safe_extra(getattr(t, "name", ""))]
 
 
-def _extra_mcp_servers() -> dict:
+def _extra_mcp_servers() -> dict[str, Any]:
     """Additional MCP servers to mount alongside IBKR, parsed from
     ``EXTRA_MCP_SERVERS`` — a JSON object of ``{name: server_spec}`` in
     MultiServerMCPClient form, e.g.::
@@ -1489,7 +1496,7 @@ def _extra_mcp_servers() -> dict:
     }
 
 
-def _ibkr_server_config() -> dict | None:
+def _ibkr_server_config() -> dict[str, Any] | None:  # pyright: ignore[reportUnusedFunction] - used by brokers.py
     """Build a MultiServerMCPClient server spec from the environment, or None if
     no IBKR MCP endpoint is configured (agent then runs with local tools only).
 
@@ -1501,7 +1508,7 @@ def _ibkr_server_config() -> dict | None:
     url = os.environ.get("IBKR_MCP_URL")
     command = os.environ.get("IBKR_MCP_COMMAND")
     if url:
-        server: dict = {"url": url, "transport": "streamable_http"}
+        server: dict[str, Any] = {"url": url, "transport": "streamable_http"}
         token = os.environ.get("IBKR_MCP_TOKEN")
         if token:
             server["headers"] = {"Authorization": f"Bearer {token}"}
@@ -1549,12 +1556,12 @@ async def broker_tools_session():
     # Broker keys first (each carries its own read-only filter), then extra data
     # servers (write-verb denylist via filter_safe).
     filters = {key: filt for key, (_spec, filt) in brokers.items()}
-    servers = {
+    servers: dict[str, Any] = {
         **{key: spec for key, (spec, _filt) in brokers.items()},
         **extra,
     }
     client = MultiServerMCPClient(servers)
-    tools: list = []
+    tools: list[Any] = []
     async with contextlib.AsyncExitStack() as stack:
         for name in servers:
             session = await stack.enter_async_context(client.session(name))

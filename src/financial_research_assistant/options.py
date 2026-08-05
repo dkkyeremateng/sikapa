@@ -22,6 +22,7 @@ for v1.
 
 from __future__ import annotations
 
+from typing import Any
 import math
 from datetime import date
 
@@ -29,7 +30,7 @@ _CONTRACT_MULTIPLIER = 100  # US equity options: 1 contract = 100 shares
 
 
 # --- Small helpers (self-contained) ------------------------------------------
-def _num(v):
+def _num(v: Any) -> float | None:
     try:
         f = float(v)
     except (TypeError, ValueError):
@@ -37,12 +38,12 @@ def _num(v):
     return None if math.isnan(f) else f
 
 
-def _usd(v) -> str:
+def _usd(v: Any) -> str:
     n = _num(v)
     return f"${n:,.2f}" if n is not None else "n/a"
 
 
-def _pct(v) -> str:
+def _pct(v: Any) -> str:
     n = _num(v)
     return f"{n * 100:.1f}%" if n is not None else "n/a"
 
@@ -57,7 +58,7 @@ def _norm_type(option_type: str) -> str:
 
 
 # --- Pure math (no network; unit-tested) -------------------------------------
-def _mid(bid, ask, last):
+def _mid(bid: Any, ask: Any, last: Any) -> float | None:
     """Best single premium estimate: bid/ask midpoint when both quote, else last."""
     b, a, l = _num(bid), _num(ask), _num(last)
     if b and a and b > 0 and a > 0:
@@ -68,7 +69,7 @@ def _mid(bid, ask, last):
     return None
 
 
-def _moneyness(spot, strike, is_call) -> tuple[str, float | None]:
+def _moneyness(spot: Any, strike: Any, is_call: bool) -> tuple[str, float | None]:
     """(label, percent in/out of the money vs spot). ITM if the option has
     intrinsic value; OTM if not; ATM within 0.5% of spot."""
     s, k = _num(spot), _num(strike)
@@ -80,12 +81,12 @@ def _moneyness(spot, strike, is_call) -> tuple[str, float | None]:
     return ("in the money" if pct > 0 else "out of the money"), pct
 
 
-def _intrinsic(spot, strike, is_call) -> float:
+def _intrinsic(spot: Any, strike: Any, is_call: bool) -> float:
     s, k = _num(spot) or 0.0, _num(strike) or 0.0
     return max(0.0, s - k) if is_call else max(0.0, k - s)
 
 
-def _long_economics(is_call, spot, strike, premium) -> dict:
+def _long_economics(is_call: bool, spot: Any, strike: Any, premium: Any) -> dict[str, Any]:
     """Economics of BUYING one contract (per share and per contract)."""
     k, prem = _num(strike) or 0.0, _num(premium) or 0.0
     intrinsic = _intrinsic(spot, strike, is_call)
@@ -105,7 +106,7 @@ def _long_economics(is_call, spot, strike, premium) -> dict:
     }
 
 
-def _implied_move(spot, iv, dte_days):
+def _implied_move(spot: Any, iv: Any, dte_days: int | None) -> float | None:
     """One–standard-deviation dollar move implied by IV over the days to expiry."""
     s, v = _num(spot), _num(iv)
     if s is None or v is None or v <= 0 or dte_days is None or dte_days < 0:
@@ -138,7 +139,7 @@ def _fetch_expiries(symbol: str) -> list[str]:
         return []
 
 
-def _fetch_chain(symbol: str, expiry: str) -> dict:
+def _fetch_chain(symbol: str, expiry: str) -> dict[str, Any]:
     """Calls/puts for one expiry as ``{"calls": [...], "puts": [...]}`` of plain
     dicts (strike/lastPrice/bid/ask/impliedVolatility/volume/openInterest/
     inTheMoney/contractSymbol); ``{}`` on failure."""
@@ -149,7 +150,7 @@ def _fetch_chain(symbol: str, expiry: str) -> dict:
     cols = ["contractSymbol", "strike", "lastPrice", "bid", "ask",
             "impliedVolatility", "volume", "openInterest", "inTheMoney"]
 
-    def rows(df):
+    def rows(df: Any) -> list[dict[str, Any]]:
         if df is None or getattr(df, "empty", True):
             return []
         out = []
@@ -179,19 +180,20 @@ def _nearest_expiry(expiries: list[str], want: str) -> tuple[str, bool]:
     return min(expiries), True
 
 
-def _nearest_strike(rows: list[dict], target) -> dict | None:
+def _nearest_strike(rows: list[dict[str, Any]], target: Any) -> dict[str, Any] | None:
     """The chain row whose strike is closest to ``target`` (spot if no target)."""
-    valid = [r for r in rows if _num(r.get("strike")) is not None]
-    if not valid:
-        return None
+    # Keep the parsed strike alongside its row: re-deriving it in the key function
+    # parses twice and leaves the non-None guarantee implicit.
+    priced = [(s, r) for r in rows if (s := _num(r.get("strike"))) is not None]
     t = _num(target)
-    if t is None:
+    if not priced or t is None:
         return None
-    return min(valid, key=lambda r: abs(_num(r["strike"]) - t))
+    return min(priced, key=lambda pair: abs(pair[0] - t))[1]
 
 
 # --- Rendering ---------------------------------------------------------------
-def _chain_summary(sym, expiry, exact, rows, otype, spot, dte) -> str:
+def _chain_summary(sym: str, expiry: str, exact: bool, rows: list[dict[str, Any]],
+                   otype: str, spot: float | None, dte: int | None) -> str:
     """A near-the-money slice of one side's chain, when no strike was specified."""
     atm = _nearest_strike(rows, spot)
     order = sorted(rows, key=lambda r: _num(r.get("strike")) or 0.0)
@@ -218,7 +220,8 @@ def _chain_summary(sym, expiry, exact, rows, otype, spot, dte) -> str:
     return "\n".join(lines)
 
 
-def _contract_report(sym, expiry, exact, row, otype, spot, dte) -> str:
+def _contract_report(sym: str, expiry: str, exact: bool, row: dict[str, Any],
+                     otype: str, spot: float | None, dte: int | None) -> str:
     is_call = otype == "call"
     strike = _num(row.get("strike"))
     premium = _mid(row.get("bid"), row.get("ask"), row.get("lastPrice"))

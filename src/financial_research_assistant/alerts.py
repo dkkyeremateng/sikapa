@@ -31,6 +31,7 @@ the terminal buried.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
 import json
 import os
 import shutil
@@ -38,6 +39,9 @@ import sys
 from collections import deque
 from datetime import date
 from pathlib import Path
+
+if TYPE_CHECKING:  # type-only: `monitor` imports this module at runtime
+    from . import monitor
 
 # Alerts that fired since the last drain, so an interface can surface them
 # out-of-band the moment they trigger (the TUI raises a toast) instead of only
@@ -244,7 +248,7 @@ def _alerts_file() -> Path:
     return Path.home() / ".financial-research-assistant" / "alerts.json"
 
 
-def load_alerts() -> list[dict]:
+def load_alerts() -> list[dict[str, Any]]:
     p = _alerts_file()
     if not p.exists():
         return []
@@ -255,13 +259,13 @@ def load_alerts() -> list[dict]:
     return [r for r in data if isinstance(r, dict) and r.get("kind")] if isinstance(data, list) else []
 
 
-def save_alerts(rules: list[dict]) -> None:
+def save_alerts(rules: list[dict[str, Any]]) -> None:
     p = _alerts_file()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(rules, indent=2), encoding="utf-8")
 
 
-def _next_id(rules: list[dict]) -> str:
+def _next_id(rules: list[dict[str, Any]]) -> str:
     """A short stable id (``a1``, ``a2``, …), one past the current max."""
     n = 0
     for r in rules:
@@ -271,7 +275,7 @@ def _next_id(rules: list[dict]) -> str:
     return f"a{n + 1}"
 
 
-def _describe(r: dict) -> str:
+def _describe(r: dict[str, Any]) -> str:
     sym, kind, v = r.get("symbol", "*"), r.get("kind", ""), r.get("value", 0)
     who = "any holding" if sym in _ALL else sym
     return {
@@ -364,7 +368,8 @@ def remove_alert(alert_id: str) -> str:
 # --- Evaluation (called by the digest) ---------------------------------------
 
 def _check_rule(sym: str, kind: str, v: float, lookback_days: int, today: date,
-                fetch_daily, fetch_calendar) -> str | None:
+                fetch_daily: monitor.FetchDaily,
+                fetch_calendar: monitor.FetchCalendar) -> str | None:
     """Evaluate one rule against one symbol; return a trigger message or None."""
     if kind in ("drop", "rise", "move"):
         series = fetch_daily(sym, max(5, lookback_days))

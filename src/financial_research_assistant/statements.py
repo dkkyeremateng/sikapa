@@ -28,9 +28,11 @@ its rows instead of duplicating them — the operation is idempotent.
 
 from __future__ import annotations
 
+from typing import Any
 import csv
 import io
 import os
+import re
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -69,8 +71,7 @@ def _to_float(value: str | None) -> float:
 def _read_rows(source: str | Path) -> list[list[str]]:
     """Read the statement CSV (a path, or the CSV text itself) into rows."""
     if isinstance(source, Path) or (
-        isinstance(source, str) and "\n" not in source and len(source) < 4096
-        and Path(source).exists()
+        "\n" not in source and len(source) < 4096 and Path(source).exists()
     ):
         text = Path(source).read_text(encoding="utf-8-sig")
     else:
@@ -78,7 +79,7 @@ def _read_rows(source: str | Path) -> list[list[str]]:
     return list(csv.reader(io.StringIO(text)))
 
 
-def parse_statement(source: str | Path) -> dict:
+def parse_statement(source: str | Path) -> dict[str, Any]:
     """Parse an IBKR activity-statement CSV into structured transactions.
 
     ``source`` may be a filesystem path or the raw CSV text. Returns::
@@ -95,12 +96,12 @@ def parse_statement(source: str | Path) -> dict:
     """
     rows = _read_rows(source)
     headers: dict[str, list[str]] = {}  # section -> current column names
-    trades: list[dict] = []
-    cash: list[dict] = []
-    positions: list[dict] = []
-    instruments: list[dict] = []
-    nav: list[dict] = []
-    corporate_actions: list[dict] = []
+    trades: list[dict[str, Any]] = []
+    cash: list[dict[str, Any]] = []
+    positions: list[dict[str, Any]] = []
+    instruments: list[dict[str, Any]] = []
+    nav: list[dict[str, Any]] = []
+    corporate_actions: list[dict[str, Any]] = []
     accounts: list[str] = []  # distinct accounts seen, in first-seen order
     period = ""
     twrr = ""
@@ -251,7 +252,8 @@ def db_path() -> Path:
 
     Defaults to ``~/.<package-name>/statements.db``; override with
     ``FINANCIAL_RESEARCH_STATEMENTS_DB`` (tests point it at a temp file)."""
-    default = Path.home() / f".{__package__.replace('_', '-')}" / "statements.db"
+    pkg = (__package__ or "financial_research_assistant").replace("_", "-")
+    default = Path.home() / f".{pkg}" / "statements.db"
     return Path(os.environ.get("FINANCIAL_RESEARCH_STATEMENTS_DB") or default)
 
 
@@ -342,7 +344,7 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def store_statement(parsed: dict) -> dict:
+def store_statement(parsed: dict[str, Any]) -> dict[str, Any]:
     """Persist a parsed statement, replacing any prior import of the same
     ``(account, period)``. Returns a summary dict of what was stored."""
     account = parsed.get("account") or "UNKNOWN"
@@ -421,7 +423,7 @@ def store_statement(parsed: dict) -> dict:
 
     # Group cash sums by (kind, currency) — summing amounts across currencies
     # would produce a meaningless combined figure (e.g. USD + EUR dividends).
-    cash_by_kind: dict[str, dict] = {}
+    cash_by_kind: dict[str, dict[str, Any]] = {}
     for c in cash:
         agg = cash_by_kind.setdefault(c["kind"], {"count": 0, "amounts": {}})
         agg["count"] += 1
@@ -475,8 +477,7 @@ def _source_head(source: str | Path, n: int = 1024) -> tuple[str, str]:
     as the document text itself. ``suffix`` is the lowercased file extension when
     the source is a file, else ``""``."""
     if isinstance(source, Path) or (
-        isinstance(source, str) and "\n" not in source and len(source) < 4096
-        and Path(source).exists()
+        "\n" not in source and len(source) < 4096 and Path(source).exists()
     ):
         p = Path(source)
         return p.suffix.lower(), p.read_text(encoding="utf-8-sig", errors="replace")[:n]
@@ -494,7 +495,7 @@ def _detect_format(source: str | Path) -> str:
     return "ibkr_csv"
 
 
-def _ofx_num(value) -> float:
+def _ofx_num(value: Any) -> float:
     """OFX money/quantity fields arrive as ``Decimal`` (or ``None``); coerce to a
     plain float, treating missing as 0.0 — mirrors ``_to_float`` for the CSV path."""
     if value is None:
@@ -505,7 +506,7 @@ def _ofx_num(value) -> float:
         return 0.0
 
 
-def _bank_cash(trn, currency: str, account: str) -> dict:
+def _bank_cash(trn: Any, currency: str, account: str) -> dict[str, Any]:
     """Map an OFX ``STMTTRN`` (a cash movement — the payload of an INVBANKTRAN or
     a bank statement's banktranlist) to a normalized cash row: a fee for
     FEE/SRVCHG types, otherwise a deposit/withdrawal."""
@@ -522,7 +523,7 @@ def _bank_cash(trn, currency: str, account: str) -> dict:
     }
 
 
-def parse_ofx(source: str | Path) -> dict:
+def parse_ofx(source: str | Path) -> dict[str, Any]:
     """Parse an OFX/QFX statement into the normalized transaction dict (the same
     shape ``parse_statement`` returns), so a non-IBKR broker's export can be
     stored and queried identically.
@@ -533,7 +534,7 @@ def parse_ofx(source: str | Path) -> dict:
     degrades to its cash rows. Requires the optional ``ofxtools`` package.
     """
     try:
-        from ofxtools.Parser import OFXTree
+        from ofxtools.Parser import OFXTree  # pyright: ignore[reportMissingImports]  (optional extra)
     except ModuleNotFoundError as e:  # optional [ofx] extra not installed
         raise OfxSupportError(
             "OFX/QFX import needs the optional 'ofxtools' package. Install it "
@@ -551,8 +552,8 @@ def parse_ofx(source: str | Path) -> dict:
 
     # Security master first: resolve trades/positions (which reference a SECID,
     # usually a CUSIP) to a ticker, and record each as an instrument row.
-    instruments: list[dict] = []
-    sec_map: dict[str, dict] = {}
+    instruments: list[dict[str, Any]] = []
+    sec_map: dict[str, dict[str, Any]] = {}
     for sec in getattr(ofx, "securities", None) or []:
         info = getattr(sec, "secinfo", None)
         if info is None:
@@ -577,13 +578,13 @@ def parse_ofx(source: str | Path) -> dict:
             "code": "",
         })
 
-    def _symbol(secid) -> str:
+    def _symbol(secid: Any) -> str:
         uid = getattr(secid, "uniqueid", "") or ""
         return (sec_map.get(uid) or {}).get("symbol") or uid
 
-    trades: list[dict] = []
-    cash: list[dict] = []
-    positions: list[dict] = []
+    trades: list[dict[str, Any]] = []
+    cash: list[dict[str, Any]] = []
+    positions: list[dict[str, Any]] = []
     accounts: list[str] = []
     period = ""
 
@@ -714,7 +715,7 @@ _FORMAT_PARSERS = {
 }
 
 
-def import_statement(source: str | Path) -> dict:
+def import_statement(source: str | Path) -> dict[str, Any]:
     """Parse ``source`` (a path or the document text) and store it, auto-detecting
     the format: IBKR Activity Statement CSV or a cross-broker OFX/QFX file."""
     parser = _FORMAT_PARSERS[_detect_format(source)]
@@ -729,7 +730,7 @@ def _like_contains(term: str) -> str:
     return f"%{escaped}%"
 
 
-def _txn_recency(row: dict) -> tuple:
+def _txn_recency(row: dict[str, Any]) -> tuple[Any, ...]:
     """Sort key so a mixed trade/cash/corp-action list orders newest-first: newest
     import first, then latest row date (trades carry ``datetime``, cash ``date``,
     corporate actions ``report_date``) — all ISO/ISO-ish so string compare works."""
@@ -742,7 +743,7 @@ def query_transactions(
     symbol: str | None = None,
     limit: int = 100,
     account: str | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return stored transactions, newest first (by import, then row date).
 
     ``kind`` filters the record type: ``trade``, one of the cash kinds
@@ -759,7 +760,7 @@ def query_transactions(
     cap = max(1, limit)
     conn = _connect()
     try:
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         if kind in (None, "trade"):
             clauses, params = [], []
             if symbol:
@@ -834,7 +835,7 @@ def _resolve_account(conn: sqlite3.Connection, account: str | None) -> str | Non
     return row["account"] if row else None
 
 
-def query_positions(symbol: str | None = None, account: str | None = None) -> list[dict]:
+def query_positions(symbol: str | None = None, account: str | None = None) -> list[dict[str, Any]]:
     """Open positions from the newest import **for one account**, each enriched
     with the instrument's description and ISIN (``security_id``). ``symbol``
     optionally filters to one ticker; ``account`` picks which account (default:
@@ -858,7 +859,7 @@ def query_positions(symbol: str | None = None, account: str | None = None) -> li
             "ON i.import_id = p.import_id AND i.symbol = p.symbol "
             "WHERE p.import_id = ?"
         )
-        params: list = [import_id]
+        params: list[Any] = [import_id]
         if symbol:
             q += " AND UPPER(p.symbol) = ?"
             params.append(symbol.upper())
@@ -868,7 +869,7 @@ def query_positions(symbol: str | None = None, account: str | None = None) -> li
         conn.close()
 
 
-def query_nav(account: str | None = None) -> dict:
+def query_nav(account: str | None = None) -> dict[str, Any]:
     """Net Asset Value breakdown (per asset class) and the time-weighted return
     from the newest import for one account: ``{"twrr": str, "rows": [...]}``.
     ``account`` defaults to the newest import's account."""
@@ -910,7 +911,7 @@ def _period_bounds(period: str) -> tuple[str, str] | None:
     return start, end
 
 
-def query_nav_history(account: str | None = None) -> list[dict]:
+def query_nav_history(account: str | None = None) -> list[dict[str, Any]]:
     """Total account NAV over time for one account, stitched from the NAV
     snapshot in every imported statement. Each statement contributes two dated
     points — its period-start NAV (sum of the asset-class *prior* totals) and its
@@ -962,7 +963,7 @@ def _parse_pct(value: str) -> float | None:
         return None
 
 
-def _select_non_overlapping(periods: list[dict]) -> tuple[list[dict], list[dict]]:
+def _select_non_overlapping(periods: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Pick a non-overlapping subset of statement periods so their time-weighted
     returns can be chained without double-counting any span, and return
     ``(selected, dropped)``.
@@ -973,8 +974,8 @@ def _select_non_overlapping(periods: list[dict]) -> tuple[list[dict], list[dict]
     resolution) and the redundant annual is dropped. Two periods that merely abut
     (one ends the day before the next begins) do not overlap."""
     ordered = sorted(periods, key=lambda p: (p["end"], p["start"]))
-    selected: list[dict] = []
-    dropped: list[dict] = []
+    selected: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
     coverage_end: str | None = None  # ISO dates compare correctly as strings
     for p in ordered:
         if coverage_end is None or p["start"] >= coverage_end:
@@ -986,7 +987,7 @@ def _select_non_overlapping(periods: list[dict]) -> tuple[list[dict], list[dict]
     return selected, dropped
 
 
-def query_performance_history(account: str | None = None) -> dict:
+def query_performance_history(account: str | None = None) -> dict[str, Any]:
     """Deposit-independent performance index over time for one account.
 
     Raw NAV (``query_nav_history``) includes cash you deposited, so it can't tell
@@ -1021,7 +1022,7 @@ def query_performance_history(account: str | None = None) -> dict:
         ).fetchall()
     finally:
         conn.close()
-    periods: list[dict] = []
+    periods: list[dict[str, Any]] = []
     for r in rows:
         bounds = _period_bounds(r["period"] or "")
         pct = _parse_pct(r["twrr"] or "")
@@ -1037,7 +1038,7 @@ def query_performance_history(account: str | None = None) -> dict:
     # so the end of selected[k] is at point index k+1. A gap between selected[k]
     # and selected[k+1] therefore sits after point index k+1 — recorded as
     # ``after_point`` so a renderer can break the line exactly there.
-    gaps: list[dict] = []
+    gaps: list[dict[str, Any]] = []
     for k, (prev, nxt) in enumerate(zip(selected, selected[1:])):
         delta = (date.fromisoformat(nxt["start"]) - date.fromisoformat(prev["end"])).days
         if delta > 1:  # a day-adjacent boundary (Dec 31 → Jan 1) is not a gap
@@ -1074,7 +1075,7 @@ def _days_between(start_iso: str, end_iso: str) -> int:
 
 def _trade_split_events(
     symbol: str | None = None, account: str | None = None
-) -> list[tuple]:
+) -> list[tuple[Any, ...]]:
     """One chronological event stream of trades + share splits for the FIFO walk.
 
     Each event is ``(date, order, kind, payload)`` where ``order`` puts a split
@@ -1111,7 +1112,7 @@ def _trade_split_events(
     finally:
         conn.close()
 
-    events: list[tuple] = []
+    events: list[tuple[Any, ...]] = []
     for r in rows:
         events.append(((r["datetime"] or "")[:10], 1, "trade", r))
     for c in ca_rows:
@@ -1126,7 +1127,7 @@ def _trade_split_events(
 
 def open_lots(
     symbol: str | None = None, account: str | None = None
-) -> dict[str, list[dict]]:
+) -> dict[str, list[dict[str, Any]]]:
     """The FIFO-**open** lots remaining after matching every sell against buys —
     i.e. the shares you still hold and what they cost.
 
@@ -1138,7 +1139,7 @@ def open_lots(
     from collections import defaultdict, deque
 
     events = _trade_split_events(symbol, account)
-    lots: dict[str, deque] = defaultdict(deque)
+    lots: dict[str, deque[Any]] = defaultdict(deque)
     for _when, _order, kind, payload in events:
         if kind == "split":
             sym, factor = payload
@@ -1171,7 +1172,7 @@ def realized_gains(
     year: int | None = None,
     symbol: str | None = None,
     account: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Realized gains computed by **FIFO lot matching** over stored trades.
 
     Walks every trade chronologically, opening a lot on each buy and matching
@@ -1193,11 +1194,11 @@ def realized_gains(
     from collections import defaultdict, deque
 
     events = _trade_split_events(symbol, account)
-    lots: dict[str, deque] = defaultdict(deque)  # sym -> [ [qty, cost/sh, date], ...]
-    per: dict[str, dict] = defaultdict(
+    lots: dict[str, deque[Any]] = defaultdict(deque)  # sym -> [ [qty, cost/sh, date], ...]
+    per: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"realized": 0.0, "short_term": 0.0, "long_term": 0.0})
     unmatched = 0.0
-    for when, _order, kind, payload in events:
+    for _when, _order, kind, payload in events:
         if kind == "split":
             sym, factor = payload
             for lot in lots.get(sym, ()):  # more shares, proportionally lower cost/sh
@@ -1239,16 +1240,12 @@ def realized_gains(
     }
 
 
-_SYMBOL_RE = None  # lazily compiled below
+_SYMBOL_RE = re.compile(r"^([A-Za-z0-9.]+)\(")
 
 
 def _symbol_from_description(desc: str) -> str:
     """Pull the leading ticker from a cash-row description like
     ``"NVDA(US67066G1040) Cash Dividend …"`` → ``NVDA`` (``?`` if none)."""
-    global _SYMBOL_RE
-    if _SYMBOL_RE is None:
-        import re
-        _SYMBOL_RE = re.compile(r"^([A-Za-z0-9.]+)\(")
     m = _SYMBOL_RE.match(desc or "")
     return m.group(1).upper() if m else "?"
 
@@ -1257,7 +1254,6 @@ def _split_factor(description: str) -> float | None:
     """Parse a share-split factor from a corporate-action description like
     ``"… Split 3 for 1 (…)"`` → 3.0, or ``"… Split 1 for 10 …"`` (reverse) → 0.1.
     Returns None if the description isn't a recognizable split."""
-    import re
     m = re.search(r"Split\s+(\d+(?:\.\d+)?)\s+for\s+(\d+(?:\.\d+)?)", description or "",
                   re.IGNORECASE)
     if not m:
@@ -1266,7 +1262,7 @@ def _split_factor(description: str) -> float | None:
     return (num / den) if den else None
 
 
-def income_summary(year: int | None = None, account: str | None = None) -> dict:
+def income_summary(year: int | None = None, account: str | None = None) -> dict[str, Any]:
     """Cash-income summary from stored dividends, withholding tax, and fees,
     grouped **by currency** (never blended). Returns per-currency
     ``{gross_dividends, withholding_tax, fees, net}`` plus a per-symbol dividend
@@ -1289,7 +1285,7 @@ def income_summary(year: int | None = None, account: str | None = None) -> dict:
 
     field = {"dividend": "gross_dividends", "withholding_tax": "withholding_tax",
              "fee": "fees"}
-    by_ccy: dict[str, dict] = {}
+    by_ccy: dict[str, dict[str, Any]] = {}
     by_symbol: dict[str, float] = {}
     for r in rows:
         if year is not None and (r["date"] or "")[:4] != str(year):
@@ -1312,7 +1308,7 @@ def income_summary(year: int | None = None, account: str | None = None) -> dict:
     }
 
 
-def allocation(account: str | None = None, fx: dict | None = None) -> dict:
+def allocation(account: str | None = None, fx: dict[str, Any] | None = None) -> dict[str, Any]:
     """Portfolio allocation & concentration from the newest import's open
     positions (for one account). Returns positions ranked by market value with
     each one's weight %% of the book, total value, the top-5 concentration %%, the
@@ -1336,7 +1332,7 @@ def allocation(account: str | None = None, fx: dict | None = None) -> dict:
         return v * (rate if rate is not None else 1.0)
 
     total = sum(_base(p["value"], p.get("currency") or "") for p in positions)
-    ranked: list[dict] = []
+    ranked: list[dict[str, Any]] = []
     by_category: dict[str, float] = {}
     for p in positions:
         val = _base(p["value"], p.get("currency") or "")
@@ -1364,7 +1360,7 @@ def allocation(account: str | None = None, fx: dict | None = None) -> dict:
     }
 
 
-def list_imports() -> list[dict]:
+def list_imports() -> list[dict[str, Any]]:
     """Every stored import (account, period, counts), newest first."""
     if not db_path().exists():
         return []

@@ -47,7 +47,8 @@ import os
 import re
 from datetime import date
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing_extensions import override
+from typing import Any, Protocol, runtime_checkable
 
 _DEFAULT_DIR = Path.home() / ".agent-builder" / "memory"
 
@@ -183,17 +184,17 @@ class Memory(Protocol):
     def save(self, text: str, kind: str = "note") -> bool: ...
     def search(self, query: str, k: int = 3) -> list[str]: ...
     def forget(self, query: str) -> int: ...
-    def all(self, include_superseded: bool = False) -> list[dict]: ...
+    def all(self, include_superseded: bool = False) -> list[dict[str, Any]]: ...
     def remember(self, user_msg: str, answer: str = "") -> None: ...
     def recall(self, query: str, k: int = 3) -> list[str]: ...
     # Shared ranking primitive: rank a caller-supplied list of entries (already
     # filtered by kind) against a query, returning the top-k entries. Keyword for
     # LocalMemory, cosine for SemanticMemory — so every kind-scoped recall
     # (facts, lessons, feedback) gets the backend's retrieval, not just search().
-    def rank(self, query: str, entries: list[dict], k: int) -> list[dict]: ...
+    def rank(self, query: str, entries: list[dict[str, Any]], k: int) -> list[dict[str, Any]]: ...
 
 
-def _keyword_rank(query: str, entries: list[dict], k: int) -> list[dict]:
+def _keyword_rank(query: str, entries: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
     """Rank entries by query-term overlap (recency breaks ties), keeping only
     those with at least one shared term. The deterministic default retrieval."""
     q = _terms(query)
@@ -215,10 +216,10 @@ class LocalMemory:
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", user)
         self._file = Path(root) / f"{safe}.jsonl"
 
-    def _load(self) -> list[dict]:
+    def _load(self) -> list[dict[str, Any]]:
         if not self._file.exists():
             return []
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         for line in self._file.read_text().splitlines():
             line = line.strip()
             if not line:
@@ -236,11 +237,11 @@ class LocalMemory:
                 out.append(entry)
         return out
 
-    def _write(self, entries: list[dict]) -> None:
+    def _write(self, entries: list[dict[str, Any]]) -> None:
         self._file.parent.mkdir(parents=True, exist_ok=True)
         self._file.write_text("".join(json.dumps(e) + "\n" for e in entries))
 
-    def _is_dup(self, text: str, entries: list[dict]) -> bool:
+    def _is_dup(self, text: str, entries: list[dict[str, Any]]) -> bool:
         """True if ``text`` is an exact or near-duplicate (term Jaccard ≥ 0.85) of
         an existing entry."""
         nt, ntext = _terms(text), text.lower()
@@ -252,7 +253,7 @@ class LocalMemory:
                 return True
         return False
 
-    def _make_entry(self, text: str, kind: str) -> dict:
+    def _make_entry(self, text: str, kind: str) -> dict[str, Any]:
         """Build a stored entry. Subclasses override to attach extra fields (e.g.
         SemanticMemory adds an embedding)."""
         return {"text": text, "kind": kind or "note", "ts": date.today().isoformat()}
@@ -290,7 +291,7 @@ class LocalMemory:
         self._write(entries)
         return True
 
-    def rank(self, query: str, entries: list[dict], k: int) -> list[dict]:
+    def rank(self, query: str, entries: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
         """Keyword-overlap ranking (the deterministic default)."""
         return _keyword_rank(query, entries, k)
 
@@ -316,7 +317,7 @@ class LocalMemory:
             self._write(keep)
         return removed
 
-    def all(self, include_superseded: bool = False) -> list[dict]:
+    def all(self, include_superseded: bool = False) -> list[dict[str, Any]]:
         """Stored entries. By default returns only ACTIVE ones — so recall,
         `list_memories`, and the model never see archived stale values. Pass
         ``include_superseded=True`` for the full audit view (CLI/TUI inspection)."""
@@ -329,7 +330,7 @@ class LocalMemory:
     def recall(self, query: str, k: int = 3) -> list[str]:
         return self.search(query, k)
 
-    def remember(self, user_msg: str, answer: str = "") -> None:
+    def remember(self, user_msg: str, answer: str = "") -> None:  # pyright: ignore[reportUnusedParameter] - accepted for contract parity, see below
         """Auto-capture: store ``user_msg`` only if it's a durable statement
         (``answer`` is ignored — answers go stale and are the noise the naive
         store accumulated)."""
@@ -357,7 +358,8 @@ class SemanticMemory(LocalMemory):
     save and rank degrade gracefully to the keyword behavior, so nothing hard-fails
     and the store stays a superset of the local one."""
 
-    def _make_entry(self, text: str, kind: str) -> dict:
+    @override
+    def _make_entry(self, text: str, kind: str) -> dict[str, Any]:
         from . import embeddings
 
         entry = super()._make_entry(text, kind)
@@ -366,7 +368,8 @@ class SemanticMemory(LocalMemory):
             entry["vec"] = vec
         return entry
 
-    def rank(self, query: str, entries: list[dict], k: int) -> list[dict]:
+    @override
+    def rank(self, query: str, entries: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
         from . import embeddings
 
         qvec = embeddings.embed_query(query)
@@ -389,7 +392,7 @@ class _Mem0Adapter:
     """Thin adapter so mem0 satisfies the same contract. Best-effort for the
     curation methods, since mem0 manages extraction/dedup internally."""
 
-    def __init__(self, mem, user: str) -> None:
+    def __init__(self, mem: Any, user: str) -> None:
         self._mem = mem
         self._user = user
 
@@ -419,7 +422,7 @@ class _Mem0Adapter:
             pass  # mem0 API drift must not break the forget tool
         return removed
 
-    def all(self, include_superseded: bool = False) -> list[dict]:
+    def all(self, include_superseded: bool = False) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedParameter] - accepted for contract parity, see below
         # mem0 manages its own reconciliation, so it has no superseded tier — the
         # flag is accepted for contract parity and ignored.
         try:
@@ -432,7 +435,7 @@ class _Mem0Adapter:
     def recall(self, query: str, k: int = 3) -> list[str]:
         return self.search(query, k)
 
-    def rank(self, query: str, entries: list[dict], k: int) -> list[dict]:
+    def rank(self, query: str, entries: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
         # mem0 owns its own semantic index; for the kind-scoped recalls that pass
         # pre-filtered entries, fall back to keyword ranking over them.
         return _keyword_rank(query, entries, k)
@@ -463,7 +466,8 @@ def get_memory() -> Memory | None:
         return SemanticMemory(_local_root(), user)
     if backend == "mem0":
         try:
-            from mem0 import Memory as _Mem0  # type: ignore[import-not-found]  # optional dep
+            # Optional extra: not in `dependencies`, so the checker can't see it.
+            from mem0 import Memory as _Mem0  # pyright: ignore[reportMissingImports]
         except Exception:
             return None
         return _Mem0Adapter(_Mem0(), user)  # type: ignore[return-value]
@@ -572,7 +576,7 @@ def list_memories() -> str:
     return "\n".join(f"- [{e.get('kind', 'note')}] {e['text']}" for e in entries)
 
 
-def memory_tools() -> list:
+def memory_tools() -> list[Any]:
     """The memory tools to bind to the agent — empty when memory is disabled, so
     the model is never given tools that would silently no-op."""
     return [remember, recall, forget, list_memories] if get_memory() is not None else []

@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 # A loaded MCP tool exposes a ``.name``; a filter takes and returns a tool list.
-ToolFilter = Callable[[list], list]
+ToolFilter = Callable[[list[Any]], list[Any]]
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class BrokerProvider:
     """
 
     key: str
-    config_from_env: Callable[[], dict | None]
+    config_from_env: Callable[[], dict[str, Any] | None]
     filter_tools: ToolFilter
 
 
@@ -76,11 +76,11 @@ def active_broker_providers() -> list[BrokerProvider]:
     return [BROKER_REGISTRY[k] for k in keys if k in BROKER_REGISTRY]
 
 
-def configured_brokers() -> dict[str, tuple[dict, ToolFilter]]:
+def configured_brokers() -> dict[str, tuple[dict[str, Any], ToolFilter]]:
     """``{key: (server_spec, filter_fn)}`` for every active broker whose env
     resolves to a spec. Multiple brokers may mount at once; a broker with no env
     configured is simply absent."""
-    out: dict[str, tuple[dict, ToolFilter]] = {}
+    out: dict[str, tuple[dict[str, Any], ToolFilter]] = {}
     for p in active_broker_providers():
         spec = p.config_from_env()
         if spec is not None:
@@ -113,7 +113,7 @@ def make_readonly_filter(
             return True
         return name.startswith(read_prefixes)
 
-    def _filter(tools: list) -> list:
+    def _filter(tools: list[Any]) -> list[Any]:
         extra = extra_allow()
         return [t for t in tools if _is_readonly(getattr(t, "name", ""), extra)]
 
@@ -127,13 +127,13 @@ def make_readonly_filter(
 # object so a call-time ``monkeypatch.setattr(tools, ...)`` and the per-call
 # ``IBKR_ALLOW_AUTHENTICATE`` read in ``filter_readonly`` are both honored. Never
 # capture the function objects at import time.
-def _ibkr_config_from_env() -> dict | None:
+def _ibkr_config_from_env() -> dict[str, Any] | None:
     from . import tools
 
     return tools._ibkr_server_config()
 
 
-def _ibkr_filter(loaded: list) -> list:
+def _ibkr_filter(loaded: list[Any]) -> list[Any]:
     from . import tools
 
     return tools.filter_readonly(loaded)
