@@ -149,7 +149,13 @@ def _config_line(fake: bool, override: str | None = None) -> Text:
     if fake:
         endpoint, model = "offline", "scripted-fake"
     else:
-        endpoint = os.environ.get("OPENAI_API_BASE") or "https://api.openai.com/v1"
+        # From the same resolver the client is built with — a stored credential
+        # pins its own endpoint and outranks the environment, so reading
+        # OPENAI_API_BASE here would show api.openai.com while the request goes
+        # to Anthropic.
+        from .llm import endpoint as _endpoint
+
+        endpoint = _endpoint()
         model = _resolved_model(override)
     t = Text()
     t.append(" Endpoint: ", style="dim")
@@ -1213,11 +1219,9 @@ class AgentApp(App[Any]):
 
         # A stored credential can pin its own endpoint, and outranks the env — so
         # reporting OPENAI_API_BASE alone would show the wrong one after /login.
-        endpoint = "offline" if self.fake else (
-            auth.base_url()
-            or os.environ.get("OPENAI_API_BASE")
-            or "https://api.openai.com/v1"
-        )
+        from .llm import endpoint as _endpoint
+
+        endpoint = "offline" if self.fake else _endpoint()
         model, _ = _model_provider(self.fake, self.model_override)
         self._line("configuration:", "bold")
         self._line(f"  endpoint   {endpoint}", "dim")
@@ -1366,6 +1370,8 @@ class AgentApp(App[Any]):
     def _login_done(self, provider: str, scope: str) -> None:
         self._line(f"signed in to {provider} ({scope} tier)", "dim")
         self._line("takes effect on the next query; /config shows it", "dim")
+        self._refresh_config_line()
+        self._render_statusbar()
 
     def _logout(self, arg: str) -> None:
         """``/logout [tier]`` stops using a provider but keeps its credential, so
@@ -1377,6 +1383,8 @@ class AgentApp(App[Any]):
         if target in auth.providers():
             if auth.forget(target):
                 self._line(f"forgot the {target} credential", "dim")
+                self._refresh_config_line()
+                self._render_statusbar()
             return
         if target not in auth.SCOPES:
             self._line(
@@ -1386,6 +1394,8 @@ class AgentApp(App[Any]):
             return
         if auth.delete(target):
             self._line(f"signed out ({target} tier) — credential kept, /models switches back", "dim")
+            self._refresh_config_line()
+            self._render_statusbar()
         else:
             self._line(f"no credential in use for the {target} tier", "dim")
 
@@ -1485,11 +1495,18 @@ class AgentApp(App[Any]):
         else:
             self.model_override = model
             note = f"model set to {model}{switched} (applies to the next query)"
+        self._refresh_config_line()
+        self._render_statusbar()
+        self._line(note, "dim")
+
+    def _refresh_config_line(self) -> None:
+        """Redraw the header. Both fields it shows — endpoint and model — are
+        resolved from the credential store, so anything that changes which
+        credential is active (``/login``, ``/logout``, ``/models``) has to call
+        this or the header keeps describing the previous provider."""
         self.query_one("#config", Static).update(
             _config_line(self.fake, self.model_override)
         )
-        self._render_statusbar()
-        self._line(note, "dim")
 
     def _copy_last(self) -> None:
         if not self._last_answer:

@@ -157,6 +157,47 @@ def _credentials(
     return base_url, None
 
 
+# Where each LangChain integration sends requests when nothing pins an endpoint.
+# DISPLAY ONLY — the SDKs hold their own copies and are what actually route; this
+# exists so the header can name the endpoint a client would be built against
+# instead of asserting OpenAI's for every provider.
+_PROVIDER_ENDPOINT = {
+    "": "https://api.openai.com/v1",
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+    "google_genai": "https://generativelanguage.googleapis.com",
+    "groq": "https://api.groq.com",
+}
+
+
+def endpoint(scope: str = "default") -> str:
+    """The endpoint ``_make_llm`` would build ``scope``'s client against.
+
+    Resolved by the same rules as ``_credentials`` — credential first, then the
+    environment — because the header describing the client has to agree with the
+    client. Reading ``OPENAI_API_BASE`` on its own instead reports ``api.openai.com``
+    for an Anthropic key, i.e. the one endpoint the request definitely does not go
+    to. Side-effect free: no refresh, no proxy start, since this runs on render.
+
+    A provider that pins nothing falls back to its SDK's own default, named from
+    ``_PROVIDER_ENDPOINT`` (or described generically for an integration not listed
+    there — a guess would be worse than saying we don't know).
+    """
+    from . import auth
+
+    provider = (credential_provider(scope) or "openai").strip().lower()
+    if auth.resolve_key(scope):
+        # Only when a key is actually resolvable: a credential whose `$VAR` is
+        # unset contributes no key, and `_credentials` falls through to the env
+        # for both halves of the pair — so the endpoint must fall through too.
+        pinned = auth.base_url(scope)
+        if pinned:
+            return pinned
+    if provider in ("", "openai"):
+        return os.environ.get("OPENAI_API_BASE") or _PROVIDER_ENDPOINT["openai"]
+    return _PROVIDER_ENDPOINT.get(provider) or f"{provider} default"
+
+
 def _make_llm(
     model: str | None = None,
     *,

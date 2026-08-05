@@ -189,6 +189,75 @@ def test_stored_credential_applies_to_any_provider():
     assert _creds(provider="anthropic") == (None, "tok")
 
 
+# --- llm.endpoint: what the header reports -----------------------------------
+
+
+def _endpoint(scope="default"):
+    from financial_research_assistant import llm
+
+    return llm.endpoint(scope)
+
+
+def test_endpoint_reports_the_credentials_own_endpoint(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    auth.set_credential(
+        "default",
+        {"provider": "openrouter", "type": "api_key", "key": "k",
+         "base_url": "https://openrouter.ai/api/v1"},
+    )
+    assert _endpoint() == "https://openrouter.ai/api/v1"
+
+
+def test_endpoint_names_the_providers_own_default_when_nothing_is_pinned(monkeypatch):
+    """An Anthropic key pins no endpoint — the SDK's default is where the request
+    goes, so reporting OPENAI_API_BASE would name the one endpoint it does not."""
+    monkeypatch.setenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    auth.set_credential(
+        "default",
+        {"provider": "anthropic-key", "type": "api_key", "key": "sk-ant-x",
+         "model_provider": "anthropic", "models": [{"name": "claude-haiku-4-5-20251001"}]},
+    )
+    assert _endpoint() == "https://api.anthropic.com"
+
+
+def test_endpoint_falls_back_to_the_env_with_nothing_stored(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_BASE", "http://localhost:1234/v1")
+    assert _endpoint() == "http://localhost:1234/v1"
+    monkeypatch.delenv("OPENAI_API_BASE")
+    assert _endpoint() == "https://api.openai.com/v1"
+
+
+def test_endpoint_agrees_with_the_client_when_a_key_cannot_be_resolved(monkeypatch):
+    """A credential whose `$VAR` is unset supplies no key, so `_credentials` uses
+    the env for BOTH halves of the pair — the endpoint shown must follow."""
+    monkeypatch.delenv("MISSING_KEY_VAR", raising=False)
+    monkeypatch.setenv("OPENAI_API_BASE", "http://env/v1")
+    auth.set_credential(
+        "default",
+        {"provider": "openrouter", "type": "api_key", "key": "$MISSING_KEY_VAR",
+         "base_url": "https://openrouter.ai/api/v1"},
+    )
+    assert _creds()[0] == "http://env/v1"
+    assert _endpoint() == "http://env/v1"
+
+
+def test_endpoint_is_per_scope(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    auth.set_credential(
+        "default",
+        {"provider": "openrouter", "type": "api_key", "key": "k",
+         "base_url": "https://openrouter.ai/api/v1"},
+    )
+    auth.set_credential(
+        "quick",
+        {"provider": "local", "type": "api_key", "key": "q",
+         "base_url": "http://localhost:8080/v1"},
+    )
+    assert _endpoint() == "https://openrouter.ai/api/v1"
+    assert _endpoint("quick") == "http://localhost:8080/v1"
+    assert _endpoint("subagent") == "https://openrouter.ai/api/v1"  # inherits
+
+
 def test_scope_isolation_and_inheritance(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     auth.set_credential("default", {"type": "api_key", "key": "primary"})
