@@ -163,7 +163,7 @@ async def synthesize_report(
         return f"# Research report: {title}\n\nFAKE-OK synthesized from:\n{body}"
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from .graph import _make_llm
+    from .llm import _make_llm
 
     findings = "\n\n".join(f"## {label}\n{text}" for label, text in sections)
     lesson_block = ""

@@ -85,7 +85,7 @@ async def _critique_lessons(
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        from .graph import quick_llm
+        from .llm import quick_llm
 
         findings = "\n\n".join(f"## {label}\n{text}" for label, text in sections)
         # Self-critique is a cheap, high-volume, low-reasoning task (distilling a few

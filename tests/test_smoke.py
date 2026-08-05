@@ -112,14 +112,14 @@ async def test_once_mode_error_propagates_nonzero_return_code(monkeypatch, tmp_p
 
 
 def test_eval_llm_judge_uses_configured_model_no_bare_key(monkeypatch):
-    """Regression: the eval llm_judge scores via graph._make_llm (the app's
+    """Regression: the eval llm_judge scores via llm._make_llm (the app's
     configured model) rather than a bare OpenAI() client, so a local
     OPENAI_API_BASE / MODEL_PROVIDER setup works without OPENAI_API_KEY — and it
     parses the score out of a prose reply."""
     import importlib.util
     from pathlib import Path
 
-    import financial_research_assistant.graph as g
+    import financial_research_assistant.llm as g
 
     # Load eval/evaluate.py (not a package module) by path.
     eval_path = Path(__file__).resolve().parent.parent / "eval" / "evaluate.py"

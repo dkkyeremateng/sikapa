@@ -179,7 +179,7 @@ def test_quick_llm_tier_resolution(monkeypatch):
     """quick_llm uses QUICK_MODEL (+ QUICK_* endpoint overrides) when set — the
     cheap tier for summarization — and falls back to the passed/primary model when
     unset, so behavior is unchanged by default."""
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     captured = {}
 
@@ -189,12 +189,12 @@ def test_quick_llm_tier_resolution(monkeypatch):
         captured.update(kw)
         return object()
 
-    monkeypatch.setattr(graph, "_make_llm", fake_make_llm)
+    monkeypatch.setattr(llm, "_make_llm", fake_make_llm)
 
     # Unset: falls back to the passed model, no endpoint overrides.
     for v in ("QUICK_MODEL", "QUICK_API_BASE", "QUICK_API_KEY", "QUICK_MODEL_PROVIDER"):
         monkeypatch.delenv(v, raising=False)
-    graph.quick_llm("primary-model")
+    llm.quick_llm("primary-model")
     assert captured == {"model": "primary-model", "provider": None,
                         "base_url": None, "api_key": None, "scope": "quick"}
 
@@ -202,7 +202,7 @@ def test_quick_llm_tier_resolution(monkeypatch):
     monkeypatch.setenv("QUICK_MODEL", "cheap-mini")
     monkeypatch.setenv("QUICK_API_BASE", "http://localhost:11434/v1")
     monkeypatch.setenv("QUICK_MODEL_PROVIDER", "openai")
-    graph.quick_llm("primary-model")
+    llm.quick_llm("primary-model")
     assert captured["model"] == "cheap-mini"                 # quick tier wins
     assert captured["base_url"] == "http://localhost:11434/v1"
     assert captured["provider"] == "openai"
@@ -221,6 +221,8 @@ async def test_summarize_messages_uses_quick_tier(monkeypatch):
             seen["called"] = True
             return AIMessage(content="recap")
 
+    # Patch the name `graph` resolves, not `llm`'s: graph binds quick_llm at
+    # import, so patching the source module would not reach this call.
     monkeypatch.setattr(graph, "quick_llm", lambda model=None: seen.update(arg=model) or _FakeLLM())
     out = await graph.summarize_messages(
         [HumanMessage(content="hi"), AIMessage(content="hello")], model="primary"

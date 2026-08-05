@@ -125,9 +125,9 @@ reportCallInDefaultInitializer = "none"
 # the package share those helpers by design, and the test suite monkeypatches
 # them by that exact name (`tools._fetch_daily`, `tools._ibkr_server_config`).
 reportPrivateUsage = "none"
-# `tools.py` imports the feature modules at the bottom while each imports its
-# helpers back from `tools.py` inside a function body, so nothing is a cycle at
-# runtime. Untangling it means extracting the shared market-data helpers into
-# their own module and updating every test patch target — worth doing, but it is
-# a refactor, not a type fix.
-reportImportCycles = "none"
+# On, so a NEW accidental cycle is an error. The few that remain are each
+# deliberate and suppressed at the top of the file that starts the chain, with the
+# reason stated there: `__init__.py` (the `from . import x` idiom, which is an edge
+# to the package itself), `brokers.py` (the late-bound broker registry), and
+# `catalog.py` (a subagent's tool pool is by definition the catalog).
+reportImportCycles = "error"

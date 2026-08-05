@@ -1,3 +1,9 @@
+# pyright: reportImportCycles=false
+# brokers <-> tools is deliberate. The IBKR provider is registered through
+# late-bound wrappers that reach `tools` at CALL time precisely so
+# `monkeypatch.setattr(tools, "_ibkr_server_config", ...)` and the per-call
+# `IBKR_ALLOW_AUTHENTICATE` read keep working; binding them at import would defeat
+# both. See the registry comment below.
 """Pluggable broker-provider registry for live market-data MCP servers.
 
 The assistant loads a broker's read-only market-data tools from an MCP server per

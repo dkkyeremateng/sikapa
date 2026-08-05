@@ -1440,7 +1440,7 @@ class AgentApp(App[Any]):
     def _pick_model(self) -> None:
         """List every configured model, with where each came from, and mark the
         active one. Falls back to the free-text prompt for anything not listed."""
-        from .graph import active_lane_note, configured_models
+        from .llm import active_lane_note, configured_models
 
         cur, _ = _model_provider(self.fake, self.model_override)
         # The option id carries the provider alongside the model: a model is only

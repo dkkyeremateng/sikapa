@@ -11,7 +11,7 @@ import asyncio
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from financial_research_assistant import subagents, tools
+from financial_research_assistant import catalog, llm, subagents, tools
 
 
 # --- pure helpers ----------------------------------------------------------
@@ -175,7 +175,7 @@ def test_build_subagent_passes_env_model_to_llm(monkeypatch):
     def fake_create_agent(model, tools, system_prompt, checkpointer):
         return "AGENT"
 
-    monkeypatch.setattr("financial_research_assistant.graph._make_llm", fake_make_llm)
+    monkeypatch.setattr("financial_research_assistant.llm._make_llm", fake_make_llm)
     monkeypatch.setattr("langchain.agents.create_agent", fake_create_agent)
 
     monkeypatch.setenv("SUBAGENT_MODEL", "env-model")
@@ -213,7 +213,7 @@ def test_subagent_openai_compatible_overrides(monkeypatch):
         captured.update(kw)
         return object()
 
-    monkeypatch.setattr("financial_research_assistant.graph._make_llm", fake_make_llm)
+    monkeypatch.setattr("financial_research_assistant.llm._make_llm", fake_make_llm)
     monkeypatch.setattr("langchain.agents.create_agent",
                         lambda **kw: "AGENT")
     monkeypatch.setenv("SUBAGENT_MODEL", "qwen2.5-7b-instruct")
@@ -239,7 +239,7 @@ def test_make_llm_openai_compatible_override_reaches_chatopenai(monkeypatch):
     )
     monkeypatch.setenv("MODEL_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_BASE", "http://primary/v1")
-    graph._make_llm("m", base_url="http://sub/v1", api_key="sub-key")
+    llm._make_llm("m", base_url="http://sub/v1", api_key="sub-key")
     assert seen["base_url"] == "http://sub/v1"  # override wins over OPENAI_API_BASE
     assert seen["model"] == "m"
 
@@ -256,7 +256,7 @@ def test_make_llm_overrides_reach_non_openai_provider(monkeypatch):
         return object()
 
     monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init)
-    graph._make_llm(
+    llm._make_llm(
         "claude-sonnet-5",
         provider="anthropic",
         base_url="http://gateway/v1",
@@ -281,7 +281,7 @@ def test_make_llm_non_openai_without_overrides_is_unchanged(monkeypatch):
     )
     monkeypatch.setenv("MODEL_PROVIDER", "anthropic")
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    graph._make_llm()
+    llm._make_llm()
     assert seen == {"model": "claude-sonnet-5", "model_provider": "anthropic"}
 
 
@@ -299,7 +299,7 @@ def test_make_llm_non_openai_falls_back_when_kwargs_rejected(monkeypatch):
         return "LLM"
 
     monkeypatch.setattr("langchain.chat_models.init_chat_model", picky_init)
-    assert graph._make_llm("m", provider="groq", base_url="http://x/v1") == "LLM"
+    assert llm._make_llm("m", provider="groq", base_url="http://x/v1") == "LLM"
     assert len(calls) == 2 and "base_url" not in calls[1]
 
 
@@ -307,5 +307,5 @@ def test_dispatch_tools_registered_with_async_impl():
     by_name = {t.name: t for t in subagents.SUBAGENT_TOOLS}
     assert set(by_name) == {"dispatch_subagent", "dispatch_subagents"}
     assert all(t.coroutine is not None for t in by_name.values())
-    names = {getattr(t, "name", None) or getattr(t, "__name__", "") for t in tools.TOOLS}
+    names = {getattr(t, "name", None) or getattr(t, "__name__", "") for t in catalog.TOOLS}
     assert {"dispatch_subagent", "dispatch_subagents"} <= names

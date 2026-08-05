@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from financial_research_assistant import auth, codex_proxy
+from financial_research_assistant import auth, codex_proxy, llm
 from financial_research_assistant.codex_proxy import (
     ResponseStreamTranslator,
     to_completion,
@@ -320,7 +320,7 @@ def test_make_llm_routes_codex_through_the_proxy(monkeypatch):
     seen = {}
     monkeypatch.setattr("langchain_openai.ChatOpenAI", lambda **kw: seen.update(kw))
     try:
-        graph._make_llm("gpt-5.5-codex")
+        llm._make_llm("gpt-5.5-codex")
         assert seen["base_url"].startswith("http://127.0.0.1:")
         assert seen["api_key"].get_secret_value() == "tok"
     finally:

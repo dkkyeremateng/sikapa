@@ -6,7 +6,7 @@ lookup, the recent-filings list, XBRL financials, and full-text search are all
 exercised without a network call. The module-level ticker→CIK cache is cleared
 per test so the fake map is re-read."""
 
-from financial_research_assistant import edgar, tools
+from financial_research_assistant import catalog, edgar, tools
 
 
 def _router(payloads):
@@ -487,7 +487,7 @@ def test_passages_semantic_optin(monkeypatch):
 
 
 def test_edgar_tools_registered():
-    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in tools.TOOLS}
+    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in catalog.TOOLS}
     assert {"sec_filings", "sec_material_events", "sec_financials",
             "sec_filing_search", "sec_filing_excerpt", "filing_summary",
             "compare_sec_financials", "filing_tone_trend", "sec_metric_rank"} <= names

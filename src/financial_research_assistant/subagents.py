@@ -274,23 +274,23 @@ def _subagent_tools(task: str = "") -> list[Any]:
     """The local research tools a subagent gets: ``tools.TOOLS`` minus the dispatch
     tools (the hard recursion guard), minus groups whose backing store is empty
     (``active_tools``), minus groups this ``task`` doesn't implicate. Imported
-    lazily so this module stays import-cycle-free (``tools`` imports
-    ``SUBAGENT_TOOLS`` at load)."""
-    from . import tools as tools_mod
+    lazily because ``catalog`` imports THIS module for ``SUBAGENT_TOOLS``; at call
+    time the module is fully loaded, so the deferral costs nothing."""
+    from . import catalog
 
     pool = [
-        t for t in tools_mod.TOOLS
-        if tools_mod.tool_name(t) not in _DISPATCH_NAMES
+        t for t in catalog.TOOLS
+        if catalog.tool_name(t) not in _DISPATCH_NAMES
     ]
     # Same capability gate the primary agent uses: never hand a subagent a
     # statements/documents/alerts tool whose store holds nothing.
-    pool = tools_mod.active_tools(pool=pool)
+    pool = catalog.active_tools(pool=pool)
     if _all_tools_override():
         return pool
     keep = _selected_names(task)
     if keep is None:
         return pool
-    return [t for t in pool if tools_mod.tool_name(t) in keep]
+    return [t for t in pool if catalog.tool_name(t) in keep]
 
 
 def _build_subagent(model: str | None = None, task: str = ""):
@@ -301,7 +301,7 @@ def _build_subagent(model: str | None = None, task: str = ""):
     from langchain.agents import create_agent
     from langgraph.checkpoint.memory import MemorySaver
 
-    from .graph import _make_llm
+    from .llm import _make_llm
 
     return create_agent(
         model=_make_llm(

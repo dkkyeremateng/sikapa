@@ -13,7 +13,7 @@ import urllib.request
 
 import pytest
 
-from financial_research_assistant import auth, oauth
+from financial_research_assistant import auth, llm, oauth
 
 
 @pytest.fixture(autouse=True)
@@ -511,9 +511,9 @@ def test_first_configured_model_is_the_default():
     ))
     assert auth.models() == ["claude-opus-5", "claude-sonnet-5"]
     assert auth.routing()[1] == "claude-opus-5"
-    assert graph.resolved_model() == "claude-opus-5"
+    assert llm.resolved_model() == "claude-opus-5"
     # and every configured model is offered, all bound to that provider
-    offered = {m: p for m, _label, p in graph.configured_models()}
+    offered = {m: p for m, _label, p in llm.configured_models()}
     assert offered["claude-opus-5"] == "anthropic-key"
     assert offered["claude-sonnet-5"] == "anthropic-key"
 
@@ -611,7 +611,7 @@ def test_stored_key_does_not_take_the_oauth_bearer_path(monkeypatch):
         "langchain.chat_models.init_chat_model",
         lambda model, **kw: seen.update(kw, model=model) or object(),
     )
-    graph._make_llm()
+    llm._make_llm()
     assert seen["model"] == "claude-sonnet-5"
     assert seen["model_provider"] == "anthropic"
     assert seen["api_key"] == "sk-ant-api-xyz"   # goes out as x-api-key, correctly
@@ -627,7 +627,7 @@ def test_storing_a_plain_openai_key_keeps_a_configured_gateway(monkeypatch):
     oauth.login("openai-key", oauth.LoginCallbacks(
         on_secret=lambda _q: "sk-openai", on_prompt=lambda _q: ""
     ))
-    assert graph._credentials("default", "openai", None, None) == (
+    assert llm._credentials("default", "openai", None, None) == (
         "https://gateway.example/v1", "sk-openai",
     )
 
@@ -856,7 +856,7 @@ def test_make_llm_refreshes_before_building(monkeypatch, refreshable):
     auth.set_credential("default", _expiring(-1))
     seen = {}
     monkeypatch.setattr("langchain_openai.ChatOpenAI", lambda **kw: seen.update(kw))
-    graph._make_llm("m")
+    llm._make_llm("m")
     assert refreshable.calls == 1
     assert seen["api_key"].get_secret_value() == "new"
 
@@ -945,6 +945,6 @@ def test_login_reaches_make_llm(monkeypatch):
 
     seen = {}
     monkeypatch.setattr("langchain_openai.ChatOpenAI", lambda **kw: seen.update(kw))
-    graph._make_llm("some-model")
+    llm._make_llm("some-model")
     assert seen["base_url"] == "https://openrouter.ai/api/v1"
     assert seen["api_key"].get_secret_value() == "sk-or"

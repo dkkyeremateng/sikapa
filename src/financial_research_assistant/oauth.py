@@ -616,7 +616,7 @@ def _model_config_for(name: str) -> dict[str, Any]:
     instead of something you have to know to add. Zero is read back as "not set"
     when billing — see ``pricing.rates`` for why that beats reporting $0.00.
     """
-    from .pricing import known_context, table_cache_rates, table_rates
+    from .pricetables import known_context, table_cache_rates, table_rates
 
     rates = table_rates(name)
     if not rates:
@@ -670,7 +670,7 @@ def suggested_window(models: list[str], declared: int | None) -> int | None:
     serve models with different windows. A provider constant is the fallback for a
     vendor the table has never heard of.
     """
-    from .pricing import known_context
+    from .pricetables import known_context
 
     for model in models:
         known = known_context(model)

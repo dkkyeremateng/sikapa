@@ -252,7 +252,7 @@ def _resolved_model(model: str | None) -> str:
     actually builds — so a non-OpenAI provider's default is reflected, not a
     hardcoded gpt-4.1-mini. Delegates to graph.resolved_model, which the context
     middleware's trigger threshold also uses."""
-    from .graph import resolved_model
+    from .llm import resolved_model
 
     return resolved_model(model)
 

@@ -7,7 +7,7 @@ import stat
 
 import pytest
 
-from financial_research_assistant import auth
+from financial_research_assistant import auth, llm
 
 
 @pytest.fixture(autouse=True)
@@ -133,13 +133,13 @@ def test_base_url_travels_with_the_credential():
     assert auth.base_url("quick") is None  # its own credential pins no endpoint
 
 
-# --- graph._credentials: precedence ------------------------------------------
+# --- llm._credentials: precedence ------------------------------------------
 
 
 def _creds(scope="default", provider="openai", base_url=None, api_key=None):
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
-    return graph._credentials(scope, provider, base_url, api_key)
+    return llm._credentials(scope, provider, base_url, api_key)
 
 
 def test_explicit_argument_wins_over_everything(monkeypatch):
@@ -211,16 +211,16 @@ def test_login_switches_provider_and_model(monkeypatch):
     """Regression: /login stored a token but left MODEL_PROVIDER/OPENAI_MODEL in
     charge, so a Claude token was built into a ChatOpenAI aimed at
     api.anthropic.com — which has no /v1/chat/completions and failed opaquely."""
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     monkeypatch.setenv("MODEL_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_MODEL", "gateframe_ionix/dspark")
     monkeypatch.setenv("OPENAI_API_BASE", "https://gateway.example/v1")
     auth.set_credential("default", ANTHROPIC_CRED)
 
-    assert graph.credential_provider() == "anthropic"
-    assert graph.credential_model() == "claude-sonnet-4-5"
-    assert graph.resolved_model() == "claude-sonnet-4-5"
+    assert llm.credential_provider() == "anthropic"
+    assert llm.credential_model() == "claude-sonnet-4-5"
+    assert llm.resolved_model() == "claude-sonnet-4-5"
 
 
 LEGACY_ANTHROPIC_CRED = {
@@ -235,26 +235,26 @@ def test_credential_without_routing_fields_still_routes(monkeypatch):
     """Regression: a credential stored before the routing fields existed was
     invisible — absent from /models, and ignored when building the client. The
     provider registry supplies the defaults, so no re-login is needed."""
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     monkeypatch.setenv("MODEL_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_MODEL", "gateframe_ionix/dspark")
     auth.set_credential("default", LEGACY_ANTHROPIC_CRED)
 
     assert auth.routing() == ("anthropic", "claude-haiku-4-5-20251001")
-    assert graph.credential_provider() == "anthropic"
-    assert graph.resolved_model() == "claude-haiku-4-5-20251001"
+    assert llm.credential_provider() == "anthropic"
+    assert llm.resolved_model() == "claude-haiku-4-5-20251001"
 
-    models = {m: (label, provider) for m, label, provider in graph.configured_models()}
+    models = {m: (label, provider) for m, label, provider in llm.configured_models()}
     assert models["claude-haiku-4-5-20251001"] == ("active · anthropic", "anthropic")
     # and the provider default row follows the credential, not the env
     assert "claude-sonnet-5" in models
 
 
 def _offered():
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
-    return {model: (label, provider) for model, label, provider in graph.configured_models()}
+    return {model: (label, provider) for model, label, provider in llm.configured_models()}
 
 
 def test_every_configured_provider_is_offered(monkeypatch):
@@ -286,14 +286,14 @@ def test_model_entry_carries_the_provider_that_serves_it(monkeypatch):
 
 
 def test_env_models_are_offered_when_nothing_is_signed_in(monkeypatch):
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     monkeypatch.setenv("OPENAI_MODEL", "gateframe_ionix/dspark")
     monkeypatch.setenv("QUICK_MODEL", "cheap-mini")
     offered = _offered()
     assert offered["gateframe_ionix/dspark"] == ("OPENAI_MODEL", "")
     assert "cheap-mini" in offered
-    assert graph.active_lane_note() == ""
+    assert llm.active_lane_note() == ""
 
 
 def test_quick_tier_on_another_lane_is_excluded(monkeypatch):
@@ -373,20 +373,20 @@ def test_routing_of_an_unknown_provider_is_empty():
 
 
 def test_env_still_wins_when_nothing_is_stored(monkeypatch):
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     monkeypatch.setenv("MODEL_PROVIDER", "groq")
     monkeypatch.setenv("OPENAI_MODEL", "env-model")
-    assert graph.credential_provider() == "groq"
-    assert graph.credential_model() == "env-model"
+    assert llm.credential_provider() == "groq"
+    assert llm.credential_model() == "env-model"
 
 
 def test_explicit_model_override_beats_the_credential():
     """/model NAME is the user choosing live, so it outranks everything."""
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     auth.set_credential("default", ANTHROPIC_CRED)
-    assert graph.resolved_model("some-other-model") == "some-other-model"
+    assert llm.resolved_model("some-other-model") == "some-other-model"
 
 
 @pytest.mark.skipif(
@@ -403,23 +403,23 @@ def test_anthropic_oauth_sends_bearer_and_no_x_api_key(monkeypatch):
     """
     from anthropic._base_client import FinalRequestOptions
 
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-a-real-key-from-env")
     auth.set_credential("default", ANTHROPIC_CRED)
 
-    llm = graph._make_llm()
-    request = llm._client._build_request(
+    chat = llm._make_llm()
+    request = chat._client._build_request(
         FinalRequestOptions(method="post", url="/v1/messages")
     )
     assert request.headers.get("authorization") == "Bearer " + ANTHROPIC_CRED["access"]
     assert request.headers.get("x-api-key") is None
     assert request.headers.get("anthropic-beta") == "oauth-2025-04-20"
-    assert llm.model == "claude-sonnet-4-5"
+    assert chat.model == "claude-sonnet-4-5"
 
 
 def test_api_key_credential_gets_no_oauth_headers(monkeypatch):
-    from financial_research_assistant import graph
+    from financial_research_assistant import llm
 
     auth.set_credential(
         "default",
@@ -430,7 +430,7 @@ def test_api_key_credential_gets_no_oauth_headers(monkeypatch):
         "langchain.chat_models.init_chat_model",
         lambda model, **kw: seen.update(kw, model=model) or object(),
     )
-    graph._make_llm()
+    llm._make_llm()
     assert "default_headers" not in seen
     assert seen["api_key"] == "k"
 

@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from financial_research_assistant import documents, tools
+from financial_research_assistant import catalog, documents, tools
 
 
 @pytest.fixture(autouse=True)
@@ -169,6 +169,6 @@ def test_ingest_missing_file():
 
 # --- registration ------------------------------------------------------------
 def test_document_tools_registered():
-    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in tools.TOOLS}
+    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in catalog.TOOLS}
     for n in ("ingest_document", "ask_document", "list_documents", "forget_document"):
         assert n in names
