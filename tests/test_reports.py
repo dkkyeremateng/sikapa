@@ -118,14 +118,14 @@ def test_the_tool_reports_where_the_file_went(monkeypatch, tmp_path):
         "html": str(tmp_path / "r.html"), "png": str(tmp_path / "r.png"),
     })
     monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="", full_quality=False: (["telegram"], []))
-    out = reports.render_report("FISV Q2", "body text", deliver=True)
+    out = reports.render_report("FISV Q2", "body text", deliver=True, allow_prose=True)
     assert "Sent to: telegram" in out and "PNG" in out
 
 
 def test_the_tool_says_so_when_nothing_can_receive_a_file(monkeypatch, tmp_path):
     monkeypatch.setattr(reports, "render", lambda html, name, content=None: {"png": str(tmp_path / "r.png")})
     monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="", full_quality=False: ([], []))
-    assert "No channel accepted a file" in reports.render_report("t", "b")
+    assert "No channel accepted a file" in reports.render_report("t", "b", allow_prose=True)
 
 
 def test_with_no_renderer_at_all_the_html_still_survives(monkeypatch, tmp_path):
@@ -139,7 +139,7 @@ def test_with_no_renderer_at_all_the_html_still_survives(monkeypatch, tmp_path):
     assert set(paths) == {"html"}
 
     monkeypatch.setattr(reports, "render", lambda html, name, content=None: paths)
-    out = reports.render_report("t", "b", deliver=False)
+    out = reports.render_report("t", "b", deliver=False, allow_prose=True)
     assert "Could not produce a PDF" in out
 
 
@@ -213,7 +213,7 @@ def test_the_sheet_is_sent_uncompressed(monkeypatch, tmp_path):
         lambda p, caption="", prefer="", full_quality=False: (
             seen.append(full_quality), (["telegram"], []))[1],
     )
-    reports.render_report("t", "b")
+    reports.render_report("t", "b", allow_prose=True)
     assert seen == [True]
 
 
@@ -731,3 +731,74 @@ def test_inline_breakdowns_never_displace_a_real_list():
     series = reports.extract_series(md)
     assert series[0]["title"] == "Sectors"
     assert [s["title"] for s in series][1:] == ["Split"]
+
+
+# --- refusing a chartless body ---------------------------------------------------
+
+
+def test_a_body_with_nothing_chartable_is_refused_with_instructions(monkeypatch):
+    """Shipping a cover of tiles and text is how a narrative report happens by
+    accident. The refusal turns it into a decision."""
+    called = []
+    monkeypatch.setattr(reports, "render", lambda *a, **k: called.append(1) or {})
+    out = reports.render_report(
+        "Digest", "## Overview\n\nThe market will scrutinise revenue trends.",
+        highlights="EPS | $0.37 | Aug 13",
+    )
+    assert out.startswith("NOT RENDERED")
+    assert "allow_prose=True" in out, "the escape hatch must be offered"
+    assert "28.4%" in out and "|" in out, "it must show the shapes that work"
+    assert not called, "nothing should be rendered or delivered"
+
+
+def test_allow_prose_renders_a_genuinely_narrative_report(monkeypatch, tmp_path):
+    monkeypatch.setattr(reports, "render", lambda *a, **k: {"pdf": str(tmp_path / "r.pdf")})
+    monkeypatch.setattr(reports, "page_count", lambda p: 1)
+    out = reports.render_report("Digest", "Just prose.", deliver=False, allow_prose=True)
+    assert out.startswith("Rendered")
+
+
+def test_a_chartable_body_is_never_refused(monkeypatch, tmp_path):
+    monkeypatch.setattr(reports, "render", lambda *a, **k: {"pdf": str(tmp_path / "r.pdf")})
+    monkeypatch.setattr(reports, "page_count", lambda p: 1)
+    md = "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n"
+    assert reports.render_report("t", md, deliver=False).startswith("Rendered")
+
+
+def test_the_prompt_tells_the_model_about_the_refusal():
+    from financial_research_assistant.graph import SYSTEM_PROMPT
+
+    assert "allow_prose=True" in SYSTEM_PROMPT
+
+
+def test_unrelated_metrics_under_one_heading_are_not_a_series():
+    """From a live run: a bear-case list charted a drawdown, a geographic share and
+    a volatility figure on one axis. They are all percentages and they measure
+    entirely different things — one axis means comparable values."""
+    md = ("## Bear case\n\n"
+          "- Stock down 9.1% from the recent high\n"
+          "- Max drawdown -43.7% over the past year\n"
+          "- Geographic split (65% North America, 35% Europe) exposes FX risk\n"
+          "- High volatility (29.3%) means a wide outcome distribution\n")
+    titles = [s["title"] for s in reports.extract_series(md)]
+    assert "Bear case" not in titles, "prose bullets are not a comparable series"
+
+
+def test_one_over_long_label_disqualifies_the_run():
+    """If a label has to be cut to fit an axis it was never a category. A majority
+    rule let a half-prose run through."""
+    md = ("## S\n\n- **Healthcare:** 28.4%\n- **Technology:** 21.6%\n"
+          "- High volatility of 29.3% means a much wider outcome distribution\n")
+    assert reports.extract_series(md) == []
+
+
+def test_a_split_written_number_first_is_still_read():
+    md = "## Drivers\n\n- Geographic split (65% North America, 35% Europe)\n"
+    series = reports.extract_series(md)
+    assert series[0]["items"] == [("North America", 65.0), ("Europe", 35.0)]
+
+
+def test_a_percentage_followed_by_prose_yields_no_pair():
+    """`29.3%) means a wide outcome` must not produce a label of 'means a wide'."""
+    md = "## D\n\n- High volatility (29.3%) means a wide outcome distribution\n"
+    assert reports.extract_series(md) == []
