@@ -12,7 +12,7 @@ offline deterministic fake mode, and a generic eval harness.
 > A self-playing terminal walkthrough of seven features — company comparison, DCF
 > valuation, cited SEC-filing answers, the options explainer, document Q&A,
 > parallel subagents, and background work delivered to your phone — plus a map of
-> all 60 tools. Source: [`demo.html`](demo.html)
+> all 61 tools. Source: [`demo.html`](demo.html)
 > (open it locally in any browser). See also the full [`Tools.md`](Tools.md) reference.
 
 > **The broker is pluggable — two registry-driven seams.** A different broker's
@@ -346,6 +346,7 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── tasks.py       # scheduled-task store + schedule_task/list/cancel (work to run later)
 │   ├── scheduler.py   # the runner: --run-due (cron) / --watch (loop) + Telegram inbox
 │   ├── channels.py    # pluggable delivery-channel registry (telegram/desktop/stdout)
+│   ├── reports.py     # render_report: markdown -> typeset PNG/PDF sheet (headless Chrome)
 │   ├── telegram.py    # Bot API client — outbound delivery + allowlisted inbound
 │   ├── flex.py        # IBKR Flex Web Service pull (--flex-sync); XML parser is a seam
 │   ├── statements.py  # IBKR CSV + OFX/QFX parsers, format dispatch, SQLite store
@@ -740,6 +741,27 @@ The check is deliberately shallow (opening lines, short replies only): judging
 quality properly would mean a second model call per task. A retry that is still
 pending isn't pushed to you; only the final verdict is, so one broken task costs
 one notification rather than three.
+
+### Reports as files, not walls of text
+
+`render_report(title, markdown, highlights)` typesets a summary as a **PNG + PDF
+sheet** — headline, stat tiles, body — and sends it through the same channels. On
+Telegram the image previews inline and the PDF arrives as a document, which is the
+difference between a scheduled analysis being read on a phone and being scrolled
+past. Ask for *"a PDF"*, *"an infographic"*, or *"send me a one-pager"*, or let a
+scheduled task produce one.
+
+`highlights` is the stat-tile row, one per line as `label | value | note` (max 6).
+The body is ordinary markdown: headings, tables, and `>` for a warning callout.
+Files land in `~/.financial-research-assistant/reports`.
+
+Rendering uses **headless Chrome or Chromium**, auto-detected on the usual macOS
+and Linux paths (override with `FINANCIAL_RESEARCH_CHROME`). It is the one layout
+engine already on most machines, and it produces a raster preview and a
+print-quality vector PDF from one source. Without a browser the HTML is still
+written and its path returned — a finished analysis is never lost to a rendering
+problem. Channels declare file support explicitly (`Channel.send_file`), so a
+desktop-banner channel is skipped rather than being handed a PDF it can't show.
 
 ### Replying from your phone (opt-in)
 

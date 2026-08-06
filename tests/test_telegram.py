@@ -167,3 +167,58 @@ def test_an_api_rejection_surfaces_the_reason(monkeypatch):
     monkeypatch.setattr(telegram.urllib.request, "urlopen", lambda *a, **k: FakeResp())
     with pytest.raises(RuntimeError, match="chat not found"):
         telegram._call("sendMessage", {"chat_id": "1", "text": "x"})
+
+
+# --- files ----------------------------------------------------------------------
+
+
+def test_an_image_goes_as_a_photo_and_other_files_as_documents(bot, tmp_path, monkeypatch):
+    """A photo previews inline in the chat — the entire point of rendering a report
+    as a picture is that it reads without opening anything."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        telegram, "_upload",
+        lambda method, path, fields, field: bool(calls.append((method, field)) or True),
+    )
+    png = tmp_path / "r.png"; png.write_bytes(b"\x89PNG" + b"0" * 100)
+    pdf = tmp_path / "r.pdf"; pdf.write_bytes(b"%PDF" + b"0" * 100)
+    assert telegram.send_file(str(png)) is True
+    assert telegram.send_file(str(pdf)) is True
+    assert calls == [("sendPhoto", "photo"), ("sendDocument", "document")]
+
+
+def test_an_oversized_image_falls_back_to_a_document(bot, tmp_path, monkeypatch):
+    """Telegram recompresses a large photo to mush; as a document it arrives intact."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        telegram, "_upload",
+        lambda method, path, fields, field: bool(calls.append(method) or True),
+    )
+    monkeypatch.setattr(telegram, "_PHOTO_MAX_BYTES", 50)
+    png = tmp_path / "big.png"; png.write_bytes(b"0" * 500)
+    telegram.send_file(str(png))
+    assert calls == ["sendDocument"]
+
+
+def test_a_missing_or_unconfigured_file_send_is_false(bot, tmp_path):
+    assert telegram.send_file(str(tmp_path / "nope.png")) is False
+
+
+def test_a_long_caption_is_trimmed_rather_than_losing_the_upload(bot, tmp_path, monkeypatch):
+    """Telegram rejects a caption over 1024 chars and takes the file down with it."""
+    seen: dict = {}
+    monkeypatch.setattr(
+        telegram, "_upload",
+        lambda method, path, fields, field: bool(seen.update(fields) or True),
+    )
+    png = tmp_path / "r.png"; png.write_bytes(b"\x89PNG" + b"0" * 10)
+    telegram.send_file(str(png), caption="x" * 3000)
+    assert len(seen["caption"]) <= 1024
+
+
+def test_the_multipart_body_carries_the_file_and_fields(tmp_path):
+    f = tmp_path / "r.png"; f.write_bytes(b"\x89PNGDATA")
+    body, ctype = telegram._multipart({"chat_id": "42", "caption": "hi"}, "photo", f)
+    assert ctype.startswith("multipart/form-data; boundary=")
+    assert b'name="chat_id"' in body and b"42" in body
+    assert b'filename="r.png"' in body and b"\x89PNGDATA" in body

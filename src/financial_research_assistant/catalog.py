@@ -96,6 +96,7 @@ from .options import OPTIONS_TOOLS  # noqa: E402
 from .documents import DOCUMENT_TOOLS  # noqa: E402
 from .alerts import ALERT_TOOLS  # noqa: E402
 from .tasks import TASK_TOOLS  # noqa: E402
+from .reports import REPORT_TOOLS  # noqa: E402
 
 # `.extend` rather than `+=`: both mutate in place, but `+=` reads as a rebind of
 # an upper-case (i.e. constant) name to a type checker, which flags every line.
@@ -112,6 +113,7 @@ TOOLS.extend(OPTIONS_TOOLS)
 TOOLS.extend(DOCUMENT_TOOLS)
 TOOLS.extend(ALERT_TOOLS)
 TOOLS.extend(TASK_TOOLS)
+TOOLS.extend(REPORT_TOOLS)
 
 
 # --- Capability gating -----------------------------------------------------

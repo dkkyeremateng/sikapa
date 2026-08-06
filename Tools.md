@@ -1,6 +1,6 @@
 # Tools Reference
 
-Every agent tool the assistant can call, grouped by area. **60 tools.**
+Every agent tool the assistant can call, grouped by area. **61 tools.**
 
 You don't call these directly — you ask the assistant in plain English and it
 picks the tool(s). Each entry below shows:
@@ -34,6 +34,7 @@ tools need a broker statement imported first.
 10. [Document upload (RAG)](#10-document-upload-rag)
 11. [Subagent delegation](#11-subagent-delegation)
 12. [Scheduled work](#12-scheduled-work)
+13. [Rendered reports](#13-rendered-reports)
 
 ---
 
@@ -412,6 +413,29 @@ model call is already spent, so it is never thrown away over a brief outage. Wit
 `TELEGRAM_ALLOWED_CHAT_IDS` set you can also message the bot and have the agent
 answer (`/tasks`, `/cancel <id>`, or any prompt); that is off by default, and
 messages from other chats are dropped unread.
+
+---
+
+## 13. Rendered reports
+
+Everything else here returns text, which is right in a terminal and poor on a
+phone. This turns a summary into a **typeset sheet** — a title, stat tiles, then
+the body — rendered to **PNG + PDF** and delivered as a file through the same
+channel registry (§12). It is the natural output for a scheduled task, whose
+answer arrives on a phone.
+
+#### `render_report(title, markdown, highlights="", subtitle="", deliver=True)`
+`markdown` is the body — headings, bold, lists, tables, and `>` for a warning
+callout all render. `highlights` is the stat-tile row, **one per line** as
+`label | value | note` (max 6); put the headline numbers there rather than
+repeating them in the body. Files are saved under
+`~/.financial-research-assistant/reports` (`FINANCIAL_RESEARCH_REPORTS_DIR`) and
+the PNG + PDF are sent to every configured channel that can carry a file — Telegram
+today, where an image previews inline and a PDF arrives as a document.
+Needs **Chrome or Chromium** (auto-detected; override with
+`FINANCIAL_RESEARCH_CHROME`); without one you still get the HTML and are told why.
+- **Ask:** "Send me that as a PDF." / "Make an infographic of the FISV results and put it on Telegram." / "Every Friday, email me a one-pager on my holdings."
+- **Call:** `render_report(title="FISV Q2 2026 — miss and guidance cut", highlights="Adjusted EPS | $1.84 | vs $1.91 consensus\nMean target | $66.62 | +26.5%", markdown="## Headline\n\nFiserv missed and **cut guidance**…")`
 
 ---
 
