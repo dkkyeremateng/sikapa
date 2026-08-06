@@ -936,6 +936,44 @@ def _table_series(rows: list[list[str]], heading: str) -> dict[str, Any] | None:
     }
 
 
+#: ``North America ~65%``: a capitalised label immediately followed by a percentage.
+_PAIR_RE = re.compile(
+    r"([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)\s*[:~≈]?\s*([+-]?\d+(?:\.\d+)?)\s*%"
+)
+#: An enumeration inside one sentence needs only two members to be worth a chart —
+#: a 65/35 split is a comparison, not a lone statistic.
+_MIN_INLINE = 2
+
+
+def _inline_series(line: str, heading: str) -> dict[str, Any] | None:
+    """A breakdown written inside a sentence: ``(North America ~65%, Europe ~35%)``.
+
+    Narrative reports bury their only real data this way, and requiring a list or
+    a table meant such a report charted nothing at all. Two or more pairs on one
+    line is the guard: a single ``5-10% move higher`` is prose, and only an actual
+    enumeration clears it.
+    """
+    text = re.sub(r"\*\*|__|`", "", line)
+    pairs = _PAIR_RE.findall(text)
+    if len(pairs) < _MIN_INLINE:
+        return None
+    items: list[tuple[str, float]] = []
+    for label, digits in pairs:
+        clean = label.strip(" .:-–—,").strip()
+        # Drop leading connectives the regex may have swallowed.
+        clean = re.sub(r"^(?:and|or|with|plus|vs\.?)\s+", "", clean, flags=re.I).strip()
+        if len(clean) < 2 or len(clean) > _MAX_LABEL:
+            return None
+        items.append((clean, float(digits)))
+    title = re.split(r"\s*[(:]", text, maxsplit=1)[0].strip(" -–—•*")
+    return {
+        "title": (title[:48] if len(title) >= 4 else heading) or "Breakdown",
+        "signed": False,
+        "unit": "%",
+        "items": items[:_MAX_ITEMS],
+    }
+
+
 def extract_series(markdown: str) -> list[dict[str, Any]]:
     """Charted series found in the body: ``[{title, signed, items:[(label, value)]}]``.
 
@@ -945,6 +983,7 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
     and losses read as opposites rather than as magnitudes.
     """
     series: list[dict[str, Any]] = []
+    inline: list[dict[str, Any]] = []
     heading = ""
     items: list[tuple[str, float]] = []
     signed = False
@@ -998,6 +1037,10 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
         found = _PCT_RE.search(text)
         if not found:
             continue
+        embedded = _inline_series(text, heading)
+        if embedded:
+            inline.append(embedded)
+            continue
         label = _clean_label(text)
         if not label:
             continue
@@ -1006,6 +1049,13 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
         items.append((label, value))
     flush()
     flush_table()
+    # Inline breakdowns are the weakest signal, so they only fill space a list or
+    # table did not claim.
+    for extra in inline:
+        if len(series) >= _MAX_SERIES:
+            break
+        if extra["title"] not in {s["title"] for s in series}:
+            series.append(extra)
     return series[:_MAX_SERIES]
 
 
