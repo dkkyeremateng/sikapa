@@ -80,7 +80,7 @@ def file_channels(monkeypatch):
     monkeypatch.setattr(channels, "CHANNEL_REGISTRY", {}, raising=False)
     channels.register_channel(channels.Channel(
         "filey", lambda: True, lambda t: True, "Filey",
-        send_file=lambda p, c: bool(sent.append((p, c)) or True),
+        send_file=lambda p, c, fq=False: bool(sent.append((p, c, fq)) or True),
     ))
     channels.register_channel(channels.Channel(
         "texty", lambda: True, lambda t: True, "Texty",  # no send_file
@@ -93,12 +93,12 @@ def test_a_file_only_goes_to_channels_that_can_carry_one(file_channels):
     delivered, failed = channels.deliver_file("/tmp/x.png", "caption")
     assert delivered == ["filey"]
     assert failed == [], "a text-only channel is not a failure, it is not a target"
-    assert file_channels == [("/tmp/x.png", "caption")]
+    assert file_channels == [("/tmp/x.png", "caption", False)]
     assert channels.file_capable() == ["filey"]
 
 
 def test_a_throwing_file_channel_is_recorded_not_raised(file_channels):
-    def boom(_p, _c):
+    def boom(_p, _c, _fq=False):
         raise RuntimeError("upload died")
 
     channels.register_channel(channels.Channel(
@@ -115,14 +115,14 @@ def test_the_tool_reports_where_the_file_went(monkeypatch, tmp_path):
     monkeypatch.setattr(reports, "render", lambda html, name: {
         "html": str(tmp_path / "r.html"), "png": str(tmp_path / "r.png"),
     })
-    monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="": (["telegram"], []))
+    monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="", full_quality=False: (["telegram"], []))
     out = reports.render_report("FISV Q2", "body text", deliver=True)
     assert "Sent to: telegram" in out and "PNG" in out
 
 
 def test_the_tool_says_so_when_nothing_can_receive_a_file(monkeypatch, tmp_path):
     monkeypatch.setattr(reports, "render", lambda html, name: {"png": str(tmp_path / "r.png")})
-    monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="": ([], []))
+    monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="", full_quality=False: ([], []))
     assert "No channel accepted a file" in reports.render_report("t", "b")
 
 
@@ -162,3 +162,52 @@ def test_chrome_actually_produces_a_png_and_pdf(monkeypatch, tmp_path):
 
     assert Path(paths["png"]).stat().st_size > 5_000
     assert Path(paths["pdf"]).read_bytes()[:4] == b"%PDF"
+
+
+# --- render quality -------------------------------------------------------------
+
+
+def test_the_page_stamps_its_own_height_for_the_measuring_pass():
+    """Chrome screenshots the viewport, not the page, and has no fit-to-content
+    flag — so the document reports its own height and `_measure_height` reads it
+    back. Without it every sheet is clipped or padded with dead space."""
+    assert "__FRA_H:" in reports.build_html("t", "body")
+    assert "scrollHeight" in reports.build_html("t", "body")
+
+
+def test_the_render_scale_is_high_by_default_and_bounded(monkeypatch):
+    """A phone lets you pinch into the sheet; body text has to survive it."""
+    monkeypatch.delenv("FINANCIAL_RESEARCH_REPORT_SCALE", raising=False)
+    assert reports.render_scale() == 3
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_SCALE", "2")
+    assert reports.render_scale() == 2
+    for junk in ("0", "9", "huge", ""):
+        monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_SCALE", junk)
+        assert reports.render_scale() == 3, junk
+
+
+def test_a_failed_measurement_falls_back_rather_than_rendering_nothing(monkeypatch):
+    monkeypatch.setattr(reports, "_run_chrome", lambda args: None)
+    assert reports._measure_height("chrome", "file:///x") == reports._FALLBACK_H
+
+
+def test_the_measured_height_is_clamped(monkeypatch):
+    class P:
+        stdout = b"<title>__FRA_H:999999</title>"
+
+    monkeypatch.setattr(reports, "_run_chrome", lambda args: P())
+    assert reports._measure_height("c", "u") == reports._MAX_H
+
+
+def test_the_sheet_is_sent_uncompressed(monkeypatch, tmp_path):
+    """sendPhoto re-encodes to JPEG and downscales, which turns dense body text to
+    mush regardless of the render resolution. The sheet must go as a document."""
+    seen: list[bool] = []
+    monkeypatch.setattr(reports, "render", lambda html, name: {"png": str(tmp_path / "r.png")})
+    monkeypatch.setattr(
+        channels, "deliver_file",
+        lambda p, caption="", prefer="", full_quality=False: (
+            seen.append(full_quality), (["telegram"], []))[1],
+    )
+    reports.render_report("t", "b")
+    assert seen == [True]

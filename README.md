@@ -745,15 +745,22 @@ one notification rather than three.
 ### Reports as files, not walls of text
 
 `render_report(title, markdown, highlights)` typesets a summary as a **PNG + PDF
-sheet** — headline, stat tiles, body — and sends it through the same channels. On
-Telegram the image previews inline and the PDF arrives as a document, which is the
-difference between a scheduled analysis being read on a phone and being scrolled
-past. Ask for *"a PDF"*, *"an infographic"*, or *"send me a one-pager"*, or let a
+sheet** — headline, stat tiles, body — and sends it through the same channels,
+which is the difference between a scheduled analysis being read on a phone and
+being scrolled past. Ask for *"a PDF"*, *"an infographic"*, or *"send me a one-pager"*, or let a
 scheduled task produce one.
 
 `highlights` is the stat-tile row, one per line as `label | value | note` (max 6).
 The body is ordinary markdown: headings, tables, and `>` for a warning callout.
 Files land in `~/.financial-research-assistant/reports`.
+
+Two details decide whether it is actually readable. The sheet is rendered at 3x
+(`FINANCIAL_RESEARCH_REPORT_SCALE`) and sized to its own measured height, so
+there is no dead band and body text survives being pinched into. And it is sent as
+a **document, not a photo**: Telegram's `sendPhoto` re-encodes to JPEG and
+downscales, which turns dense body text to mush no matter what resolution it was
+rendered at — as a document the bytes arrive untouched and the client still shows a
+tappable preview.
 
 Rendering uses **headless Chrome or Chromium**, auto-detected on the usual macOS
 and Linux paths (override with `FINANCIAL_RESEARCH_CHROME`). It is the one layout

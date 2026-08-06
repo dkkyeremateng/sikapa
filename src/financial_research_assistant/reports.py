@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Any
 import html as _html
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -45,13 +46,29 @@ _CHROME_CANDIDATES = (
 )
 
 #: Render width in CSS pixels. 1080 is a phone-friendly portrait width that also
-#: prints sensibly; the screenshot is taken at 2x for a crisp raster.
+#: prints sensibly.
 _WIDTH = 1080
-_SCALE = 2
-#: Screenshot viewport height. Chrome captures the full page beyond this, but a
-#: too-short window can clip fixed elements, and a huge one wastes memory.
-_VIEWPORT_H = 1600
+
+#: Device pixel ratio. 3 puts a 1080-wide sheet out at 3240px, so body text stays
+#: crisp when a phone lets you pinch into it — the difference between "an image of
+#: a report" and something readable. Override for a smaller file.
+_DEFAULT_SCALE = 3
+_MAX_SCALE = 4
+
+#: Fallback viewport height when measurement fails. Chrome screenshots the
+#: VIEWPORT, not the page (verified), so this is not a floor to grow from — it is
+#: exactly what gets captured, and a wrong value either clips the sheet or pads it
+#: with dead space. Hence `_measure_height` below.
+_FALLBACK_H = 2200
+_MAX_H = 12000
 _RENDER_TIMEOUT = 120
+
+
+def render_scale() -> int:
+    raw = (os.environ.get("FINANCIAL_RESEARCH_REPORT_SCALE") or "").strip()
+    if raw.isdigit() and 1 <= int(raw) <= _MAX_SCALE:
+        return int(raw)
+    return _DEFAULT_SCALE
 
 
 def chrome_path() -> str:
@@ -170,6 +187,7 @@ _DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   <div class="body">{body}</div>
 </div>
 <footer>{footer}<div class="disc">{disclaimer}</div></footer>
+<script>document.title="__FRA_H:"+document.documentElement.scrollHeight;</script>
 </body></html>"""
 
 _DISCLAIMER = (
@@ -214,14 +232,35 @@ def build_html(
     )
 
 
-def _run_chrome(args: list[str]) -> bool:
+def _run_chrome(args: list[str]) -> subprocess.CompletedProcess[bytes] | None:
     try:
-        subprocess.run(
+        return subprocess.run(
             args, capture_output=True, timeout=_RENDER_TIMEOUT, check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    return True
+        return None
+
+
+def _measure_height(chrome: str, url: str) -> int:
+    """The document's true pixel height, via a measuring pass.
+
+    Chrome's ``--screenshot`` captures the VIEWPORT, so the window height has to
+    equal the content height or the sheet is either clipped or padded with a band
+    of dead space (which is what the first delivered reports had). There is no CLI
+    flag for "fit the page", but ``--dump-dom`` runs the page's scripts first — so
+    the document stamps its own ``scrollHeight`` into the title and this reads it
+    back. Costs one extra headless run of a local file.
+    """
+    proc = _run_chrome([
+        chrome, "--headless", "--disable-gpu", "--no-sandbox",
+        "--virtual-time-budget=3000", "--dump-dom", url,
+    ])
+    if proc is None:
+        return _FALLBACK_H
+    found = re.search(rb"__FRA_H:(\d+)", proc.stdout or b"")
+    if not found:
+        return _FALLBACK_H
+    return max(200, min(int(found.group(1)), _MAX_H))
 
 
 def render(html: str, name: str) -> dict[str, str]:
@@ -246,10 +285,11 @@ def render(html: str, name: str) -> dict[str, str]:
 
     base = [chrome, "--headless", "--disable-gpu", "--no-sandbox", "--hide-scrollbars"]
     url = html_path.as_uri()
+    height = _measure_height(chrome, url)
     png = out_dir / f"{stem}.png"
     if _run_chrome(base + [
-        f"--force-device-scale-factor={_SCALE}",
-        f"--screenshot={png}", f"--window-size={_WIDTH},{_VIEWPORT_H}", url,
+        f"--force-device-scale-factor={render_scale()}",
+        f"--screenshot={png}", f"--window-size={_WIDTH},{height}", url,
     ]) and png.exists():
         paths["png"] = str(png)
 
@@ -304,10 +344,12 @@ def render_report(
         best = paths.get("png") or paths.get("pdf")
         sent: list[str] = []
         if best:
-            delivered, failed = channels.deliver_file(best, caption=title)
+            delivered, failed = channels.deliver_file(best, caption=title, full_quality=True)
             sent += delivered
             if "pdf" in paths and best != paths["pdf"]:
-                more, _ = channels.deliver_file(paths["pdf"], caption=f"{title} (PDF)")
+                more, _ = channels.deliver_file(
+                    paths["pdf"], caption=f"{title} (PDF)", full_quality=True
+                )
                 sent += [c for c in more if c not in sent]
             if failed:
                 lines.append(f"Delivery failed on: {', '.join(failed)}")
