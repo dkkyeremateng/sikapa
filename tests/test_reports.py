@@ -701,3 +701,33 @@ def test_the_tile_grid_has_no_orphan_cell():
         "t", "body", highlights="\n".join(f"L{i} | {i} | note" for i in range(5)),
     )
     assert html.count('<div class="tile">') == 6, "the last row must be padded"
+
+
+def test_a_breakdown_buried_in_a_sentence_is_still_charted():
+    """Narrative reports bury their only real data inside prose. Requiring a list
+    or table meant such a report charted nothing at all."""
+    md = ("## Key revenue drivers\n\n"
+          "- Frozen vegetables and prepared meals (core business)\n"
+          "- Geographic diversification (North America ~65%, Europe ~35% of revenue)\n")
+    series = reports.extract_series(md)
+    assert len(series) == 1
+    assert series[0]["title"] == "Geographic diversification"
+    assert series[0]["items"] == [("North America", 65.0), ("Europe", 35.0)]
+
+
+def test_a_lone_figure_in_prose_is_not_a_chart():
+    """`potential 5-10% move higher` is a sentence, not an enumeration."""
+    md = ("## Scenarios\n\n"
+          "- Consensus beat: earnings beat plus raised guidance, a potential 5-10% move higher\n"
+          "- Miss or guide down: risk of a 5-15% drawdown if margin commentary disappoints\n"
+          "- Dividend cut: low probability but would hurt the total-return thesis\n")
+    assert reports.extract_series(md) == []
+
+
+def test_inline_breakdowns_never_displace_a_real_list():
+    """They are the weakest signal, so they only fill space a list or table left."""
+    md = ("## Sectors\n\n- **Healthcare:** 28.4%\n- **Technology:** 21.6%\n"
+          "- **Industrials:** 8.1%\n- Split (North America ~65%, Europe ~35%)\n")
+    series = reports.extract_series(md)
+    assert series[0]["title"] == "Sectors"
+    assert [s["title"] for s in series][1:] == ["Split"]
