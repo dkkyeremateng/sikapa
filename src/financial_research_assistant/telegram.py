@@ -173,6 +173,86 @@ def send_message(text: str, chat_id: str = "") -> bool:
     return True
 
 
+# --- files ---------------------------------------------------------------------
+
+#: Telegram's own limits. A photo over these is rejected or silently recompressed
+#: to mush, so an oversized image is sent as a document instead — worse inline, but
+#: it arrives intact and readable.
+_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+_DOC_MAX_BYTES = 50 * 1024 * 1024
+_PHOTO_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
+
+def _multipart(fields: dict[str, str], file_field: str, path: Path) -> tuple[bytes, str]:
+    """Encode one file plus text fields as multipart/form-data.
+
+    Hand-rolled because this module is stdlib-only (like ``flex.py`` and
+    ``factors.py``): adding ``requests`` for one upload would put a dependency in
+    front of a feature that is off by default.
+    """
+    boundary = "----fra" + os.urandom(12).hex()
+    out = bytearray()
+    for key, value in fields.items():
+        out += (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n"
+            f"{value}\r\n"
+        ).encode("utf-8")
+    out += (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
+        f"filename=\"{path.name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8")
+    out += path.read_bytes()
+    out += f"\r\n--{boundary}--\r\n".encode("utf-8")
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+def _upload(method: str, path: Path, fields: dict[str, str], file_field: str) -> bool:
+    body, content_type = _multipart(fields, file_field, path)
+    req = urllib.request.Request(
+        f"{_API}/bot{bot_token()}/{method}",
+        data=body,
+        headers={"Content-Type": content_type},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 (https)
+            return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("description", "")
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+        raise RuntimeError(_safe(f"telegram {method} failed: {exc.code} {detail}")) from None
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise RuntimeError(_safe(f"telegram {method} failed: {exc}")) from None
+
+
+def send_file(path: str, caption: str = "", chat_id: str = "") -> bool:
+    """Send a file. Images go as photos (inline preview), everything else as a
+    document. False when not configured or the file is missing/too big.
+
+    An image is worth sending as a photo because Telegram shows it in the chat —
+    the whole point of rendering a report as a picture is that it is readable
+    without opening anything.
+    """
+    target = (chat_id or default_chat_id()).strip()
+    src = Path(path)
+    if not bot_token() or not target or not src.is_file():
+        return False
+    size = src.stat().st_size
+    if size > _DOC_MAX_BYTES:
+        return False
+    as_photo = src.suffix.lower() in _PHOTO_SUFFIXES and size <= _PHOTO_MAX_BYTES
+    fields = {"chat_id": target}
+    if caption:
+        # Telegram caps a caption at 1024 characters and rejects the whole upload
+        # if it is longer, taking the file with it.
+        fields["caption"] = caption[:1000]
+    if as_photo:
+        return _upload("sendPhoto", src, fields, "photo")
+    return _upload("sendDocument", src, fields, "document")
+
+
 # --- inbound -------------------------------------------------------------------
 
 

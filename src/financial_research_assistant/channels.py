@@ -36,12 +36,21 @@ from typing import Callable
 Sender = Callable[[str], bool]
 
 
+#: A channel's file sender: takes a path and a caption, returns whether it went.
+#: Optional — a channel that can only carry text simply leaves it None, and
+#: ``deliver_file`` skips it rather than pretending.
+FileSender = Callable[[str, str], bool]
+
+
 @dataclass(frozen=True)
 class Channel:
     """One pluggable delivery target.
 
     ``configured`` reports whether this channel's environment is set up;
-    ``send`` delivers a single message and returns success.
+    ``send`` delivers a single message and returns success. ``send_file`` is
+    optional: a rendered PDF has nowhere to go on a desktop-banner channel, and a
+    channel that cannot carry a file must be skipped visibly rather than silently
+    dropping it or stringifying it into a message.
     """
 
     key: str
@@ -49,6 +58,7 @@ class Channel:
     send: Sender
     #: Shown when explaining where a task's answer will go.
     label: str = ""
+    send_file: FileSender | None = None
 
 
 CHANNEL_REGISTRY: dict[str, Channel] = {}
@@ -126,6 +136,30 @@ def deliver(text: str, prefer: str = "") -> tuple[list[str], list[str]]:
     return delivered, failed
 
 
+def deliver_file(path: str, caption: str = "", prefer: str = "") -> tuple[list[str], list[str]]:
+    """Send a file to the active channels that can carry one.
+
+    Returns ``(delivered, failed)``. A channel with no ``send_file`` is neither —
+    it is simply not a target for a file, and reporting it as failed would read as
+    an outage when it is a capability boundary.
+    """
+    delivered: list[str] = []
+    failed: list[str] = []
+    for ch in active_channels(prefer):
+        if ch.send_file is None:
+            continue
+        try:
+            (delivered if ch.send_file(path, caption) else failed).append(ch.key)
+        except Exception:  # noqa: BLE001 - a channel failure is never fatal here either
+            failed.append(ch.key)
+    return delivered, failed
+
+
+def file_capable(prefer: str = "") -> list[str]:
+    """Active channels that can carry a file — for telling the user where one can go."""
+    return [c.key for c in active_channels(prefer) if c.send_file is not None]
+
+
 # --- built-in channels ---------------------------------------------------------
 
 
@@ -139,6 +173,12 @@ def _telegram_configured() -> bool:
     from . import telegram
 
     return telegram.configured()
+
+
+def _telegram_send_file(path: str, caption: str) -> bool:
+    from . import telegram
+
+    return telegram.send_file(path, caption)
 
 
 def _desktop_send(text: str) -> bool:
@@ -166,6 +206,7 @@ def _stdout_send(text: str) -> bool:
 
 register_channel(Channel(
     "telegram", _telegram_configured, _telegram_send, "Telegram",
+    send_file=_telegram_send_file,
 ))
 register_channel(Channel(
     "desktop", _desktop_configured, _desktop_send, "desktop notification",

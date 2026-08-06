@@ -170,11 +170,11 @@
     <header>
       <div class="eyebrow">Financial Research Assistant</div>
       <h1>A research desk that lives in your terminal.</h1>
-      <p class="lede">A local AI analyst with 60 tools — as-reported SEC filings, DCF valuation, options,
+      <p class="lede">A local AI analyst with 61 tools — as-reported SEC filings, DCF valuation, options,
         portfolio analytics, your own documents, and background work that finds you. Mostly keyless.
         Watch it work.</p>
       <div class="stats">
-        <span class="stat"><b>60</b> tools</span>
+        <span class="stat"><b>61</b> tools</span>
         <span class="stat"><b>keyless</b> by default</span>
         <span class="stat">SEC EDGAR · Yahoo · Ken French</span>
         <span class="stat">read-only, cited, offline-first</span>
@@ -205,7 +205,7 @@
   <div class="stage">
     <div class="section-h">
       <h2>Everything it can do</h2>
-      <p>The demo shows seven moments. Under the hood the agent routes across thirteen areas — the full list lives in <code>Tools.md</code>.</p>
+      <p>The demo shows seven moments. Under the hood the agent routes across fourteen areas — the full list lives in <code>Tools.md</code>.</p>
     </div>
     <div class="grid" id="grid"></div>
   </div>
@@ -357,7 +357,8 @@
     ["Subagents", "2", "Delegate focused research in parallel or in sequence.", "dispatch_subagent · dispatch_subagents"],
     ["Calculators & FX", "4", "Percent change, CAGR, position weight, currency conversion.", "cagr · pct_change · convert_currency"],
     ["Alerts", "3", "Standing rules the digest checks — a price move, a level, earnings soon.", "add_alert · list_alerts · remove_alert"],
-    ["Scheduled work", "3", "Queue research for later; a runner executes it and pushes the answer to Telegram.", "schedule_task · list_scheduled_tasks · cancel_scheduled_task"]
+    ["Scheduled work", "3", "Queue research for later; a runner executes it and pushes the answer to Telegram.", "schedule_task · list_scheduled_tasks · cancel_scheduled_task"],
+    ["Rendered reports", "1", "Typeset a summary as a PNG + PDF sheet and send it as a file.", "render_report"]
   ];
 
   // ---- build static UI ----

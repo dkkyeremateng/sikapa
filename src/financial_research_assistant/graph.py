@@ -161,6 +161,15 @@ SYSTEM_PROMPT = (
     "digest, no model call); a scheduled task is for work needing judgment — reading "
     "results, comparing to consensus, writing a recommendation.\n\n"
 
+    "REPORTS AS FILES — `render_report(title, markdown, highlights)` typesets a "
+    "summary as a PNG + PDF sheet and sends it to the user's delivery channels. Use "
+    "it when they ask for a report, infographic, PDF or one-pager, or to have "
+    "something 'sent' to them as a file; and prefer it for a SCHEDULED task's "
+    "output, which is read on a phone where a picture beats a wall of message text. "
+    "Put the headline numbers in `highlights` (one per line, `label | value | note`, "
+    "max 6) and the narrative in `markdown` — do not repeat the same figures in "
+    "both. Say what it returns; it reports where the file went.\n\n"
+
     "CURRENCY — the base/reporting currency is USD; `convert_currency` converts any "
     "amount on demand.\n\n"
 
