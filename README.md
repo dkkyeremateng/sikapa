@@ -762,10 +762,19 @@ downscales, which turns dense body text to mush no matter what resolution it was
 rendered at — as a document the bytes arrive untouched and the client still shows a
 tappable preview.
 
-**The PDF is the document; the image is its first page.** A long report paginates
-and the cover image is page 1 — which a full-page screenshot cannot express, since
-a screenshot has no pages. A short report becomes a single page sized exactly to
-its content, so there is no trailing dead band.
+**The PDF is the document; the image is its cover.** A short report becomes a
+single page sized exactly to its content, and the image is that page. A **multi-page
+report gets an infographic** instead — the headline figures plus the report's own
+series, charted — because page 1 of a five-page report is the masthead and whatever
+happened to fit.
+
+The charts are extracted deterministically from the body, with no second model
+call: a run of list items under one heading becomes a series when at least three
+carry a percentage, which is the shape of *top holdings*, *sector exposure* and
+*movers*. Signed values (`+28.6%` / `-20.7%`) render as diverging bars so gains and
+losses read as opposites; unsigned ones as ranked magnitude bars. The palette is
+the validated diverging pair from the project's data-viz reference, and the sheet
+says which report it summarises so it never poses as the document itself.
 
 **Two renderers, one content model.** Both consume the same markdown and
 highlights:

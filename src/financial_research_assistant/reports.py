@@ -5,10 +5,12 @@ poor on a phone: a scheduled task's analysis arrives as a wall of Telegram
 message. This renders the same content as a typeset sheet — headline, stat tiles,
 body — and hands it to the delivery channels as files.
 
-**The PDF is the document; the PNG is its first page.** A long report paginates,
-and the cover image is page 1 — which a full-page screenshot cannot express, since
-a screenshot has no pages. So everything is PDF-first and ``pypdfium2`` rasterises
-page 1 afterwards, whichever renderer produced the PDF.
+**The PDF is the document; the PNG is its cover.** For a one-page sheet the cover
+is that page. For a multi-page report it is a purpose-built *infographic* — the
+headline figures plus whatever series the body contains, charted — because page 1
+of a five-page report is the masthead and whatever happened to fit, the least
+informative slice of the document. Everything is PDF-first either way, with
+``pypdfium2`` rasterising a single page afterwards.
 
 **Two renderers, one content model.** Both consume the same markdown and the same
 ``highlights``:
@@ -295,11 +297,19 @@ def _measure_height(chrome: str, url: str) -> int:
     return max(200, min(int(found.group(1)), _MAX_H)) if found else _FALLBACK_H
 
 
-def _chrome_pdf(chrome: str, html_path: Path, pdf: Path) -> bool:
-    """Print the sheet, sizing the page to the content when it fits on one."""
+def _chrome_pdf(
+    chrome: str, html_path: Path, pdf: Path, single_page: bool = False
+) -> bool:
+    """Print the sheet, sizing the page to the content when it fits on one.
+
+    ``single_page`` forces one page however tall the content is. The cover
+    infographic needs it: paginating a cover would make it a slice of a summary of
+    a report — which is the problem it exists to solve.
+    """
     url = html_path.as_uri()
-    height = _measure_height(chrome, url)
-    height = _PAGE_H if height > _SINGLE_MAX_H else height + _HEIGHT_SLACK
+    height = _measure_height(chrome, url) + _HEIGHT_SLACK
+    if not single_page and height > _SINGLE_MAX_H:
+        height = _PAGE_H
     html_path.write_text(
         re.sub(
             r"@page\{size:\d+px \d+px",
@@ -322,6 +332,10 @@ _INK = (11, 11, 11)
 _INK2 = (82, 81, 78)
 _MUTED = (137, 135, 129)
 _GRID = (225, 224, 217)
+_RULE = (195, 194, 183)
+#: Validated diverging pair (CVD dE 21.6) — up vs down, never magnitude.
+_POS = (42, 120, 214)
+_NEG = (227, 73, 72)
 
 #: System fonts carrying the punctuation a report actually uses (— · ▼ ✓ →). The
 #: core PDF fonts are Latin-1 only and RAISE on an em dash, so without one of these
@@ -633,9 +647,43 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
     paths["pdf"] = str(pdf)
 
     png = out_dir / f"{stem}.png"
+    pages = page_count(str(pdf))
+    # Page 1 is the right cover for a one-page sheet and a poor one for a five-page
+    # report — it shows the masthead and whatever happened to fit. Multi-page gets a
+    # purpose-built summary instead, falling back to page 1 if that fails, since a
+    # cover is worth less than the report it introduces.
+    if pages > 1 and content is not None:
+        cover = _build_cover(out_dir, stem, content, pages, chrome)
+        if cover and rasterize_first_page(str(cover), str(png)):
+            paths["png"] = str(png)
+            paths["cover"] = "infographic"
+            return paths
     if rasterize_first_page(str(pdf), str(png)):
         paths["png"] = str(png)
+        paths["cover"] = "page-1"
     return paths
+
+
+def _build_cover(
+    out_dir: Path, stem: str, content: dict[str, str], pages: int, chrome: str
+) -> Path | None:
+    """Render the summary infographic to its own single-page PDF, or None."""
+    info_pdf = out_dir / f"{stem}-cover.pdf"
+    title = content.get("title", "")
+    markdown = content.get("markdown", "")
+    highlights = content.get("highlights", "")
+    subtitle = content.get("subtitle", "")
+    if chrome:
+        info_html = out_dir / f"{stem}-cover.html"
+        info_html.write_text(
+            build_infographic_html(title, markdown, highlights, subtitle, pages=pages),
+            encoding="utf-8",
+        )
+        if _chrome_pdf(chrome, info_html, info_pdf, single_page=True):
+            return info_pdf
+    if _fpdf_infographic(info_pdf, title, markdown, highlights, subtitle, pages):
+        return info_pdf
+    return None
 
 
 # --- Model-facing tool ---------------------------------------------------------
@@ -687,9 +735,15 @@ def render_report(
         )
     else:
         pages = page_count(paths["pdf"])
+        cover = paths.get("cover")
+        if pages > 1 and cover == "infographic":
+            shape = f"; the image is a one-sheet infographic summarising all {pages} pages."
+        elif pages > 1:
+            shape = "; the image is page 1."
+        else:
+            shape = "."
         lines.append(
-            f"Rendered {pages} page(s) with {paths.get('renderer', '?')}"
-            + ("; the image is page 1." if pages > 1 else ".")
+            f"Rendered {pages} page(s) with {paths.get('renderer', '?')}{shape}"
         )
     lines.append("Saved: " + ", ".join(
         f"{k.upper()} {v}" for k, v in paths.items() if k != "renderer"
@@ -720,3 +774,403 @@ def render_report(
 
 
 REPORT_TOOLS = [render_report]
+
+
+# --- infographic cover (multi-page reports) -------------------------------------
+#
+# Page 1 is the right cover for a one-page sheet and a poor one for a five-page
+# report: it shows the masthead and whatever happened to fit, which is the least
+# informative slice of the document. So a multi-page report gets a purpose-built
+# summary sheet instead — the headline figures plus whatever series the body
+# actually contains, charted.
+#
+# Extraction is deterministic. The model already decided what matters when it
+# wrote the report; this reads the shapes it produced rather than asking a second
+# model what to draw, so the cover costs nothing and cannot invent a number.
+
+#: A percentage anywhere in a list item, sign preserved.
+_PCT_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)\s*%")
+#: Where a label stops: a dash/colon separator, or the figure itself.
+_LABEL_SPLIT = re.compile(r"\s*[–—:|]\s*|\s+(?=[+-]?\d+(?:\.\d+)?\s*%)")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+_BOLD_HEADING_RE = re.compile(r"^\s{0,3}\*\*(.+?)\*\*:?\s*$")
+_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$")
+
+_MAX_SERIES = 3
+_MAX_ITEMS = 8
+_MIN_ITEMS = 3
+
+
+def _clean_label(text: str) -> str:
+    text = re.sub(r"\*\*|__|`", "", text).strip()
+    label = _LABEL_SPLIT.split(text, maxsplit=1)[0].strip(" .:–—-")
+    return label[:28]
+
+
+def extract_series(markdown: str) -> list[dict[str, Any]]:
+    """Charted series found in the body: ``[{title, signed, items:[(label, value)]}]``.
+
+    A run of list items under one heading counts as a series when at least three
+    of them carry a percentage — the shape of "top holdings", "sector exposure",
+    "movers". Signed values (``+28.5%`` / ``-20.7%``) mark it diverging, so gains
+    and losses read as opposites rather than as magnitudes.
+    """
+    series: list[dict[str, Any]] = []
+    heading = ""
+    items: list[tuple[str, float]] = []
+    signed = False
+
+    def flush() -> None:
+        nonlocal items, signed
+        if len(items) >= _MIN_ITEMS:
+            series.append({
+                "title": heading or "Breakdown",
+                "signed": signed,
+                "items": items[:_MAX_ITEMS],
+            })
+        items, signed = [], False
+
+    for raw in (markdown or "").splitlines():
+        line = raw.rstrip()
+        head = _HEADING_RE.match(line) or _BOLD_HEADING_RE.match(line)
+        if head:
+            flush()
+            heading = re.sub(r"\*\*|__|`", "", head.group(1)).strip()
+            continue
+        item = _ITEM_RE.match(line)
+        if not item:
+            if not line.strip():
+                continue
+            flush()  # prose ends a run
+            continue
+        text = item.group(1)
+        found = _PCT_RE.search(text)
+        if not found:
+            continue
+        label = _clean_label(text)
+        if not label:
+            continue
+        value = float(found.group(1))
+        signed = signed or found.group(1)[0] in "+-"
+        items.append((label, value))
+    flush()
+    return series[:_MAX_SERIES]
+
+
+_INFO_CSS = """
+:root{{--surface:#fcfcfb;--page:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
+--grid:#e1e0d9;--rule:#c3c2b7;--pos:#2a78d6;--neg:#e34948;--track:#f0efec;}}
+@page{{size:{w}px {h}px;margin:0}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{width:{w}px;background:var(--surface);color:var(--ink);
+ font-family:system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}}
+.sheet{{padding:48px 52px 40px}}
+.eyebrow{{font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:600}}
+h1{{font-size:46px;line-height:1.06;font-weight:650;letter-spacing:-.025em;margin-top:12px}}
+.sub{{font-size:18px;color:var(--ink2);margin-top:10px}}
+.rule{{height:1px;background:var(--grid);margin:28px 0}}
+.tiles{{display:grid;gap:2px;background:var(--grid)}}
+.tile{{background:var(--surface);padding:20px 18px}}
+.tile .lab{{font-size:13px;color:var(--muted);font-weight:500}}
+.tile .val{{font-size:34px;font-weight:650;margin-top:6px;letter-spacing:-.025em;line-height:1.05}}
+.tile .note{{font-size:13.5px;color:var(--ink2);margin-top:7px;line-height:1.4}}
+.charts{{display:grid;grid-template-columns:repeat({cols},1fr);gap:34px 40px;margin-top:32px}}
+.card.wide{{grid-column:1 / -1}}
+.card h2{{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+ font-weight:650;margin-bottom:18px}}
+.row{{display:grid;grid-template-columns:164px 1fr 72px;align-items:center;gap:12px;margin-bottom:11px}}
+.row .k{{font-size:13.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.row .v{{font-size:14.5px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}}
+.track{{height:22px;background:var(--track);border-radius:4px;position:relative}}
+.fill{{height:22px;background:var(--pos);border-radius:0 4px 4px 0}}
+.dv{{position:relative;height:22px;background:var(--track);border-radius:4px}}
+.dv .zero{{position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:var(--rule)}}
+.dv .bar{{position:absolute;top:0;height:22px}}
+.dv .bar.p{{left:50%;background:var(--pos);border-radius:0 4px 4px 0}}
+.dv .bar.n{{right:50%;background:var(--neg);border-radius:4px 0 0 4px}}
+.legend{{display:flex;gap:18px;font-size:13px;color:var(--ink2);margin-top:14px}}
+.sw{{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px}}
+.notes{{margin-top:34px;border-top:1px solid var(--grid);padding-top:22px}}
+.notes h2{{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+ font-weight:650;margin-bottom:14px}}
+.notes li{{font-size:15.5px;line-height:1.55;color:var(--ink);margin:0 0 9px 18px}}
+footer{{padding:20px 52px 30px;background:var(--page);font-size:12.5px;color:var(--muted);line-height:1.7}}
+footer .disc{{margin-top:10px;border-top:1px solid var(--grid);padding-top:10px}}
+"""
+
+_INFO_DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>{title}</title><style>{css}</style></head><body>
+<div class="sheet">
+  <div class="eyebrow">{eyebrow}</div>
+  <h1>{title}</h1>
+  {subtitle}
+  <div class="rule"></div>
+  {tiles}
+  {charts}
+  {notes}
+</div>
+<footer>{footer}<div class="disc">{disclaimer}</div></footer>
+<script>document.title="__FRA_H:"+document.documentElement.scrollHeight;</script>
+</body></html>"""
+
+
+def _bars_html(series: dict[str, Any]) -> str:
+    items = series["items"]
+    rows = []
+    if series["signed"]:
+        span = max((abs(v) for _l, v in items), default=1) or 1
+        for label, value in items:
+            width = min(abs(value) / span * 50.0, 50.0)
+            side = "n" if value < 0 else "p"
+            style = f"{'right' if value < 0 else 'left'}:50%;width:{width:.1f}%"
+            rows.append(
+                f'<div class="row"><div class="k">{_html.escape(label)}</div>'
+                f'<div class="dv"><div class="zero"></div>'
+                f'<div class="bar {side}" style="{style}"></div></div>'
+                f'<div class="v" style="color:{"#e34948" if value < 0 else "#2a78d6"}">'
+                f'{value:+.1f}%</div></div>'
+            )
+        legend = ('<div class="legend"><span><span class="sw" style="background:#2a78d6">'
+                  '</span>Up</span><span><span class="sw" style="background:#e34948">'
+                  '</span>Down</span></div>')
+    else:
+        top = max((v for _l, v in items), default=1) or 1
+        for label, value in items:
+            rows.append(
+                f'<div class="row"><div class="k">{_html.escape(label)}</div>'
+                f'<div class="track"><div class="fill" style="width:{value / top * 100:.1f}%">'
+                f'</div></div><div class="v">{value:.1f}%</div></div>'
+            )
+        legend = ""
+    return (f'<div class="card"><h2>{_html.escape(series["title"])}</h2>'
+            + "".join(rows) + legend + "</div>")
+
+
+def extract_notes(markdown: str, used_titles: set[str]) -> list[str]:
+    """Short bullets from sections the charts did not consume — the observations
+    that are prose rather than numbers."""
+    picks: list[str] = []
+    heading = ""
+    for raw in (markdown or "").splitlines():
+        head = _HEADING_RE.match(raw) or _BOLD_HEADING_RE.match(raw)
+        if head:
+            heading = re.sub(r"\*\*|__|`", "", head.group(1)).strip()
+            continue
+        item = _ITEM_RE.match(raw)
+        if not item or heading in used_titles:
+            continue
+        text = re.sub(r"\*\*|__|`", "", item.group(1)).strip()
+        if 24 <= len(text) <= 150 and not _PCT_RE.match(text):
+            picks.append(text)
+    return picks[:5]
+
+
+def _notes_html(markdown: str, used_titles: set[str]) -> str:
+    picks = extract_notes(markdown, used_titles)
+    if not picks:
+        return ""
+    lis = "".join(f"<li>{_html.escape(p)}</li>" for p in picks)
+    return f'<div class="notes"><h2>Key observations</h2><ul>{lis}</ul></div>'
+
+
+def build_infographic_html(
+    title: str,
+    markdown: str,
+    highlights: str = "",
+    subtitle: str = "",
+    eyebrow: str = "",
+    pages: int = 0,
+    page_height: int = _PAGE_H,
+) -> str:
+    """A one-page visual summary of a multi-page report. Pure and testable."""
+    tiles = parse_highlights(highlights)
+    tiles_html = ""
+    if tiles:
+        cols = min(len(tiles), 3 if len(tiles) in (3, 5, 6) else 4)
+        cells = "".join(
+            f'<div class="tile"><div class="lab">{_html.escape(t["label"])}</div>'
+            f'<div class="val">{_html.escape(t["value"])}</div>'
+            + (f'<div class="note">{_html.escape(t["note"])}</div>' if t["note"] else "")
+            + "</div>"
+            for t in tiles
+        )
+        tiles_html = (f'<div class="tiles" style="grid-template-columns:'
+                      f'repeat({cols},1fr)">{cells}</div>')
+
+    series = extract_series(markdown)
+    charts_html = ""
+    if series:
+        cards = [_bars_html(s) for s in series]
+        # An odd chart in a two-column grid would leave a hole; let it span instead.
+        if len(cards) > 1 and len(cards) % 2 == 1:
+            cards[-1] = cards[-1].replace('<div class="card">', '<div class="card wide">', 1)
+        charts_html = '<div class="charts">' + "".join(cards) + "</div>"
+    notes = _notes_html(markdown, {s["title"] for s in series})
+
+    tail = f"Summary of a {pages}-page report — full PDF attached" if pages > 1 else ""
+    return _INFO_DOC.format(
+        css=_INFO_CSS.format(
+            w=_WIDTH, h=max(200, min(int(page_height), _MAX_H)),
+            cols=2 if len(series) > 1 else 1,
+        ),
+        title=_html.escape(title or "Report"),
+        eyebrow=_html.escape(eyebrow or _EYEBROW),
+        subtitle=(f'<div class="sub">{_html.escape(subtitle)}</div>' if subtitle else ""),
+        tiles=tiles_html,
+        charts=charts_html,
+        notes=notes,
+        footer=_html.escape(tail) if tail else _stamp(),
+        disclaimer=_DISCLAIMER,
+    )
+
+
+def _fpdf_infographic(
+    pdf_path: Path, title: str, markdown: str, highlights: str = "",
+    subtitle: str = "", pages: int = 0,
+) -> bool:
+    """The same summary sheet without a browser: tiles, then bars drawn as rects."""
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        return False
+
+    font_regular, font_bold = _unicode_font()
+    width_pt = _WIDTH * _PT
+    margin = 39.0
+    series = extract_series(markdown)
+    tiles = parse_highlights(highlights)
+
+    def draw(height_pt: float | None):
+        pdf = FPDF(unit="pt", format=(width_pt, height_pt or (_PAGE_H * _PT)))
+        pdf.set_auto_page_break(False)
+        pdf.set_left_margin(margin)
+        pdf.set_right_margin(margin)
+        pdf.add_page()
+        pdf.set_fill_color(*_SURFACE)
+        pdf.rect(0, 0, width_pt, height_pt or (_PAGE_H * _PT), style="F")
+
+        family = "helvetica"
+        if font_regular:
+            try:
+                pdf.add_font("sheet", "", font_regular)
+                pdf.add_font("sheet", "B", font_bold or font_regular)
+                family = "sheet"
+            except Exception:  # noqa: BLE001
+                family = "helvetica"
+        conv = _strip_emoji if family != "helvetica" else _ascii
+        inner = width_pt - 2 * margin
+
+        pdf.set_xy(margin, 36)
+        pdf.set_font(family, "", 8)
+        pdf.set_text_color(*_MUTED)
+        pdf.cell(0, 10, conv(_EYEBROW.upper()), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_x(margin)
+        pdf.set_font(family, "B", 26)
+        pdf.set_text_color(*_INK)
+        pdf.multi_cell(inner, 31, conv(title or "Report"), align="L")
+        if subtitle:
+            pdf.set_x(margin)
+            pdf.set_font(family, "", 11)
+            pdf.set_text_color(*_INK2)
+            pdf.multi_cell(inner, 15, conv(subtitle), align="L")
+        pdf.ln(10)
+        pdf.set_draw_color(*_GRID)
+        pdf.set_line_width(0.6)
+        pdf.line(margin, pdf.get_y(), width_pt - margin, pdf.get_y())
+        pdf.ln(14)
+
+        if tiles:
+            per_row = min(len(tiles), 3 if len(tiles) in (3, 5, 6) else 4)
+            col = inner / per_row
+            for index, tile in enumerate(tiles):
+                if index and index % per_row == 0:
+                    pdf.set_y(pdf.get_y() + 62)
+                top = pdf.get_y()
+                x = margin + (index % per_row) * col
+                pdf.set_xy(x, top)
+                pdf.set_font(family, "", 8)
+                pdf.set_text_color(*_MUTED)
+                pdf.cell(col, 11, conv(tile["label"]), align="L")
+                pdf.set_xy(x, top + 13)
+                pdf.set_font(family, "B", 21)
+                pdf.set_text_color(*_INK)
+                pdf.cell(col, 25, conv(tile["value"]), align="L")
+                if tile["note"]:
+                    pdf.set_xy(x, top + 39)
+                    pdf.set_font(family, "", 8)
+                    pdf.set_text_color(*_INK2)
+                    pdf.multi_cell(col - 8, 10, conv(tile["note"]), align="L")
+                pdf.set_y(top)
+            pdf.set_y(pdf.get_y() + 70)
+
+        for chart in series:
+            pdf.set_x(margin)
+            pdf.set_font(family, "B", 9)
+            pdf.set_text_color(*_MUTED)
+            pdf.cell(0, 14, conv(chart["title"].upper()), new_x="LMARGIN", new_y="NEXT")
+            label_w, value_w = 118.0, 56.0
+            bar_w = inner - label_w - value_w - 16
+            values = chart["items"]
+            span = max((abs(v) for _l, v in values), default=1) or 1
+            for label, value in values:
+                y = pdf.get_y()
+                pdf.set_xy(margin, y)
+                pdf.set_font(family, "", 10)
+                pdf.set_text_color(*_INK)
+                pdf.cell(label_w, 17, conv(label), align="L")
+                bar_x = margin + label_w + 8
+                pdf.set_fill_color(240, 239, 236)
+                pdf.rect(bar_x, y + 2, bar_w, 14, style="F", round_corners=True,
+                         corner_radius=3)
+                if chart["signed"]:
+                    mid = bar_x + bar_w / 2
+                    length = abs(value) / span * (bar_w / 2)
+                    pdf.set_fill_color(*(_NEG if value < 0 else _POS))
+                    pdf.rect(mid - length if value < 0 else mid, y + 2, length, 14,
+                             style="F", round_corners=True, corner_radius=3)
+                    pdf.set_draw_color(*_RULE)
+                    pdf.line(mid, y, mid, y + 18)
+                else:
+                    pdf.set_fill_color(*_POS)
+                    pdf.rect(bar_x, y + 2, max(bar_w * value / span, 1), 14,
+                             style="F", round_corners=True, corner_radius=3)
+                pdf.set_xy(bar_x + bar_w + 8, y)
+                pdf.set_font(family, "B", 10)
+                pdf.set_text_color(*(_NEG if chart["signed"] and value < 0 else _INK))
+                pdf.cell(value_w, 17, f"{value:+.1f}%" if chart["signed"] else f"{value:.1f}%",
+                         align="R")
+                pdf.set_y(y + 19)
+            pdf.ln(10)
+
+        notes = extract_notes(markdown, {c["title"] for c in series})
+        if notes:
+            pdf.set_draw_color(*_GRID)
+            pdf.line(margin, pdf.get_y(), width_pt - margin, pdf.get_y())
+            pdf.ln(12)
+            pdf.set_x(margin)
+            pdf.set_font(family, "B", 9)
+            pdf.set_text_color(*_MUTED)
+            pdf.cell(0, 14, conv("KEY OBSERVATIONS"), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font(family, "", 10)
+            pdf.set_text_color(*_INK)
+            for note in notes:
+                pdf.set_x(margin)
+                pdf.multi_cell(inner, 14, conv(f"•  {note}"), align="L")
+            pdf.ln(4)
+
+        end = pdf.get_y()
+        pdf.set_font(family, "", 7)
+        pdf.set_text_color(*_MUTED)
+        tail = (f"Summary of a {pages}-page report - full PDF attached"
+                if pages > 1 else _stamp())
+        pdf.set_xy(margin, end + 8)
+        pdf.multi_cell(inner, 9, conv(f"{tail}  ·  {_DISCLAIMER}"), align="L")
+        return pdf, pdf.get_y()
+
+    try:
+        _probe, end_y = draw(_MAX_H * _PT)
+        doc, _ = draw(end_y + 30)
+        doc.output(str(pdf_path))
+    except Exception:  # noqa: BLE001 - a cover must never take the report down
+        return False
+    return pdf_path.exists()
