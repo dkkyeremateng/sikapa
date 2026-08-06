@@ -784,11 +784,14 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
     # distilled figures read better than the document's first page at any length.
     # It falls back to page 1 if the sheet would be empty or the render fails,
     # since a cover is worth less than the report it introduces.
-    if output_mode() == "pdf":
+    wanted = output_mode()
+    if wanted == "pdf":
         return paths
     if content is not None and _worth_charting(content):
         with use_theme(cover_theme()):
-            cover = _build_cover(out_dir, stem, content, pages, chrome)
+            cover = _build_cover(
+                out_dir, stem, content, pages, chrome, attached=wanted != "image"
+            )
         if cover and rasterize_first_page(str(cover), str(png)):
             paths["png"] = str(png)
             paths["cover"] = "infographic"
@@ -813,7 +816,8 @@ def _worth_charting(content: dict[str, str]) -> bool:
 
 
 def _build_cover(
-    out_dir: Path, stem: str, content: dict[str, str], pages: int, chrome: str
+    out_dir: Path, stem: str, content: dict[str, str], pages: int, chrome: str,
+    attached: bool = True,
 ) -> Path | None:
     """Render the summary infographic to its own single-page PDF, or None."""
     info_pdf = out_dir / f"{stem}-cover.pdf"
@@ -824,12 +828,16 @@ def _build_cover(
     if chrome:
         info_html = out_dir / f"{stem}-cover.html"
         info_html.write_text(
-            build_infographic_html(title, markdown, highlights, subtitle, pages=pages),
+            build_infographic_html(
+                title, markdown, highlights, subtitle, pages=pages, attached=attached
+            ),
             encoding="utf-8",
         )
         if _chrome_pdf(chrome, info_html, info_pdf, single_page=True):
             return info_pdf
-    if _fpdf_infographic(info_pdf, title, markdown, highlights, subtitle, pages):
+    if _fpdf_infographic(
+        info_pdf, title, markdown, highlights, subtitle, pages, attached=attached
+    ):
         return info_pdf
     return None
 
@@ -1402,6 +1410,22 @@ def _notes_html(markdown: str, used_titles: set[str]) -> str:
     return f'<div class="notes"><h2>Key observations</h2><ul>{lis}</ul></div>'
 
 
+def _cover_tail(pages: int, attached: bool) -> str:
+    """The cover's footer line — what this sheet is, and where the rest of it is.
+
+    It may only promise a PDF when one is actually being delivered. Under
+    ``output="image"`` the document stays on disk and never reaches the reader, so
+    "full PDF attached" would be pointing at a file they don't have. The page count
+    still earns its place there — it tells them how much was distilled — but for a
+    single-page report with nothing attached the whole line says nothing, and the
+    generation stamp is better use of the space.
+    """
+    if not attached:
+        return f"Summary of a {pages}-page report" if pages > 1 else ""
+    return (f"Summary of a {pages}-page report — full PDF attached" if pages > 1
+            else "Summary — full report attached as PDF")
+
+
 def build_infographic_html(
     title: str,
     markdown: str,
@@ -1410,6 +1434,7 @@ def build_infographic_html(
     eyebrow: str = "",
     pages: int = 0,
     page_height: int = _PAGE_H,
+    attached: bool = True,
 ) -> str:
     """A one-page visual summary of a multi-page report. Pure and testable."""
     tiles = parse_highlights(highlights)
@@ -1440,8 +1465,7 @@ def build_infographic_html(
         charts_html = '<div class="charts">' + "".join(cards) + "</div>"
     notes = _notes_html(markdown, {s["title"] for s in series})
 
-    tail = (f"Summary of a {pages}-page report — full PDF attached" if pages > 1
-            else "Summary — full report attached as PDF")
+    tail = _cover_tail(pages, attached)
     return _INFO_DOC.format(
         css=_INFO_CSS.format(
             w=_WIDTH, h=max(200, min(int(page_height), _MAX_H)),
@@ -1460,7 +1484,7 @@ def build_infographic_html(
 
 def _fpdf_infographic(
     pdf_path: Path, title: str, markdown: str, highlights: str = "",
-    subtitle: str = "", pages: int = 0,
+    subtitle: str = "", pages: int = 0, attached: bool = True,
 ) -> bool:
     """The same summary sheet without a browser: tiles, then bars drawn as rects."""
     try:
@@ -1601,8 +1625,7 @@ def _fpdf_infographic(
         end = pdf.get_y()
         pdf.set_font(family, "", 7)
         pdf.set_text_color(*_ink("muted"))
-        tail = (f"Summary of a {pages}-page report - full PDF attached" if pages > 1
-                else "Summary - full report attached as PDF")
+        tail = _cover_tail(pages, attached) or _stamp()
         pdf.set_xy(margin, end + 8)
         pdf.multi_cell(inner, 9, conv(f"{tail}  ·  {_DISCLAIMER}"), align="L")
         return pdf, pdf.get_y()

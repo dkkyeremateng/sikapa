@@ -989,6 +989,38 @@ def test_output_mode_selects_what_is_delivered(monkeypatch, tmp_path):
     assert sent == ["pdf"]
 
 
+def test_the_cover_only_promises_a_pdf_when_one_is_delivered():
+    """Under `output="image"` the document stays on disk and never reaches the
+    reader, so a footer pointing at an attachment points at nothing."""
+    assert reports._cover_tail(3, True) == "Summary of a 3-page report — full PDF attached"
+    # The page count survives — it says how much was distilled — the promise does not.
+    assert reports._cover_tail(3, False) == "Summary of a 3-page report"
+    # One page with nothing attached leaves the line saying nothing at all.
+    assert reports._cover_tail(1, False) == ""
+
+
+@pytest.mark.parametrize("renderer", ["chrome", "fpdf2"])
+def test_an_image_only_render_drops_the_attachment_line(monkeypatch, tmp_path, renderer):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_OUTPUT", "image")
+    monkeypatch.setattr(reports, "_SINGLE_MAX_H", 500)
+    monkeypatch.setattr(reports, "_PAGE_H", 500)  # force several pages
+    payload = {
+        "title": "Portfolio Analysis Report", "markdown": _REPORT_MD,
+        "highlights": "Portfolio Value | $38,420 | +$1,860",
+    }
+    paths = _render_with(monkeypatch, tmp_path, payload, renderer)
+    assert paths["cover"] == "infographic"
+
+    import pypdfium2 as pdfium
+
+    cover_pdf = tmp_path / (Path(paths["pdf"]).stem + "-cover.pdf")
+    text = " ".join(
+        pdfium.PdfDocument(str(cover_pdf))[0].get_textpage().get_text_range().split()
+    )
+    assert "PDF attached" not in text
+    assert "Summary of a" in text, "the page count is still worth stating"
+
+
 def test_a_per_report_theme_overrides_the_default_and_is_restored(monkeypatch, tmp_path):
     monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "light")
     seen: list[str] = []
