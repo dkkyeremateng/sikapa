@@ -79,6 +79,39 @@ _RENDER_TIMEOUT = 120
 #: CSS px -> PDF points.
 _PT = 0.75
 
+#: Light and dark are both SELECTED, not one flipped into the other: the dark row
+#: takes its own steps from the same ramps, chosen for the dark surface. Both
+#: diverging pairs pass the data-viz validator against their own surface (CVD dE
+#: 21.6 light / 19.2 dark, contrast >= 3:1).
+_THEMES = {
+    "light": {
+        "surface": "#fcfcfb", "page": "#f9f9f7", "ink": "#0b0b0b", "ink2": "#52514e",
+        "muted": "#898781", "grid": "#e1e0d9", "rule": "#c3c2b7", "track": "#f0efec",
+        "accent": "#2a78d6", "warn": "#e34948", "wash": "#f4f4f1",
+        "pos": "#2a78d6", "neg": "#e34948", "callout": "#fdf5f5",
+    },
+    "dark": {
+        "surface": "#1a1a19", "page": "#0d0d0d", "ink": "#ffffff", "ink2": "#c3c2b7",
+        "muted": "#898781", "grid": "#2c2c2a", "rule": "#383835", "track": "#232322",
+        "accent": "#3987e5", "warn": "#e66767", "wash": "#232322",
+        "pos": "#3987e5", "neg": "#e66767", "callout": "#2a1e1e",
+    },
+}
+
+
+def report_theme() -> str:
+    name = (os.environ.get("FINANCIAL_RESEARCH_REPORT_THEME") or "").strip().lower()
+    return name if name in _THEMES else "light"
+
+
+def _palette() -> dict[str, str]:
+    return _THEMES[report_theme()]
+
+
+def _rgb(hex_colour: str) -> tuple[int, int, int]:
+    h = hex_colour.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
 #: Added to the measured height before sizing the page. Print layout computes
 #: fractionally taller boxes than `scrollHeight` reports, and being 1px short spills
 #: the sheet onto a second, near-empty page — measured at 1013px needing 1021.
@@ -159,6 +192,19 @@ def parse_highlights(raw: str) -> list[dict[str, str]]:
     return tiles[:6]  # past six they stop being scannable
 
 
+#: A tile value should be a FIGURE. When the model writes a phrase instead it wraps
+#: onto a second line, making that tile taller than its neighbours and breaking the
+#: grid rhythm (observed: "Q1 2026: +24.0% surprise"). Rather than rewrite the
+#: model's text — an early attempt turned "Trailing P/E: 11.33" into the meaningless
+#: "Trailing P/E: 11" — the type steps down so every character survives on one line.
+_TILE_STEPS = ((16, ""), (26, " sm"), (999, " xs"))
+
+
+def _tile_size(value: str) -> str:
+    """The size-class suffix for a tile value."""
+    return next(cls for limit, cls in _TILE_STEPS if len(value or "") <= limit)
+
+
 def _markdown_html(text: str) -> str:
     """Markdown -> HTML via markdown-it (already present through rich)."""
     try:
@@ -172,8 +218,7 @@ def _markdown_html(text: str) -> str:
 
 
 _CSS = """
-:root{{--surface:#fcfcfb;--page:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
---grid:#e1e0d9;--rule:#c3c2b7;--accent:#2a78d6;--warn:#e34948;--wash:#f4f4f1;}}
+:root{{{vars}}}
 @page{{size:{w}px {h}px;margin:0}}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{width:{w}px;background:var(--page);color:var(--ink);
@@ -186,7 +231,9 @@ h1.doc{{font-size:44px;line-height:1.1;font-weight:650;letter-spacing:-.02em;mar
 .tiles{{display:grid;gap:2px;background:var(--grid);margin-bottom:4px}}
 .tile{{background:var(--surface);padding:20px 18px}}
 .tile .lab{{font-size:13.5px;color:var(--muted);font-weight:500}}
-.tile .val{{font-size:31px;font-weight:650;margin-top:8px;letter-spacing:-.02em}}
+.tile .val{{font-size:31px;font-weight:650;margin-top:8px;letter-spacing:-.02em;white-space:nowrap}}
+.tile .val.sm{{font-size:23px}}
+.tile .val.xs{{font-size:17px;white-space:normal}}
 .tile .note{{font-size:14px;color:var(--ink2);margin-top:6px}}
 .body{{font-size:17px;line-height:1.62;color:var(--ink)}}
 .body h1{{font-size:27px;font-weight:650;margin:30px 0 12px;letter-spacing:-.01em}}
@@ -199,7 +246,7 @@ h1.doc{{font-size:44px;line-height:1.1;font-weight:650;letter-spacing:-.02em;mar
 .body strong{{font-weight:650}}
 .body code{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;
  background:var(--wash);padding:2px 6px;border-radius:4px}}
-.body blockquote{{border-left:4px solid var(--warn);background:#fdf5f5;padding:14px 20px;margin:18px 0}}
+.body blockquote{{border-left:4px solid var(--warn);background:var(--callout);padding:14px 20px;margin:18px 0}}
 .body blockquote p{{margin:0;color:var(--ink2)}}
 .body table{{border-collapse:collapse;width:100%;margin:18px 0;font-size:16px}}
 .body th{{text-align:left;font-size:13px;letter-spacing:.08em;text-transform:uppercase;
@@ -240,6 +287,11 @@ _DISCLAIMER = (
 _EYEBROW = "Financial research assistant"
 
 
+def _css_vars() -> str:
+    """The theme as CSS custom properties, so the sheet is written against roles."""
+    return "".join(f"--{k}:{v};" for k, v in _palette().items())
+
+
 def _stamp() -> str:
     return f"Generated {datetime.now():%d %B %Y, %H:%M}"
 
@@ -263,7 +315,7 @@ def build_html(
         cols = min(len(tiles), 4)
         cells = "".join(
             f'<div class="tile"><div class="lab">{_html.escape(t["label"])}</div>'
-            f'<div class="val">{_html.escape(t["value"])}</div>'
+            f'<div class="val{_tile_size(t["value"])}">{_html.escape(t["value"])}</div>'
             + (f'<div class="note">{_html.escape(t["note"])}</div>' if t["note"] else "")
             + "</div>"
             for t in tiles
@@ -272,7 +324,7 @@ def build_html(
             f'<div class="tiles" style="grid-template-columns:repeat({cols},1fr)">{cells}</div>'
         )
     return _DOC.format(
-        css=_CSS.format(w=_WIDTH, h=max(200, min(int(page_height), _MAX_H))),
+        css=_CSS.format(w=_WIDTH, h=max(200, min(int(page_height), _MAX_H)), vars=_css_vars()),
         title=_html.escape(title or "Report"),
         eyebrow=_html.escape(eyebrow or _EYEBROW),
         subtitle=f'<div class="sub">{_html.escape(subtitle)}</div>' if subtitle else "",
@@ -342,15 +394,9 @@ def _chrome_pdf(
 
 # --- fpdf2 renderer (no browser) -----------------------------------------------
 
-_SURFACE = (252, 252, 251)
-_INK = (11, 11, 11)
-_INK2 = (82, 81, 78)
-_MUTED = (137, 135, 129)
-_GRID = (225, 224, 217)
-_RULE = (195, 194, 183)
-#: Validated diverging pair (CVD dE 21.6) — up vs down, never magnitude.
-_POS = (42, 120, 214)
-_NEG = (227, 73, 72)
+def _ink(role: str) -> tuple[int, int, int]:
+    """A theme colour as RGB, for the browser-free renderer."""
+    return _rgb(_palette()[role])
 
 #: System fonts carrying the punctuation a report actually uses (— · ▼ ✓ →). The
 #: core PDF fonts are Latin-1 only and RAISE on an em dash, so without one of these
@@ -433,12 +479,12 @@ def _tag_styles(family: str) -> dict[str, Any]:
         return {}
     return {
         "h1": TextStyle(font_family=family, font_style="B", font_size_pt=17,
-                        color=_INK, t_margin=10, b_margin=3),
+                        color=_ink("ink"), t_margin=10, b_margin=3),
         "h2": TextStyle(font_family=family, font_style="B", font_size_pt=11,
-                        color=_MUTED, t_margin=11, b_margin=2),
+                        color=_ink("muted"), t_margin=11, b_margin=2),
         "h3": TextStyle(font_family=family, font_style="B", font_size_pt=13,
-                        color=_INK, t_margin=8, b_margin=2),
-        "blockquote": TextStyle(font_family=family, font_size_pt=10, color=_INK2,
+                        color=_ink("ink"), t_margin=8, b_margin=2),
+        "blockquote": TextStyle(font_family=family, font_size_pt=10, color=_ink("ink2"),
                                 l_margin=12, t_margin=5, b_margin=5),
     }
 
@@ -494,7 +540,7 @@ def _fpdf_pdf(
             self.set_y(-40)
             self.set_x(margin)
             self.set_font(self.family, "", 7)
-            self.set_text_color(*_MUTED)
+            self.set_text_color(*_ink("muted"))
             self.multi_cell(
                 width_pt - 2 * margin, 9,
                 self.conv(f"{_stamp()}  ·  {_DISCLAIMER}"), align="L",
@@ -507,7 +553,7 @@ def _fpdf_pdf(
         pdf.set_left_margin(margin)
         pdf.set_right_margin(margin)
         pdf.add_page()
-        pdf.set_fill_color(*_SURFACE)
+        pdf.set_fill_color(*_ink("surface"))
         pdf.rect(0, 0, width_pt, page_h, style="F")
 
         family = "helvetica"
@@ -528,19 +574,19 @@ def _fpdf_pdf(
 
         pdf.set_xy(margin, 33)
         pdf.set_font(family, "", 8)
-        pdf.set_text_color(*_MUTED)
+        pdf.set_text_color(*_ink("muted"))
         pdf.cell(0, 10, conv((eyebrow or _EYEBROW).upper()), new_x="LMARGIN", new_y="NEXT")
         pdf.set_x(margin)
         pdf.set_font(family, "B", 23)
-        pdf.set_text_color(*_INK)
+        pdf.set_text_color(*_ink("ink"))
         pdf.multi_cell(width_pt - 2 * margin, 28, conv(title or "Report"), align="L")
         if subtitle:
             pdf.set_x(margin)
             pdf.set_font(family, "", 11)
-            pdf.set_text_color(*_INK2)
+            pdf.set_text_color(*_ink("ink2"))
             pdf.multi_cell(width_pt - 2 * margin, 15, conv(subtitle), align="L")
         pdf.ln(10)
-        pdf.set_draw_color(*_GRID)
+        pdf.set_draw_color(*_ink("grid"))
         pdf.set_line_width(0.6)
         pdf.line(margin, pdf.get_y(), width_pt - margin, pdf.get_y())
         pdf.ln(12)
@@ -555,25 +601,25 @@ def _fpdf_pdf(
                     pdf.line(x - 4, top, x - 4, top + 52)
                 pdf.set_xy(x, top)
                 pdf.set_font(family, "", 8)
-                pdf.set_text_color(*_MUTED)
+                pdf.set_text_color(*_ink("muted"))
                 pdf.cell(col, 11, conv(t["label"]), align="L")
                 pdf.set_xy(x, top + 13)
                 pdf.set_font(family, "B", 19)
-                pdf.set_text_color(*_INK)
+                pdf.set_text_color(*_ink("ink"))
                 pdf.cell(col, 24, conv(t["value"]), align="L")
                 if t["note"]:
                     pdf.set_xy(x, top + 38)
                     pdf.set_font(family, "", 8)
-                    pdf.set_text_color(*_INK2)
+                    pdf.set_text_color(*_ink("ink2"))
                     pdf.multi_cell(col - 8, 10, conv(t["note"]), align="L")
             pdf.set_y(top + 60)
-            pdf.set_draw_color(*_GRID)
+            pdf.set_draw_color(*_ink("grid"))
             pdf.line(margin, pdf.get_y(), width_pt - margin, pdf.get_y())
             pdf.ln(10)
 
         pdf.set_x(margin)
         pdf.set_font(family, "", 11)
-        pdf.set_text_color(*_INK)
+        pdf.set_text_color(*_ink("ink"))
         body_html = _markdown_html(markdown).replace("<th>", '<th align="left">')
         pdf.write_html(
             conv(body_html),
@@ -1116,8 +1162,7 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
 
 
 _INFO_CSS = """
-:root{{--surface:#fcfcfb;--page:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
---grid:#e1e0d9;--rule:#c3c2b7;--pos:#2a78d6;--neg:#e34948;--track:#f0efec;}}
+:root{{{vars}}}
 @page{{size:{w}px {h}px;margin:0}}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{width:{w}px;background:var(--surface);color:var(--ink);
@@ -1130,7 +1175,9 @@ h1{{font-size:46px;line-height:1.06;font-weight:650;letter-spacing:-.025em;margi
 .tiles{{display:grid;gap:2px;background:var(--grid)}}
 .tile{{background:var(--surface);padding:20px 18px}}
 .tile .lab{{font-size:13px;color:var(--muted);font-weight:500}}
-.tile .val{{font-size:34px;font-weight:650;margin-top:6px;letter-spacing:-.025em;line-height:1.05}}
+.tile .val{{font-size:34px;font-weight:650;margin-top:6px;letter-spacing:-.025em;line-height:1.05;white-space:nowrap}}
+.tile .val.sm{{font-size:25px}}
+.tile .val.xs{{font-size:18px;white-space:normal}}
 .tile .note{{font-size:13.5px;color:var(--ink2);margin-top:7px;line-height:1.4}}
 .charts{{display:grid;grid-template-columns:repeat({cols},1fr);gap:34px 40px;margin-top:32px}}
 .card.wide{{grid-column:1 / -1}}
@@ -1194,6 +1241,7 @@ def _is_diverging(series: dict[str, Any]) -> bool:
 
 
 def _bars_html(series: dict[str, Any]) -> str:
+    pal = _palette()
     items = series["items"]
     rows = []
     if _is_diverging(series):
@@ -1206,17 +1254,17 @@ def _bars_html(series: dict[str, Any]) -> str:
                 f'<div class="row"><div class="k">{_html.escape(label)}</div>'
                 f'<div class="dv"><div class="zero"></div>'
                 f'<div class="bar {side}" style="{style}"></div></div>'
-                f'<div class="v" style="color:{"#e34948" if value < 0 else "#2a78d6"}">'
+                f'<div class="v" style="color:{pal["neg"] if value < 0 else pal["pos"]}">'
                 f'{_fmt_value(value, series.get("unit", "%"), True)}</div></div>'
             )
-        legend = ('<div class="legend"><span><span class="sw" style="background:#2a78d6">'
-                  '</span>Up</span><span><span class="sw" style="background:#e34948">'
-                  '</span>Down</span></div>')
+        legend = (f'<div class="legend"><span><span class="sw" style="background:'
+                  f'{pal["pos"]}"></span>Up</span><span><span class="sw" '
+                  f'style="background:{pal["neg"]}"></span>Down</span></div>')
     else:
         signed = bool(series.get("signed"))
         top = max((abs(v) for _l, v in items), default=1) or 1
         negative = all(v <= 0 for _l, v in items) and signed
-        colour = "#e34948" if negative else "#2a78d6"
+        colour = pal["neg"] if negative else pal["pos"]
         for label, value in items:
             rows.append(
                 f'<div class="row"><div class="k">{_html.escape(label)}</div>'
@@ -1274,7 +1322,7 @@ def build_infographic_html(
         cols = min(len(tiles), 3 if len(tiles) in (3, 5, 6) else 4)
         cells = "".join(
             f'<div class="tile"><div class="lab">{_html.escape(t["label"])}</div>'
-            f'<div class="val">{_html.escape(t["value"])}</div>'
+            f'<div class="val{_tile_size(t["value"])}">{_html.escape(t["value"])}</div>'
             + (f'<div class="note">{_html.escape(t["note"])}</div>' if t["note"] else "")
             + "</div>"
             for t in tiles
@@ -1301,7 +1349,7 @@ def build_infographic_html(
     return _INFO_DOC.format(
         css=_INFO_CSS.format(
             w=_WIDTH, h=max(200, min(int(page_height), _MAX_H)),
-            cols=2 if len(series) > 1 else 1,
+            cols=2 if len(series) > 1 else 1, vars=_css_vars(),
         ),
         title=_html.escape(title or "Report"),
         eyebrow=_html.escape(eyebrow or _EYEBROW),
@@ -1336,7 +1384,7 @@ def _fpdf_infographic(
         pdf.set_left_margin(margin)
         pdf.set_right_margin(margin)
         pdf.add_page()
-        pdf.set_fill_color(*_SURFACE)
+        pdf.set_fill_color(*_ink("surface"))
         pdf.rect(0, 0, width_pt, height_pt or (_PAGE_H * _PT), style="F")
 
         family = "helvetica"
@@ -1352,19 +1400,19 @@ def _fpdf_infographic(
 
         pdf.set_xy(margin, 36)
         pdf.set_font(family, "", 8)
-        pdf.set_text_color(*_MUTED)
+        pdf.set_text_color(*_ink("muted"))
         pdf.cell(0, 10, conv(_EYEBROW.upper()), new_x="LMARGIN", new_y="NEXT")
         pdf.set_x(margin)
         pdf.set_font(family, "B", 26)
-        pdf.set_text_color(*_INK)
+        pdf.set_text_color(*_ink("ink"))
         pdf.multi_cell(inner, 31, conv(title or "Report"), align="L")
         if subtitle:
             pdf.set_x(margin)
             pdf.set_font(family, "", 11)
-            pdf.set_text_color(*_INK2)
+            pdf.set_text_color(*_ink("ink2"))
             pdf.multi_cell(inner, 15, conv(subtitle), align="L")
         pdf.ln(10)
-        pdf.set_draw_color(*_GRID)
+        pdf.set_draw_color(*_ink("grid"))
         pdf.set_line_width(0.6)
         pdf.line(margin, pdf.get_y(), width_pt - margin, pdf.get_y())
         pdf.ln(14)
@@ -1379,16 +1427,17 @@ def _fpdf_infographic(
                 x = margin + (index % per_row) * col
                 pdf.set_xy(x, top)
                 pdf.set_font(family, "", 8)
-                pdf.set_text_color(*_MUTED)
+                pdf.set_text_color(*_ink("muted"))
                 pdf.cell(col, 11, conv(tile["label"]), align="L")
                 pdf.set_xy(x, top + 13)
-                pdf.set_font(family, "B", 21)
-                pdf.set_text_color(*_INK)
+                size = {"": 21, " sm": 16, " xs": 12}[_tile_size(tile["value"])]
+                pdf.set_font(family, "B", size)
+                pdf.set_text_color(*_ink("ink"))
                 pdf.cell(col, 25, conv(tile["value"]), align="L")
                 if tile["note"]:
                     pdf.set_xy(x, top + 39)
                     pdf.set_font(family, "", 8)
-                    pdf.set_text_color(*_INK2)
+                    pdf.set_text_color(*_ink("ink2"))
                     pdf.multi_cell(col - 8, 10, conv(tile["note"]), align="L")
                 pdf.set_y(top)
             pdf.set_y(pdf.get_y() + 70)
@@ -1396,7 +1445,7 @@ def _fpdf_infographic(
         for chart in series:
             pdf.set_x(margin)
             pdf.set_font(family, "B", 9)
-            pdf.set_text_color(*_MUTED)
+            pdf.set_text_color(*_ink("muted"))
             pdf.cell(0, 14, conv(chart["title"].upper()), new_x="LMARGIN", new_y="NEXT")
             label_w, value_w = 118.0, 56.0
             bar_w = inner - label_w - value_w - 16
@@ -1407,7 +1456,7 @@ def _fpdf_infographic(
                 y = pdf.get_y()
                 pdf.set_xy(margin, y)
                 pdf.set_font(family, "", 10)
-                pdf.set_text_color(*_INK)
+                pdf.set_text_color(*_ink("ink"))
                 pdf.cell(label_w, 17, conv(label), align="L")
                 bar_x = margin + label_w + 8
                 pdf.set_fill_color(240, 239, 236)
@@ -1416,19 +1465,19 @@ def _fpdf_infographic(
                 if diverging:
                     mid = bar_x + bar_w / 2
                     length = abs(value) / span * (bar_w / 2)
-                    pdf.set_fill_color(*(_NEG if value < 0 else _POS))
+                    pdf.set_fill_color(*(_ink("neg") if value < 0 else _ink("pos")))
                     pdf.rect(mid - length if value < 0 else mid, y + 2, length, 14,
                              style="F", round_corners=True, corner_radius=3)
-                    pdf.set_draw_color(*_RULE)
+                    pdf.set_draw_color(*_ink("rule"))
                     pdf.line(mid, y, mid, y + 18)
                 else:
                     negative = all(v <= 0 for _l, v in values) and chart["signed"]
-                    pdf.set_fill_color(*(_NEG if negative else _POS))
+                    pdf.set_fill_color(*(_ink("neg") if negative else _ink("pos")))
                     pdf.rect(bar_x, y + 2, max(bar_w * abs(value) / span, 1), 14,
                              style="F", round_corners=True, corner_radius=3)
                 pdf.set_xy(bar_x + bar_w + 8, y)
                 pdf.set_font(family, "B", 10)
-                pdf.set_text_color(*(_NEG if chart["signed"] and value < 0 else _INK))
+                pdf.set_text_color(*(_ink("neg") if chart["signed"] and value < 0 else _ink("ink")))
                 pdf.cell(
                     value_w, 17,
                     conv(_fmt_value(value, chart.get("unit", "%"), chart["signed"])),
@@ -1439,15 +1488,15 @@ def _fpdf_infographic(
 
         notes = extract_notes(markdown, {c["title"] for c in series})
         if notes:
-            pdf.set_draw_color(*_GRID)
+            pdf.set_draw_color(*_ink("grid"))
             pdf.line(margin, pdf.get_y(), width_pt - margin, pdf.get_y())
             pdf.ln(12)
             pdf.set_x(margin)
             pdf.set_font(family, "B", 9)
-            pdf.set_text_color(*_MUTED)
+            pdf.set_text_color(*_ink("muted"))
             pdf.cell(0, 14, conv("KEY OBSERVATIONS"), new_x="LMARGIN", new_y="NEXT")
             pdf.set_font(family, "", 10)
-            pdf.set_text_color(*_INK)
+            pdf.set_text_color(*_ink("ink"))
             for note in notes:
                 pdf.set_x(margin)
                 pdf.multi_cell(inner, 14, conv(f"•  {note}"), align="L")
@@ -1455,7 +1504,7 @@ def _fpdf_infographic(
 
         end = pdf.get_y()
         pdf.set_font(family, "", 7)
-        pdf.set_text_color(*_MUTED)
+        pdf.set_text_color(*_ink("muted"))
         tail = (f"Summary of a {pages}-page report - full PDF attached" if pages > 1
                 else "Summary - full report attached as PDF")
         pdf.set_xy(margin, end + 8)

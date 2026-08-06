@@ -754,6 +754,12 @@ scheduled task produce one.
 The body is ordinary markdown: headings, tables, and `>` for a warning callout.
 Files land in `~/.financial-research-assistant/reports`.
 
+**Light or dark.** `FINANCIAL_RESEARCH_REPORT_THEME=dark` renders the sheet on a
+dark surface. Both themes are *selected*, not one flipped into the other: the dark
+row takes its own steps from the same ramps and its diverging pair is re-validated
+against the dark surface (CVD ΔE 19.2, contrast ≥ 3:1), because inverting light
+values fails contrast on a dark background.
+
 Two details decide whether it is actually readable. The sheet is rendered at 3x
 (`FINANCIAL_RESEARCH_REPORT_SCALE`) and sized to its own measured height, so
 there is no dead band and body text survives being pinched into. And it is sent as
