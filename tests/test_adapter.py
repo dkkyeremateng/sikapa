@@ -639,3 +639,141 @@ async def test_an_ordinary_answer_never_reaches_the_repair(monkeypatch):
     monkeypatch.setattr(llm, "quick_llm", explode)
     answer = "AAPL closed at $214.30, up 1.2%."
     assert await settle_schedule_claim("q", answer, set()) == answer
+
+
+# --- interrupted tool calls ------------------------------------------------------
+
+
+def _ai_with_calls(*ids):
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content="working on it",
+        tool_calls=[
+            {"id": i, "name": f"tool_{n}", "args": {}} for n, i in enumerate(ids)
+        ],
+    )
+
+
+def test_an_unanswered_tool_call_gets_a_synthetic_result():
+    """Every provider rejects a tool call with no result, so a turn killed between
+    the model node and the tool node would brick the thread for good."""
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from financial_research_assistant.adapter import repair_tool_call_pairs
+
+    history = [HumanMessage(content="analyse my holdings"), _ai_with_calls("a", "b", "c")]
+    fixed, made, dropped = repair_tool_call_pairs(history)
+    assert (made, dropped) == (3, 0)
+    results = [m for m in fixed if isinstance(m, ToolMessage)]
+    assert [m.tool_call_id for m in results] == ["a", "b", "c"]
+    assert all(m.status == "error" for m in results)
+    # The tool may well have worked — only its result was lost — so the message
+    # reports on the run, and must not tell the model the tool itself failed.
+    body = results[0].content.lower()
+    assert "no result was recorded" in body
+    assert "tool failed" not in body
+
+
+def test_results_that_did_arrive_are_left_alone():
+    """A partially-answered batch keeps its real results and gains only the gaps,
+    in the order the calls were made."""
+    from langchain_core.messages import ToolMessage
+
+    from financial_research_assistant.adapter import repair_tool_call_pairs
+
+    history = [
+        _ai_with_calls("a", "b", "c"),
+        ToolMessage(content="real answer", tool_call_id="b", name="tool_1"),
+    ]
+    fixed, made, dropped = repair_tool_call_pairs(history)
+    assert (made, dropped) == (2, 0)
+    results = [m for m in fixed if isinstance(m, ToolMessage)]
+    assert [m.tool_call_id for m in results] == ["b", "a", "c"]
+    assert results[0].content == "real answer"
+
+
+def test_a_result_whose_call_is_gone_is_dropped():
+    """The mirror-image break — a tool_result with no tool_use — which compaction
+    or a hand-edited thread can produce, and which the API rejects just as hard."""
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from financial_research_assistant.adapter import repair_tool_call_pairs
+
+    history = [
+        HumanMessage(content="hi"),
+        ToolMessage(content="orphan", tool_call_id="ghost", name="t"),
+    ]
+    fixed, made, dropped = repair_tool_call_pairs(history)
+    assert (made, dropped) == (0, 1)
+    assert not [m for m in fixed if isinstance(m, ToolMessage)]
+
+
+def test_a_healthy_history_is_returned_unchanged():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from financial_research_assistant.adapter import repair_tool_call_pairs
+
+    history = [
+        HumanMessage(content="hi"),
+        _ai_with_calls("a"),
+        ToolMessage(content="ok", tool_call_id="a", name="tool_0"),
+        AIMessage(content="done"),
+    ]
+    fixed, made, dropped = repair_tool_call_pairs(history)
+    assert (made, dropped) == (0, 0)
+    assert fixed == history
+
+
+def test_an_invalid_tool_call_still_needs_a_result():
+    """A call whose args failed to parse is still serialized as a tool_use block,
+    so it still has to be paired."""
+    from langchain_core.messages import AIMessage
+
+    from financial_research_assistant.adapter import repair_tool_call_pairs
+
+    broken = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {"id": "x", "name": "screen_stocks", "args": "{not json", "error": "bad args"}
+        ],
+    )
+    _fixed, made, dropped = repair_tool_call_pairs([broken])
+    assert (made, dropped) == (1, 0)
+
+
+async def test_a_broken_thread_heals_before_the_next_turn():
+    """End to end: seed a thread with an interrupted tool call, then take a turn —
+    it must answer rather than error, and say what it repaired."""
+    from financial_research_assistant.adapter import (
+        _fake_graph_for,
+        repair_tool_call_pairs,
+    )
+
+    sid = "heal-e2e"
+    async for _ in run_turn("hi", sid, fake=True):
+        pass
+    graph = _fake_graph_for(sid, True)
+    cfg = {"configurable": {"thread_id": sid}}
+    await graph.aupdate_state(cfg, {"messages": [_ai_with_calls("a", "b")]},
+                              as_node="respond")
+
+    events = [ev async for ev in run_turn("still there?", sid, fake=True)]
+    assert not [ev for ev in events if ev.kind == "error"]
+    assert len([ev for ev in events if ev.kind == "final"]) == 1
+    assert any("unfinished tool call" in ev.text for ev in events if ev.kind == "status")
+
+    messages = (await graph.aget_state(cfg)).values["messages"]
+    _fixed, made, dropped = repair_tool_call_pairs(messages)
+    assert (made, dropped) == (0, 0), "the thread must be left healthy"
+
+
+async def test_a_healthy_thread_is_not_rewritten():
+    """The repair runs on every turn, so a clean thread must pay a read and
+    nothing else — no status line, no checkpoint churn."""
+    sid = "heal-noop"
+    async for _ in run_turn("hi", sid, fake=True):
+        pass
+    events = [ev async for ev in run_turn("again", sid, fake=True)]
+    assert not any("unfinished tool call" in ev.text
+                   for ev in events if ev.kind == "status")
