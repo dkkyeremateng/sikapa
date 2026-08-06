@@ -434,10 +434,10 @@ the PNG + PDF are sent to every configured channel that can carry a file. They g
 as **documents, not photos**: Telegram recompresses a photo and would soften the
 body text, while a document transfers untouched and still previews. Rendered at 3x
 and cropped to the measured content height (`FINANCIAL_RESEARCH_REPORT_SCALE`).
-A long report paginates, and the delivered image is then a **one-sheet
-infographic** of the whole report — stat tiles plus the body's own series (top
-holdings, sector weights, movers) charted — rather than page 1. Single-page reports
-send that page as the image. Rendering prefers
+The delivered image is a **one-sheet infographic** of the whole report — stat tiles
+plus the body's own series (top holdings, sector weights, movers) charted — at any
+length; the PDF alongside it is the full document. A report with neither tiles nor
+series sends page 1 instead. Rendering prefers
 headless **Chrome/Chromium** (better typography) and falls back to a built-in
 **fpdf2** renderer when no browser is installed, so it works everywhere including
 containers; `pypdfium2` makes the cover image either way. The fallback bundles the

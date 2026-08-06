@@ -762,11 +762,13 @@ downscales, which turns dense body text to mush no matter what resolution it was
 rendered at — as a document the bytes arrive untouched and the client still shows a
 tappable preview.
 
-**The PDF is the document; the image is its cover.** A short report becomes a
-single page sized exactly to its content, and the image is that page. A **multi-page
-report gets an infographic** instead — the headline figures plus the report's own
-series, charted — because page 1 of a five-page report is the masthead and whatever
-happened to fit.
+**The PDF is the document; the image is an infographic of it.** Every report gets
+one — the headline figures plus the report's own series, charted — at any length:
+page 1 of a long report is the masthead and whatever happened to fit, and page 1 of
+a short one is prose a picture summarises better. A report with neither stat tiles
+nor series falls back to page 1, since a sheet with nothing to visualise adds
+nothing. The PDF is always the full document, sized to its content when short and
+paginated when long.
 
 The charts are extracted deterministically from the body, with no second model
 call: a run of list items under one heading becomes a series when at least three
