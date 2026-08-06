@@ -47,6 +47,8 @@ import os
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 
@@ -99,9 +101,43 @@ _THEMES = {
 }
 
 
+#: The theme in force for the artifact currently being drawn. The cover and the
+#: document are separate artifacts with different jobs — one is read on a phone,
+#: the other may be printed — so they are themed independently, and a context is
+#: cleaner than threading a parameter through every drawing call.
+_active_theme: ContextVar[str | None] = ContextVar("fra_report_theme", default=None)
+
+
+@contextmanager
+def use_theme(name: str):
+    """Draw everything inside this block in ``name``."""
+    token = _active_theme.set(name if name in _THEMES else "light")
+    try:
+        yield
+    finally:
+        _active_theme.reset(token)
+
+
+def _env_theme(var: str, default: str = "light") -> str:
+    name = (os.environ.get(var) or "").strip().lower()
+    return name if name in _THEMES else default
+
+
+def cover_theme() -> str:
+    """Theme for the image — the artifact that lands in a chat."""
+    return _env_theme("FINANCIAL_RESEARCH_REPORT_THEME")
+
+
+def pdf_theme() -> str:
+    """Theme for the document. Defaults to light INDEPENDENTLY of the cover: a dark
+    PDF lays down a full page of ink when printed, so wanting a dark sheet on a
+    phone should not quietly commit you to that."""
+    return _env_theme("FINANCIAL_RESEARCH_REPORT_PDF_THEME")
+
+
 def report_theme() -> str:
-    name = (os.environ.get("FINANCIAL_RESEARCH_REPORT_THEME") or "").strip().lower()
-    return name if name in _THEMES else "light"
+    """The theme in force right now (the cover's, outside a render)."""
+    return _active_theme.get() or cover_theme()
 
 
 def _palette() -> dict[str, str]:
@@ -682,27 +718,37 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
     paths: dict[str, str] = {}
 
     html_path = out_dir / f"{stem}.html"
-    html_path.write_text(html, encoding="utf-8")
-    paths["html"] = str(html_path)
-
     pdf = out_dir / f"{stem}.pdf"
     made = False
     chrome = chrome_path()
-    if chrome:
-        made = _chrome_pdf(chrome, html_path, pdf)
-        if made:
-            paths["renderer"] = "chrome"
-    if not made and content is not None:
-        made = _fpdf_pdf(
-            pdf,
-            content.get("title", ""),
-            content.get("markdown", ""),
-            content.get("highlights", ""),
-            content.get("subtitle", ""),
-            content.get("eyebrow", ""),
-        )
-        if made:
-            paths["renderer"] = "fpdf2"
+    # The document is drawn under its own theme — see `pdf_theme`. The HTML is
+    # REBUILT here when the raw fields are available: taking it pre-built made the
+    # document's theme depend on whoever called this, which silently produced a
+    # dark PDF for a caller that only asked for a dark cover.
+    with use_theme(pdf_theme()):
+        if content is not None:
+            html = build_html(
+                content.get("title", ""), content.get("markdown", ""),
+                content.get("highlights", ""), content.get("subtitle", ""),
+                content.get("eyebrow", ""),
+            )
+        html_path.write_text(html, encoding="utf-8")
+        paths["html"] = str(html_path)
+        if chrome:
+            made = _chrome_pdf(chrome, html_path, pdf)
+            if made:
+                paths["renderer"] = "chrome"
+        if not made and content is not None:
+            made = _fpdf_pdf(
+                pdf,
+                content.get("title", ""),
+                content.get("markdown", ""),
+                content.get("highlights", ""),
+                content.get("subtitle", ""),
+                content.get("eyebrow", ""),
+            )
+            if made:
+                paths["renderer"] = "fpdf2"
     if not made:
         return paths
     paths["pdf"] = str(pdf)
@@ -714,7 +760,8 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
     # It falls back to page 1 if the sheet would be empty or the render fails,
     # since a cover is worth less than the report it introduces.
     if content is not None and _worth_charting(content):
-        cover = _build_cover(out_dir, stem, content, pages, chrome)
+        with use_theme(cover_theme()):
+            cover = _build_cover(out_dir, stem, content, pages, chrome)
         if cover and rasterize_first_page(str(cover), str(png)):
             paths["png"] = str(png)
             paths["cover"] = "infographic"
@@ -825,8 +872,10 @@ def render_report(
             "allow_prose=True."
         )
 
+    with use_theme(pdf_theme()):
+        document_html = build_html(title, markdown, highlights, subtitle)
     paths = render(
-        build_html(title, markdown, highlights, subtitle),
+        document_html,
         title,
         content={
             "title": title,

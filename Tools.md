@@ -434,7 +434,8 @@ the PNG + PDF are sent to every configured channel that can carry a file. They g
 as **documents, not photos**: Telegram recompresses a photo and would soften the
 body text, while a document transfers untouched and still previews. Rendered at 3x
 and cropped to the measured content height (`FINANCIAL_RESEARCH_REPORT_SCALE`),
-in a light or dark theme (`FINANCIAL_RESEARCH_REPORT_THEME`).
+in a light or dark theme (`FINANCIAL_RESEARCH_REPORT_THEME` for the image,
+`FINANCIAL_RESEARCH_REPORT_PDF_THEME` for the PDF, which stays light by default).
 The delivered image is a **one-sheet infographic** of the whole report — stat tiles
 plus the body's own series charted, from percentage lists **or markdown tables**
 (top holdings, sector weights, movers, beat histories, scenario ladders) — at any

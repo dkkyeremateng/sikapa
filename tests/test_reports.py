@@ -872,3 +872,59 @@ def test_the_prompt_asks_for_a_figure_in_the_value_slot():
     from financial_research_assistant.graph import SYSTEM_PROMPT
 
     assert "A TILE `value` IS A FIGURE" in SYSTEM_PROMPT
+
+
+# --- cover and document are themed independently ---------------------------------
+
+
+def test_the_document_defaults_to_light_even_when_the_cover_is_dark(monkeypatch):
+    """A dark PDF lays down a full page of ink when printed, so asking for a dark
+    sheet on a phone must not quietly commit you to that."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "dark")
+    monkeypatch.delenv("FINANCIAL_RESEARCH_REPORT_PDF_THEME", raising=False)
+    assert reports.cover_theme() == "dark"
+    assert reports.pdf_theme() == "light"
+
+
+def test_the_document_theme_can_be_set_too(monkeypatch):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_PDF_THEME", "dark")
+    assert reports.pdf_theme() == "dark"
+
+
+def test_the_theme_context_is_restored(monkeypatch):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "light")
+    with reports.use_theme("dark"):
+        assert reports.report_theme() == "dark"
+    assert reports.report_theme() == "light"
+
+
+def test_a_dark_cover_ships_with_a_light_document(monkeypatch, tmp_path):
+    """The regression this replaced: `render` took pre-built HTML, so the
+    document's theme depended on whoever called it — a caller asking only for a
+    dark cover silently got a dark PDF too."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "dark")
+    monkeypatch.setenv("FINANCIAL_RESEARCH_CHROME", "/nonexistent/chrome")
+    payload = {
+        "title": "T", "highlights": "P | $1 | n",
+        "markdown": "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n",
+    }
+    paths = reports.render(reports.build_html(**payload), "t", content=payload)
+
+    from pathlib import Path
+
+    saved = Path(paths["html"]).read_text(encoding="utf-8")
+    light = reports._THEMES["light"]["surface"]
+    assert f"--surface:{light}" in saved, "the document must be light"
+    assert paths["cover"] == "infographic"
+
+    import pypdfium2 as pdfium
+    from PIL import Image
+
+    def luma(img):
+        return sum(img.convert("L").resize((24, 24)).get_flattened_data()) / 576
+
+    doc_page = pdfium.PdfDocument(paths["pdf"])[0].render(scale=1).to_pil()
+    cover = Image.open(paths["png"])
+    assert luma(doc_page) > 200, "the document is not light"
+    assert luma(cover) < 120, "the cover is not dark"
