@@ -139,6 +139,23 @@ SYSTEM_PROMPT = (
     "findings into your own answer. Subagents use the same delayed public-data tools "
     "and cannot trade or touch the live account.\n\n"
 
+    "ANYTHING IN THE FUTURE — you exist only for this turn. You cannot wait, check "
+    "back, monitor, follow up, or 'report once results are out': when this answer "
+    "ends, you stop. `schedule_task(prompt, when, repeat)` is the ONLY way anything "
+    "happens later — it saves the work and a background runner executes it and pushes "
+    "the answer to the user. So if the request is about any time after now ('monitor "
+    "NOMD earnings tomorrow', 'watch AAPL this week', 'let me know when the 10-Q "
+    "lands', 'every morning before the open'), CALL IT, then say what you scheduled "
+    "and when it will run. NEVER write 'I will …' about a future moment without "
+    "having called it — a promise you cannot keep is worse than saying you can't. "
+    "Write the task's `prompt` standalone, for a fresh assistant that cannot see this "
+    "conversation: name the ticker, the event and what to produce. `when` takes "
+    "'2026-08-14 09:00', 'tomorrow 9am', 'friday' or '+2h'; `repeat` is once/hourly/"
+    "daily/weekdays/weekly.\n"
+    "- Standing PRICE/EARNINGS conditions are better as `add_alert` (checked by the "
+    "digest, no model call); a scheduled task is for work needing judgment — reading "
+    "results, comparing to consensus, writing a recommendation.\n\n"
+
     "CURRENCY — the base/reporting currency is USD; `convert_currency` converts any "
     "amount on demand.\n\n"
 
@@ -231,6 +248,48 @@ _NO_DOCUMENTS_GUIDANCE = (
 _ALERTS_GUIDANCE = (
     "\n\nALERTS: standing alert rules are saved. `list_alerts` reviews them and "
     "`remove_alert` deletes one by id; the portfolio digest checks them."
+)
+
+def _delivery_guidance() -> str:
+    """State where scheduled answers actually go — resolved, not guessed.
+
+    Without this the model has no visibility into delivery at all: nothing in the
+    prompt mentions channels, and `channels.describe_targets()` appears only in
+    `schedule_task`'s return value. Asked "can you send it to me on Telegram?" it
+    therefore answers from general knowledge, and invents plausible-but-wrong setup
+    instructions — a user with a perfectly good `TELEGRAM_BOT_TOKEN` was told to go
+    set `TELEGRAM_TOKEN`, a variable this project does not have.
+
+    Both branches are load-bearing: when a channel IS configured the model must
+    stop offering setup advice, and when it isn't the variable names have to be the
+    real ones. Computed per graph build (once a turn), so turning a channel on is
+    picked up on the next turn rather than needing a restart.
+    """
+    from . import channels
+
+    live = [c.label or c.key for c in channels.active_channels()]
+    if live:
+        return (
+            "\n\nDELIVERY: answers from scheduled tasks are pushed to the user via: "
+            + ", ".join(live)
+            + ". This is ALREADY CONFIGURED — confirm it plainly when asked and never "
+            "give setup instructions for it. You do not send these yourself; the "
+            "background runner delivers them when the task runs."
+        )
+    return (
+        "\n\nDELIVERY: no delivery channel is configured, so a scheduled answer will "
+        "only be written to the task log (the user reads it with `--tasks`). If they "
+        "ask to be notified, tell them EXACTLY this and nothing invented: set "
+        "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (from @BotFather), then check it "
+        "with `--notify-test`."
+    )
+
+
+_TASKS_GUIDANCE = (
+    "\n\nSCHEDULED WORK: tasks are already queued. `list_scheduled_tasks` shows what "
+    "will run and when ('what are you watching for me'), and `cancel_scheduled_task` "
+    "drops one by id. Check the list before scheduling something the user may already "
+    "have asked for, and re-use the id when they refer to 'that one'."
 )
 
 # Appended to the system prompt only when the `think` tool is available, so the
@@ -558,6 +617,12 @@ def _build_real_graph(
     )
     if "alerts" in caps:
         system_prompt += _ALERTS_GUIDANCE
+    if "tasks" in caps:
+        system_prompt += _TASKS_GUIDANCE
+    # Unconditional: `schedule_task` is always bound, so the question "where does
+    # the answer go?" can come up on any turn — including the first, before any
+    # task exists.
+    system_prompt += _delivery_guidance()
     if "authenticate" in tool_names:
         system_prompt += _AUTH_GUIDANCE
     if "get_pa_performance_all_periods" in tool_names:

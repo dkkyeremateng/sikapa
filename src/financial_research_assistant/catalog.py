@@ -95,6 +95,7 @@ from .valuation import VALUATION_TOOLS  # noqa: E402
 from .options import OPTIONS_TOOLS  # noqa: E402
 from .documents import DOCUMENT_TOOLS  # noqa: E402
 from .alerts import ALERT_TOOLS  # noqa: E402
+from .tasks import TASK_TOOLS  # noqa: E402
 
 # `.extend` rather than `+=`: both mutate in place, but `+=` reads as a rebind of
 # an upper-case (i.e. constant) name to a type checker, which flags every line.
@@ -110,6 +111,7 @@ TOOLS.extend(VALUATION_TOOLS)
 TOOLS.extend(OPTIONS_TOOLS)
 TOOLS.extend(DOCUMENT_TOOLS)
 TOOLS.extend(ALERT_TOOLS)
+TOOLS.extend(TASK_TOOLS)
 
 
 # --- Capability gating -----------------------------------------------------
@@ -169,10 +171,20 @@ def _has_alerts() -> bool:
         return False
 
 
+def _has_tasks() -> bool:
+    from . import tasks
+
+    try:
+        return bool(tasks.load_tasks())
+    except OSError:
+        return False
+
+
 _CAPABILITY_PROBES = {
     "statements": _has_statements,
     "documents": _has_documents,
     "alerts": _has_alerts,
+    "tasks": _has_tasks,
 }
 
 # Tools dropped when their capability is absent. Deliberately excluded from these
@@ -193,6 +205,10 @@ _GATED_TOOLS: dict[str, frozenset[str]] = {
     }),
     "documents": frozenset({"ask_document", "list_documents", "forget_document"}),
     "alerts": frozenset({"list_alerts", "remove_alert"}),
+    # `schedule_task` is the bootstrap tool and stays bound: it is the only way to
+    # act after the turn ends, so gating it on "a task already exists" would mean
+    # the agent could never create its first one.
+    "tasks": frozenset({"list_scheduled_tasks", "cancel_scheduled_task"}),
 }
 
 

@@ -70,6 +70,53 @@ def cli() -> None:
         help="with --digest: scope to one account (default: newest import's)",
     )
     parser.add_argument(
+        "--run-due",
+        action="store_true",
+        help=(
+            "run every scheduled task that is due now, push each answer to the "
+            "configured channels, then exit — the cron/launchd entry point. Also "
+            "drains the Telegram inbox when inbound is enabled"
+        ),
+    )
+    parser.add_argument(
+        "--watch",
+        nargs="?",
+        const=60.0,
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "stay running and do what --run-due does every SECONDS (default 60) — "
+            "for a machine where a cron entry is more trouble than a process"
+        ),
+    )
+    parser.add_argument(
+        "--schedule",
+        metavar="WHEN|PROMPT",
+        help=(
+            "queue a task and exit, e.g. --schedule 'tomorrow 9am|Analyse NOMD Q3 "
+            "results vs consensus'. Add a third field to repeat: "
+            "'08:30|Pre-market brief|weekdays'; no model needed"
+        ),
+    )
+    parser.add_argument(
+        "--tasks",
+        action="store_true",
+        help="list scheduled tasks (with ids and outcomes) and exit; no model",
+    )
+    parser.add_argument(
+        "--unschedule",
+        metavar="ID",
+        help="cancel a scheduled task by id (or 'all') and exit; no model",
+    )
+    parser.add_argument(
+        "--notify-test",
+        action="store_true",
+        help=(
+            "send a test message to the configured delivery channels and exit — "
+            "checks TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID without scheduling anything"
+        ),
+    )
+    parser.add_argument(
         "--flex-sync",
         action="store_true",
         help=(
@@ -208,6 +255,45 @@ def _run_subcommand(args: argparse.Namespace) -> int | None:
     if args.memory is not None:
         return _handle_memory(args.memory)
 
+    # Scheduled tasks. The store subcommands are model-free; --run-due/--watch need
+    # a model only once they find work to run (an empty tick costs nothing).
+    if args.tasks:
+        from . import tasks as _tasks
+
+        print(_tasks.list_scheduled_tasks())
+        return 0
+
+    if args.unschedule:
+        from . import tasks as _tasks
+
+        print(_tasks.cancel_scheduled_task(args.unschedule))
+        return 0
+
+    if args.schedule:
+        return _handle_schedule(args.schedule)
+
+    if args.notify_test:
+        from . import channels
+
+        delivered, failed = channels.deliver(
+            "🤖 Test message from the financial research assistant. "
+            "Scheduled work will arrive here."
+        )
+        if delivered:
+            print(f"sent to: {', '.join(delivered)}")
+        if failed:
+            print(f"failed on: {', '.join(failed)}", file=sys.stderr)
+        if not delivered and not failed:
+            print(
+                "no delivery channel is configured — set TELEGRAM_BOT_TOKEN and "
+                "TELEGRAM_CHAT_ID (see .env.example), or NOTIFY_CHANNELS=desktop",
+                file=sys.stderr,
+            )
+        return 0 if delivered else 1
+
+    if args.run_due or args.watch is not None:
+        return _handle_scheduler(args)
+
     if args.flex_sync:
         # Model-free IBKR Flex Web Service pull (token from IBKR_FLEX_TOKEN). Saves
         # the statement XML; cron-friendly. Manual CSV import is unaffected.
@@ -226,6 +312,68 @@ def _run_subcommand(args: argparse.Namespace) -> int | None:
         return _handle_logout(args.tier, args.logout)
 
     return None
+
+
+def _handle_schedule(spec: str) -> int:
+    """``--schedule 'WHEN|PROMPT[|REPEAT]'``.
+
+    Pipe-separated rather than three flags: the whole point is pasting one line
+    into a shell or a cron entry, and 'when' and 'what' belong together. A prompt
+    containing a pipe still works — only the first and last fields are split off.
+    """
+    from . import channels, tasks
+
+    parts = [p.strip() for p in spec.split("|")]
+    if len(parts) < 2:
+        print(
+            "usage: --schedule 'WHEN|PROMPT[|REPEAT]'  e.g. "
+            "--schedule 'tomorrow 9am|Analyse NOMD Q3 results vs consensus'",
+            file=sys.stderr,
+        )
+        return 2
+    when, prompt = parts[0], parts[1]
+    repeat = "once"
+    if len(parts) > 2 and parts[-1].lower() in tasks.REPEATS:
+        repeat, prompt = parts[-1].lower(), "|".join(parts[1:-1])
+    elif len(parts) > 2:
+        prompt = "|".join(parts[1:])
+    try:
+        task = tasks.add_task(prompt, when, repeat)
+    except ValueError as exc:
+        print(f"could not schedule that: {exc}", file=sys.stderr)
+        return 2
+    from datetime import datetime
+
+    due = datetime.fromisoformat(task["due"]).astimezone()
+    print(f"scheduled [{task['id']}] for {due:%Y-%m-%d %H:%M} local"
+          + ("" if repeat == "once" else f", repeating {repeat}"))
+    print(f"  delivery: {channels.describe_targets(task['channel'])}")
+    print("  run it with: --run-due (from cron), or leave --watch running")
+    return 0
+
+
+def _handle_scheduler(args: argparse.Namespace) -> int:
+    """``--run-due`` (one pass) and ``--watch`` (a loop over the same pass)."""
+    from . import scheduler
+
+    try:
+        if args.watch is not None:
+            asyncio.run(scheduler.watch(float(args.watch), fake=args.fake))
+            return 0
+        results = asyncio.run(scheduler.run_due(fake=args.fake))
+    except KeyboardInterrupt:
+        print("\nstopped", file=sys.stderr)
+        return 130
+    if not results:
+        # Silent on stdout: this runs every few minutes from cron, and a line per
+        # empty tick would bury the real output in the mail spool.
+        print("nothing due", file=sys.stderr)
+        return 0
+    failed = [r for r in results if not r["ok"]]
+    print(
+        f"ran {len(results)} task(s), {len(failed)} failed", file=sys.stderr
+    )
+    return 1 if failed else 0
 
 
 def _handle_login(provider: str, tier: str) -> int:
