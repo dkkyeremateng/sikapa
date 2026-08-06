@@ -1,6 +1,6 @@
 # Tools Reference
 
-Every agent tool the assistant can call, grouped by area. **57 tools.**
+Every agent tool the assistant can call, grouped by area. **60 tools.**
 
 You don't call these directly — you ask the assistant in plain English and it
 picks the tool(s). Each entry below shows:
@@ -33,6 +33,7 @@ tools need a broker statement imported first.
 9. [Advanced portfolio analytics](#9-advanced-portfolio-analytics)
 10. [Document upload (RAG)](#10-document-upload-rag)
 11. [Subagent delegation](#11-subagent-delegation)
+12. [Scheduled work](#12-scheduled-work)
 
 ---
 
@@ -363,6 +364,54 @@ One focused, self-contained side-investigation.
 Fan several tasks out — one per line (or `||`-separated). `parallel` for independent work; `sequence` feeds each subagent a digest of earlier results. Max 6 per call.
 - **Ask:** "Research AAPL, MSFT and NVDA in parallel and compare them."
 - **Call:** `dispatch_subagents(tasks="Research AAPL fundamentals and outlook\nResearch MSFT fundamentals and outlook\nResearch NVDA fundamentals and outlook", mode="parallel")`
+
+---
+
+## 12. Scheduled work
+
+The assistant exists only for the turn you are in — it cannot wait, check back, or
+follow up. These tools are how anything happens **later**: the work is stored, a
+background runner (`--run-due` from cron, or a `--watch` loop) executes it as an
+ordinary turn hours later, and the answer is **delivered to you** — Telegram by
+default, or any registered channel. The system prompt makes `schedule_task`
+mandatory for a request about the future, so the agent schedules rather than
+promising to check back.
+
+Standing *conditions* on a price or an earnings date are better as **alert rules**
+(§9) — those are model-free and checked by the digest. A scheduled task is for work
+needing judgment: reading results, comparing to consensus, writing a view.
+
+#### `schedule_task(prompt, when, repeat="once", channel="")`
+Queue work to run later. `when` takes `2026-08-14 09:00`, `tomorrow 9am`, `friday`,
+`+2h`; `repeat` is `once`/`hourly`/`daily`/`weekdays`/`weekly`; `channel` names one
+delivery channel (blank = every configured one). The `prompt` must be
+**self-contained** — the run happens in a fresh session that cannot see this
+conversation, so it names the ticker, the event and what to produce. Recurring tasks
+reschedule from their due time (no drift); a failure retries and parks after three
+attempts. If no runner has ticked recently the reply says so, rather than promising
+a delivery nothing will make.
+- **Ask:** "Monitor NOMD's earnings tomorrow and analyse the results." / "Every weekday at 08:30, brief me on overnight moves in my holdings."
+- **Call:** `schedule_task(prompt="NOMD reports Q3 on Aug 13. Pull actual EPS/revenue vs consensus, margin trend and guidance, then give a buy/hold/sell with reasoning.", when="tomorrow 9am")`
+
+#### `list_scheduled_tasks()`
+What is queued: id, when it runs, what it will do, and the outcome of anything that
+has already run (including an answer still waiting to be delivered).
+- **Ask:** "What have you got scheduled for me?" / "What are you watching?"
+- **Call:** `list_scheduled_tasks()`
+
+#### `cancel_scheduled_task(task_id)`
+Drop one by id (from `list_scheduled_tasks`), or `all` to clear every one.
+- **Ask:** "Cancel the Friday one." / "Stop watching NOMD."
+- **Call:** `cancel_scheduled_task(task_id="s1")`
+
+**Delivery.** Channels are a registry (`channels.py`): **telegram**
+(`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`), **desktop** (an OS banner), and
+**stdout** (only when named in `NOTIFY_CHANNELS`). `--notify-test` checks it end to
+end. An answer that reaches no channel is parked and re-sent on later ticks — the
+model call is already spent, so it is never thrown away over a brief outage. With
+`TELEGRAM_ALLOWED_CHAT_IDS` set you can also message the bot and have the agent
+answer (`/tasks`, `/cancel <id>`, or any prompt); that is off by default, and
+messages from other chats are dropped unread.
 
 ---
 
