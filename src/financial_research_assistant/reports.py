@@ -134,6 +134,20 @@ def parse_highlights(raw: str) -> list[dict[str, str]]:
         if not line:
             continue
         parts = [p.strip() for p in line.split("|")]
+        # Several tiles on ONE line: a model that forgets the newlines produces
+        # `A | 1 | note | B | 2 | note | ...`, which folded into a single tile with
+        # an unreadable run-on note (observed). Six or more fields is not one tile.
+        if len(parts) >= 6:
+            for start in range(0, len(parts), 3):
+                group = parts[start:start + 3]
+                if not group[0]:
+                    continue
+                tiles.append({
+                    "label": group[0],
+                    "value": group[1] if len(group) > 1 else "",
+                    "note": group[2] if len(group) > 2 else "",
+                })
+            continue
         if len(parts) == 1:
             tiles.append({"label": "", "value": parts[0], "note": ""})
         else:
@@ -720,12 +734,13 @@ def render_report(
     ``title`` is the headline. ``markdown`` is the body — normal markdown works:
     headings, bold, lists, tables, `>` blockquote for a warning callout.
 
-    WRITE BREAKDOWNS AS LISTS, NOT SENTENCES. The image sent alongside the PDF is
-    an infographic charted from the SHAPE of this markdown: any run of 3+ list
-    items that each carry a percentage, under one heading, becomes a bar chart (up
-    to 3). Write ``- **Healthcare:** 28.4% — UNH, NVO, MOH`` or
-    ``1. **VOO** – 29.3% ($12,150)``, one per line, under a heading naming the
-    breakdown. The same numbers inside a paragraph produce no chart. Keep gains and
+    WRITE BREAKDOWNS AS LISTS OR TABLES, NOT SENTENCES. The image sent alongside
+    the PDF is an infographic charted from the SHAPE of this markdown: any run of
+    3+ list items each carrying a percentage under one heading, OR a markdown table
+    with a label column and one numeric column, becomes a bar chart (up to 3).
+    Write ``- **Healthcare:** 28.4% — UNH, NVO, MOH``, or a table whose first
+    column names the row and one column holds a single number per row. The same
+    numbers inside a paragraph produce no chart. Keep gains and
     losses signed (``+28.6%`` / ``-20.7%``) so they render as up/down bars around
     zero rather than as magnitudes. Short bullets with no percentage become the
     "key observations" block.
@@ -836,6 +851,91 @@ def _clean_label(text: str) -> str:
     return label[:28]
 
 
+#: A single number in a table cell: currency, percent or bare, sign preserved.
+_NUM_RE = re.compile(r"([+-−]?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(%?)")
+_TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
+
+def _cell_number(cell: str) -> tuple[float, str] | None:
+    """``(value, unit)`` when a cell holds exactly one number.
+
+    Exactly one on purpose: a cell like ``$0.19 → $0.23`` is a transition, not a
+    measure, and charting either end of it would be arbitrary.
+    """
+    text = cell.strip()
+    if not text:
+        return None
+    hits = _NUM_RE.findall(text)
+    if len(hits) != 1:
+        return None
+    sign, digits, pct = hits[0]
+    try:
+        value = float(digits.replace(",", ""))
+    except ValueError:
+        return None
+    if sign in ("-", "−"):
+        value = -value
+    unit = "%" if pct else ("$" if "$" in text else "")
+    return value, unit
+
+
+def _table_series(rows: list[list[str]], heading: str) -> dict[str, Any] | None:
+    """Turn a markdown table into a series: first column labels, best numeric column.
+
+    Reports carry their most chartable data in tables — a beat history, a
+    scenario ladder, a metric comparison — and ignoring them was why an
+    earnings preview full of numbers produced a cover with no charts at all.
+
+    The chosen column is the one where the most rows hold exactly one number,
+    preferring percentages: a mixed column of ``$13.58`` and ``+15.3%`` cannot
+    share an axis.
+    """
+    if len(rows) < _MIN_ITEMS + 1:  # header + rows
+        return None
+    header, body = rows[0], rows[1:]
+    best: tuple[int, int, str] | None = None  # (score, column, unit)
+    for col in range(1, len(header)):
+        parsed = [_cell_number(r[col]) for r in body if col < len(r)]
+        good = [p for p in parsed if p]
+        if len(good) < _MIN_ITEMS:
+            continue
+        units = {u for _v, u in good}
+        if len(units) > 1:
+            continue  # mixed units cannot share one axis
+        unit = good[0][1]
+        score = len(good) * 2 + (1 if unit == "%" else 0)
+        if best is None or score > best[0]:
+            best = (score, col, unit)
+    if best is None:
+        return None
+    _score, col, unit = best
+    items: list[tuple[str, float]] = []
+    signed = False
+    for row in body:
+        if col >= len(row):
+            continue
+        parsed = _cell_number(row[col])
+        if not parsed:
+            continue
+        # A table's first column IS the label, so no prose guard — but strip the
+        # parenthetical asides reports like to hang off them.
+        label = re.sub(r"\s*\(.*?\)", "", re.sub(r"\*\*|__|`", "", row[0])).strip()
+        if not label:
+            continue
+        value, _unit = parsed
+        signed = signed or bool(re.match(r"\s*[+\-−]", row[col].strip()))
+        items.append((label[:_MAX_LABEL], value))
+    if len(items) < _MIN_ITEMS:
+        return None
+    return {
+        "title": heading or (header[0].strip() or "Breakdown"),
+        "signed": signed,
+        "unit": unit,
+        "items": items[:_MAX_ITEMS],
+    }
+
+
 def extract_series(markdown: str) -> list[dict[str, Any]]:
     """Charted series found in the body: ``[{title, signed, items:[(label, value)]}]``.
 
@@ -848,6 +948,15 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
     heading = ""
     items: list[tuple[str, float]] = []
     signed = False
+    table: list[list[str]] = []
+
+    def flush_table() -> None:
+        nonlocal table
+        if table:
+            found = _table_series(table, heading)
+            if found:
+                series.append(found)
+        table = []
 
     def flush() -> None:
         nonlocal items, signed
@@ -858,12 +967,22 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
             series.append({
                 "title": heading or "Breakdown",
                 "signed": signed,
+                "unit": "%",
                 "items": items[:_MAX_ITEMS],
             })
         items, signed = [], False
 
     for raw in (markdown or "").splitlines():
         line = raw.rstrip()
+        row = _TABLE_ROW_RE.match(line)
+        if row and not _TABLE_SEP_RE.match(line):
+            flush()
+            table.append([c.strip() for c in row.group(1).split("|")])
+            continue
+        if row:  # the |---|---| separator
+            continue
+        flush_table()
+
         head = _HEADING_RE.match(line) or _BOLD_HEADING_RE.match(line)
         if head:
             flush()
@@ -886,6 +1005,7 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
         signed = signed or found.group(1)[0] in "+-"
         items.append((label, value))
     flush()
+    flush_table()
     return series[:_MAX_SERIES]
 
 
@@ -946,10 +1066,31 @@ _INFO_DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </body></html>"""
 
 
+def _fmt_value(value: float, unit: str, signed: bool) -> str:
+    """Label a bar in its own unit. A dollar P/L rendered as "180.0%" is a lie."""
+    sign = "+" if signed and value > 0 else ("-" if value < 0 else "")
+    if unit == "$":
+        return f"{sign}${abs(value):,.0f}"
+    if unit == "%":
+        return f"{sign}{abs(value):.1f}%"
+    return f"{sign}{abs(value):,.2f}"
+
+
+def _is_diverging(series: dict[str, Any]) -> bool:
+    """Zero-centred only when values actually straddle zero.
+
+    A run of five positive surprises centred on zero wastes half the width and
+    squeezes +0.3% into an invisible sliver. Same sign throughout is a magnitude
+    comparison that happens to carry a sign.
+    """
+    values = [v for _l, v in series["items"]]
+    return bool(series.get("signed")) and any(v < 0 for v in values) and any(v > 0 for v in values)
+
+
 def _bars_html(series: dict[str, Any]) -> str:
     items = series["items"]
     rows = []
-    if series["signed"]:
+    if _is_diverging(series):
         span = max((abs(v) for _l, v in items), default=1) or 1
         for label, value in items:
             width = min(abs(value) / span * 50.0, 50.0)
@@ -960,18 +1101,24 @@ def _bars_html(series: dict[str, Any]) -> str:
                 f'<div class="dv"><div class="zero"></div>'
                 f'<div class="bar {side}" style="{style}"></div></div>'
                 f'<div class="v" style="color:{"#e34948" if value < 0 else "#2a78d6"}">'
-                f'{value:+.1f}%</div></div>'
+                f'{_fmt_value(value, series.get("unit", "%"), True)}</div></div>'
             )
         legend = ('<div class="legend"><span><span class="sw" style="background:#2a78d6">'
                   '</span>Up</span><span><span class="sw" style="background:#e34948">'
                   '</span>Down</span></div>')
     else:
-        top = max((v for _l, v in items), default=1) or 1
+        signed = bool(series.get("signed"))
+        top = max((abs(v) for _l, v in items), default=1) or 1
+        negative = all(v <= 0 for _l, v in items) and signed
+        colour = "#e34948" if negative else "#2a78d6"
         for label, value in items:
             rows.append(
                 f'<div class="row"><div class="k">{_html.escape(label)}</div>'
-                f'<div class="track"><div class="fill" style="width:{value / top * 100:.1f}%">'
-                f'</div></div><div class="v">{value:.1f}%</div></div>'
+                f'<div class="track"><div class="fill" style="width:'
+                f'{abs(value) / top * 100:.1f}%;background:{colour}"></div></div>'
+                f'<div class="v"'
+                + (f' style="color:{colour}"' if signed else "")
+                + f'>{_fmt_value(value, series.get("unit", "%"), signed)}</div></div>'
             )
         legend = ""
     return (f'<div class="card"><h2>{_html.escape(series["title"])}</h2>'
@@ -1026,6 +1173,10 @@ def build_infographic_html(
             + "</div>"
             for t in tiles
         )
+        # Pad the last row: an unfilled grid cell shows the gap colour as a grey
+        # block, which reads as a missing tile rather than as empty space.
+        filler = (-len(tiles)) % cols
+        cells += '<div class="tile"></div>' * filler
         tiles_html = (f'<div class="tiles" style="grid-template-columns:'
                       f'repeat({cols},1fr)">{cells}</div>')
 
@@ -1144,6 +1295,7 @@ def _fpdf_infographic(
             label_w, value_w = 118.0, 56.0
             bar_w = inner - label_w - value_w - 16
             values = chart["items"]
+            diverging = _is_diverging(chart)
             span = max((abs(v) for _l, v in values), default=1) or 1
             for label, value in values:
                 y = pdf.get_y()
@@ -1155,7 +1307,7 @@ def _fpdf_infographic(
                 pdf.set_fill_color(240, 239, 236)
                 pdf.rect(bar_x, y + 2, bar_w, 14, style="F", round_corners=True,
                          corner_radius=3)
-                if chart["signed"]:
+                if diverging:
                     mid = bar_x + bar_w / 2
                     length = abs(value) / span * (bar_w / 2)
                     pdf.set_fill_color(*(_NEG if value < 0 else _POS))
@@ -1164,14 +1316,18 @@ def _fpdf_infographic(
                     pdf.set_draw_color(*_RULE)
                     pdf.line(mid, y, mid, y + 18)
                 else:
-                    pdf.set_fill_color(*_POS)
-                    pdf.rect(bar_x, y + 2, max(bar_w * value / span, 1), 14,
+                    negative = all(v <= 0 for _l, v in values) and chart["signed"]
+                    pdf.set_fill_color(*(_NEG if negative else _POS))
+                    pdf.rect(bar_x, y + 2, max(bar_w * abs(value) / span, 1), 14,
                              style="F", round_corners=True, corner_radius=3)
                 pdf.set_xy(bar_x + bar_w + 8, y)
                 pdf.set_font(family, "B", 10)
                 pdf.set_text_color(*(_NEG if chart["signed"] and value < 0 else _INK))
-                pdf.cell(value_w, 17, f"{value:+.1f}%" if chart["signed"] else f"{value:.1f}%",
-                         align="R")
+                pdf.cell(
+                    value_w, 17,
+                    conv(_fmt_value(value, chart.get("unit", "%"), chart["signed"])),
+                    align="R",
+                )
                 pdf.set_y(y + 19)
             pdf.ln(10)
 

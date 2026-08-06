@@ -772,8 +772,10 @@ paginated when long.
 
 The charts are extracted deterministically from the body, with no second model
 call: a run of list items under one heading becomes a series when at least three
-carry a percentage, which is the shape of *top holdings*, *sector exposure* and
-*movers*. Signed values (`+28.6%` / `-20.7%`) render as diverging bars so gains and
+carry a percentage — the shape of *top holdings*, *sector exposure* and *movers* —
+and **markdown tables chart too**, taking the first column as labels and the
+column with the most single-number cells as values (preferring percentages, since
+`$13.58` and `+15.3%` cannot share an axis). Dollar series are labelled in dollars. Signed values (`+28.6%` / `-20.7%`) render as diverging bars so gains and
 losses read as opposites; unsigned ones as ranked magnitude bars. The palette is
 the validated diverging pair from the project's data-viz reference, and the sheet
 says which report it summarises so it never poses as the document itself.

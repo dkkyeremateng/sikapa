@@ -622,3 +622,82 @@ def test_a_long_category_name_is_still_charted():
     md = ("## Sectors\n\n- **Communication Services:** 3.1%\n"
           "- **Consumer Defensive:** 1.4%\n- **Basic Materials:** 0.5%\n")
     assert len(reports.extract_series(md)) == 1
+
+
+# --- what a real report actually contains ---------------------------------------
+
+
+def test_several_tiles_written_on_one_line_are_recovered():
+    """Observed: the model put all five tiles on a single line, and the parser
+    folded everything after field two into one unreadable run-on note."""
+    tiles = reports.parse_highlights(
+        "Consensus EPS | $0.37 | Q2 estimate | Position Value | $1,178 | 100 shares | "
+        "Beat Streak | 5 quarters | since Q3 2025"
+    )
+    assert [t["label"] for t in tiles] == ["Consensus EPS", "Position Value", "Beat Streak"]
+    assert tiles[1]["value"] == "$1,178"
+
+
+def test_a_markdown_table_becomes_a_chart():
+    """An earnings preview keeps its numbers in tables — beat history, scenario
+    ladders — and ignoring them produced a cover with no charts at all."""
+    md = ("## Beat history\n\n"
+          "| Quarter | Estimate to reported | Surprise |\n|---|---|---|\n"
+          "| Q1 2026 | $0.19 to $0.23 | +24.0% |\n"
+          "| Q4 2025 | $0.43 to $0.43 | +0.3% |\n"
+          "| Q3 2025 | $0.47 to $0.49 | +5.1% |\n")
+    series = reports.extract_series(md)
+    assert len(series) == 1
+    assert series[0]["unit"] == "%" and series[0]["signed"] is True
+    assert series[0]["items"][0] == ("Q1 2026", 24.0)
+
+
+def test_a_transition_cell_is_not_mistaken_for_a_measure():
+    """`$0.19 to $0.23` holds two numbers; charting either end is arbitrary, so the
+    percent column must win."""
+    md = ("## T\n\n| Q | Move | Surprise |\n|---|---|---|\n"
+          "| A | $1.00 to $2.00 | +5% |\n| B | $2.00 to $3.00 | +6% |\n"
+          "| C | $3.00 to $4.00 | +7% |\n")
+    assert reports.extract_series(md)[0]["items"][0] == ("A", 5.0)
+
+
+def test_a_dollar_table_keeps_its_unit():
+    md = ("## Levels\n\n| Level | Scenario | P/L |\n|---|---|---|\n"
+          "| $13.58 (mean target) | Beat | +$180 |\n| $11.00 | Miss | -$78 |\n"
+          "| $10.00 | Big miss | -$178 |\n")
+    series = reports.extract_series(md)[0]
+    assert series["unit"] == "$"
+    assert series["items"][0] == ("$13.58", 180.0), "the parenthetical must be stripped"
+
+
+def test_a_column_of_mixed_units_is_not_charted():
+    """`$13.58` and `+15.3%` cannot share an axis."""
+    md = ("## M\n\n| Metric | Value |\n|---|---|\n| Target | $13.58 |\n"
+          "| Upside | +15.3% |\n| Yield | 5.8% |\n")
+    assert reports.extract_series(md) == []
+
+
+def test_values_are_labelled_in_their_own_unit():
+    """A dollar P/L rendered as "180.0%" is a lie."""
+    assert reports._fmt_value(180.0, "$", True) == "+$180"
+    assert reports._fmt_value(-78.0, "$", True) == "-$78"
+    assert reports._fmt_value(24.0, "%", True) == "+24.0%"
+    assert reports._fmt_value(29.3, "%", False) == "29.3%"
+
+
+def test_a_run_of_one_sign_is_not_zero_centred():
+    """Five positive surprises centred on zero waste half the width and squeeze
+    +0.3% into an invisible sliver."""
+    all_up = {"signed": True, "items": [("a", 24.0), ("b", 0.3), ("c", 5.1)]}
+    straddling = {"signed": True, "items": [("a", 24.0), ("b", -7.0)]}
+    assert reports._is_diverging(all_up) is False
+    assert reports._is_diverging(straddling) is True
+
+
+def test_the_tile_grid_has_no_orphan_cell():
+    """An unfilled grid cell shows the gap colour as a grey block, which reads as a
+    missing tile rather than as empty space."""
+    html = reports.build_infographic_html(
+        "t", "body", highlights="\n".join(f"L{i} | {i} | note" for i in range(5)),
+    )
+    assert html.count('<div class="tile">') == 6, "the last row must be padded"

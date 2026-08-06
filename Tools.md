@@ -435,7 +435,8 @@ as **documents, not photos**: Telegram recompresses a photo and would soften the
 body text, while a document transfers untouched and still previews. Rendered at 3x
 and cropped to the measured content height (`FINANCIAL_RESEARCH_REPORT_SCALE`).
 The delivered image is a **one-sheet infographic** of the whole report — stat tiles
-plus the body's own series (top holdings, sector weights, movers) charted — at any
+plus the body's own series charted, from percentage lists **or markdown tables**
+(top holdings, sector weights, movers, beat histories, scenario ladders) — at any
 length; the PDF alongside it is the full document. A report with neither tiles nor
 series sends page 1 instead. Rendering prefers
 headless **Chrome/Chromium** (better typography) and falls back to a built-in
