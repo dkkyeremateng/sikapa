@@ -21,9 +21,11 @@ answer (so the 💭 panel is exercised offline), and a real reasoning model's
 
 from typing import Any
 import contextlib
+import datetime
 import itertools
 import json
 import os
+import re
 import time
 
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
@@ -611,6 +613,132 @@ async def _stream_events(graph: Any, inputs: dict[str, Any], config: RunnableCon
                     yield ev
 
 
+# First-person claims that a task was created. Deliberately narrow: "you have 3
+# scheduled tasks" (a `list_scheduled_tasks` answer) must not match, so every
+# pattern needs the model asserting it did the thing.
+_SCHEDULE_CLAIM = re.compile(
+    # No object required after the verb. The first version demanded one of
+    # "a/the/this/it" and a live run slipped straight past it with "I've scheduled
+    # AN earnings analysis" — the determiner is exactly the wrong thing to hinge on.
+    r"(?:\bi(?:'ve| have| ’ve)?\s+(?:now\s+|just\s+)?(?:scheduled|queued|set\s+up)\b"
+    r"|\bi'?ll\s+schedule\b"
+    r"|\b(?:task|analysis|it)\s+(?:is|has been)\s+(?:now\s+)?(?:scheduled|queued)\b"
+    r"|^\s*(?:✓|✅)?\s*\**scheduled\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+#: Any of these having run means the answer's scheduling talk is grounded in a real
+#: call, so it is left alone.
+_TASK_TOOLS = frozenset({"schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"})
+
+_UNBACKED_SCHEDULE_NOTE = (
+    "\n\n---\n"
+    "⚠️ **Correction — nothing was actually scheduled.** The answer above claims a "
+    "task was created, but the `schedule_task` tool was never called, so no task "
+    "exists and nothing will run. Ask again, or create it directly with:\n"
+    "`financial-research-assistant --schedule 'WHEN|PROMPT'`  ·  check with `--tasks`."
+)
+
+
+#: Asked of the cheap tier when a claim needs repairing. Extraction only — it does
+#: not decide WHETHER to schedule (the main turn already told the user it had), just
+#: what the task should say.
+_REPAIR_PROMPT = (
+    "Extract a scheduled task from this exchange. The assistant told the user it "
+    "scheduled work but failed to create it, so you are recovering the details.\n\n"
+    "USER ASKED:\n{user}\n\nASSISTANT REPLIED:\n{answer}\n\n"
+    'Reply with ONLY a JSON object: {{"prompt": "...", "when": "...", "repeat": "once"}}\n'
+    "- prompt: the instruction for a FRESH assistant that cannot see this exchange — "
+    "name the ticker, the event, and exactly what to produce.\n"
+    "- when: the time the assistant said it would run, as '2026-08-14 09:00', "
+    "'tomorrow 9am', 'friday' or '+2h'. If no time was stated, use 'tomorrow 9am'.\n"
+    "- repeat: once, hourly, daily, weekdays or weekly.\n"
+    "No prose, no code fence."
+)
+
+
+async def _repair_schedule_claim(user_msg: str, answer: str) -> str | None:
+    """Create the task the answer claims exists. Returns a confirmation, or None.
+
+    The main turn already told the user it scheduled something; the honest options
+    are to make that true or to retract it. This makes it true, using the cheap tier
+    for what is a pure extraction (which ticker, what to produce, when) rather than
+    a judgement — the decision to schedule was the user's and has already been
+    acted on in the reply they will read.
+
+    Only ever reached from an unbacked claim, so it costs nothing on a normal turn.
+    Any failure returns None and the caller falls back to retracting.
+    """
+    from . import tasks
+    from .llm import quick_llm
+
+    try:
+        resp = await quick_llm().ainvoke(
+            _REPAIR_PROMPT.format(user=user_msg[:2000], answer=answer[:2000])
+        )
+        raw = getattr(resp, "content", "")
+        if not isinstance(raw, str):
+            return None
+        match = re.search(r"\{.*\}", raw, re.S)
+        if not match:
+            return None
+        spec = json.loads(match.group(0))
+        task = tasks.add_task(
+            str(spec.get("prompt") or "").strip(),
+            str(spec.get("when") or "tomorrow 9am").strip(),
+            str(spec.get("repeat") or "once").strip().lower(),
+        )
+    except Exception:  # noqa: BLE001 - extraction, parsing, bad time, unwritable store
+        return None
+    due = datetime.datetime.fromisoformat(task["due"]).astimezone()
+    return (
+        "\n\n---\n"
+        f"✅ **Task created — `[{task['id']}]`, running {due:%Y-%m-%d %H:%M} local.** "
+        "(The scheduling tool was not called on the first pass, so the task was "
+        "recovered from this answer. Check it with `--tasks`; cancel with "
+        f"`--unschedule {task['id']}`.)"
+    )
+
+
+async def settle_schedule_claim(
+    user_msg: str, answer: str, called_tools: set[str], fake: bool = False
+) -> str:
+    """Make an answer's scheduling claim true, or visibly retract it.
+
+    Live testing put ``claude-haiku-4-5`` at roughly one real ``schedule_task`` call
+    per four identical requests, while it claimed success on most of the misses.
+    Prompt and description changes moved that a little and no further: on one miss
+    the model looked up the earnings calendar and then simply never scheduled. So
+    the guarantee is enforced here instead of hoped for upstream.
+    """
+    if fake or not answer or _TASK_TOOLS & called_tools:
+        return answer
+    if not _SCHEDULE_CLAIM.search(answer):
+        return answer
+    repaired = await _repair_schedule_claim(user_msg, answer)
+    return answer + (repaired if repaired is not None else _UNBACKED_SCHEDULE_NOTE)
+
+
+def verify_schedule_claim(answer: str, called_tools: set[str]) -> str:
+    """Append a correction when the answer claims a schedule that never happened.
+
+    Live testing found ``claude-haiku-4-5`` calling ``schedule_task`` on only one of
+    three identical requests — and on the other two it *said* "✓ Scheduled" anyway.
+    That is worse than the promise-to-check-back this feature replaced: the user
+    walks away believing work is queued when nothing is.
+
+    A prompt rule cannot fix it (the rule is what produces the confident phrasing),
+    so the claim is checked against what the turn actually did. Conservative by
+    construction: it fires only on a first-person creation claim with no task tool
+    called at all, so an answer *listing* existing tasks, or one that genuinely
+    scheduled, is untouched. A false positive prints a correction the user can
+    disprove with ``--tasks``; a false negative is a lie they cannot.
+    """
+    if not answer or _TASK_TOOLS & called_tools:
+        return answer
+    return answer + _UNBACKED_SCHEDULE_NOTE if _SCHEDULE_CLAIM.search(answer) else answer
+
+
 def _recall_and_frame(user_msg: str) -> tuple[str, str | None]:
     """Build a turn's injected user content — durable-fact memory plus a few-shot
     preamble from earlier feedback — and an optional "recalled …" status line.
@@ -691,6 +819,7 @@ async def run_turn(
             # complete AIMessage (no token chunks) carrying reasoning_content, so
             # the reasoning panel is exercised and the answer is read back below.
             parts: list[str] = []
+            called_tools: set[str] = set()  # for the unbacked-claim check below
             emitted_in = emitted_out = emitted_cache = emitted_write = 0  # live usage already yielded
             cb_ctx = (
                 get_usage_metadata_callback()
@@ -701,6 +830,8 @@ async def run_turn(
                 async for ev in _stream_events(graph, inputs, config):
                     if ev.kind == "reasoning" and not think:
                         continue  # thinking disabled: drop the reasoning trace
+                    if ev.kind == "tool_end":
+                        called_tools.add(ev.tool)
                     if ev.kind == "token":
                         parts.append(ev.text)
                     elif ev.kind == "usage":  # live per-call delta from _stream_events
@@ -742,6 +873,9 @@ async def run_turn(
                 # how full the window is now — not the cumulative session input.
                 context_tokens=tokens_in,
             )
-            yield AgentEvent("final", answer)
+            yield AgentEvent(
+                "final",
+                await settle_schedule_claim(user_msg, answer, called_tools, fake),
+            )
     except Exception as e:  # surface as an event, never raise into the UI
         yield AgentEvent("error", describe_error(e))

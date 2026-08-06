@@ -64,17 +64,57 @@ tasks" and in the git history.
       agent that can read imported statements and positions. The read-only broker
       filter still applies — it can research and read the account, never trade.
 
-## Unverified
+## Verified against a live model (2026-08-06, claude-haiku-4-5 via api.anthropic.com)
 
-- [ ] **A real model calling `schedule_task`.** The rule making it mandatory for
-      anything in the future is a system-prompt change, and the scripted fake model
-      ignores prompts — so it has never been observed end to end. Ask the live agent
-      to "monitor X's earnings tomorrow" and confirm it calls the tool instead of
-      promising to check back.
-- [ ] **The task-framing fix under a real model.** Same reason. The regression it
-      fixes is real and was observed (task s1 replied "I don't have a record of that
-      research" and that non-answer was delivered as a success), but the fix itself
-      has only been verified by test.
+- [x] **The task-framing fix. PASSES.** A task written as a back-reference ("send a
+      summary of the FISV analysis we produced") ran in its fresh session and opened
+      *"I'll gather a comprehensive Q2 2026 earnings analysis for FISV from
+      scratch"*, then produced real analysis. The "I don't have a record of that
+      research" regression did not recur.
+- [x] **A real model calling `schedule_task`. FAILED — mitigated, not solved.**
+      Across six live runs of *"monitor NVDA's earnings tomorrow and analyse the
+      results"*, the model called the tool **twice**. On three of the four misses it
+      claimed it had anyway — "✓ **Scheduled.**", "Done. I've scheduled an earnings
+      analysis for tomorrow at 4:30 PM" — with nothing in the store. One miss also
+      emitted `<function_calls><invoke name="schedule_task">` as literal text.
+      A false confirmation is worse than the promise-to-check-back this feature
+      replaced: the user walks away believing work is queued.
+
+      Not caused by memory or the IBKR mount (reproduced with both off), and tool
+      calling itself works (`current_date` was called natively in the same config).
+      It is model behaviour at ~38k tokens of prompt with ~57 tools bound.
+
+      **Fixed by enforcement, not by prompting.** `adapter.settle_schedule_claim`
+      compares the answer's claim against the turn's actual tool calls; when a task
+      was claimed but never created it recovers the details from the exchange (cheap
+      tier, extraction only) and creates it, so the reply and the queue agree. If
+      that fails it retracts the claim visibly instead. **Re-verified live: 4 of 4
+      trials produced a real task** (the model called the tool itself once; the
+      repair caught the other three), against 1 of 4 before.
+
+      Two things were tried first and are recorded so they are not retried blindly:
+      reworking the tool description and the prompt section moved it from 1/4 to
+      2/4 — within noise at that sample size — and on one miss the model looked up
+      the earnings calendar and then simply never scheduled, i.e. it was not simply
+      forgetting to speak the call.
+
+      - [ ] Still worth trying: a stronger primary model. Haiku 4.5 is the cheapest
+            tier and the repair pass now covers its misses, but a model that calls
+            the tool directly avoids the extra round-trip. One line in `.env`.
+- [x] **~~Consider whether ~57 bound tools is degrading tool choice.~~ Measured;
+      not the lever.** The bound schema is ~12.2k tokens of a ~38k-token prompt
+      (heaviest: `screen_stocks` 848, `dcf_valuation` 430, `explain_option` 349).
+      But `current_date` was called reliably in the same 57-tool context, and the
+      misses were specific to one tool — so count is not what breaks it, and
+      reducing it would not have fixed this.
+
+      On further gating: every group with a data-presence signal is already gated
+      (`statements`, `documents`, `alerts`, `tasks` — `documents` is currently off,
+      which is why 57 of 60 are bound). Nothing else can be gated on data without
+      removing capability that works. The only remaining lever is relevance-based
+      tool routing per turn, which trades a reliability risk (a needed tool absent)
+      for context savings — not worth it while the schema is a third of the prompt
+      and the model's context is far larger.
 
 ## Known gaps in the feature
 
