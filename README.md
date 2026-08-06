@@ -602,6 +602,125 @@ default, and macOS Terminal/iTerm profiles often ship with the audible bell off.
 Set `FINANCIAL_RESEARCH_ALERT_SOUND=0` to silence it and keep the toast and line,
 or point it at an audio file to choose your own.
 
+## Scheduled tasks (work that runs later and finds you)
+
+A chat turn ends when the answer does. Ask *"monitor NOMD earnings tomorrow and
+analyse the results"* and, without this, the best the agent could honestly do is
+tell you to come back — anything else is a promise nothing keeps.
+
+`schedule_task` is the fix: it stores the work, and a background runner executes
+it and **pushes the answer to you**. Just ask in chat —
+
+> *"monitor NOMD's earnings tomorrow and analyse the results"*
+> *"every weekday at 08:30, brief me on overnight moves in my holdings"*
+> *"check on Friday whether NVDA's 10-Q has landed"*
+
+— and the agent queues it, tells you when it will run and where the answer will
+go. The system prompt makes calling it mandatory for anything in the future: the
+model is instructed never to write *"I will …"* about a later moment without
+having scheduled it.
+
+From the shell, no model needed:
+
+```bash
+# WHEN|PROMPT[|REPEAT]  — when accepts '2026-08-14 09:00', 'tomorrow 9am',
+# 'friday', '+2h'; repeat is once/hourly/daily/weekdays/weekly
+financial-research-assistant --schedule 'tomorrow 9am|Analyse NOMD Q3 results vs consensus'
+financial-research-assistant --schedule '08:30|Pre-market brief on my holdings|weekdays'
+financial-research-assistant --tasks              # what's queued, with ids and outcomes
+financial-research-assistant --unschedule s1      # or 'all'
+```
+
+### Running what's due
+
+Two entry points over the same pass — pick whichever suits the machine:
+
+```bash
+financial-research-assistant --run-due     # one pass, then exit (for cron/launchd)
+financial-research-assistant --watch 60    # stay running, same pass every 60s
+```
+
+`--run-due` is model-free until it actually finds work, so an empty tick costs
+nothing and it's cheap to run often:
+
+```cron
+# every 15 minutes, run anything due
+*/15 * * * *  cd /path/to/repo && .venv/bin/financial-research-assistant --run-due
+```
+
+<details>
+<summary>launchd equivalent (macOS)</summary>
+
+```xml
+<!-- ~/Library/LaunchAgents/com.you.fra-scheduler.plist -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.you.fra-scheduler</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/repo/.venv/bin/financial-research-assistant</string>
+    <string>--run-due</string>
+  </array>
+  <key>WorkingDirectory</key><string>/path/to/repo</string>
+  <key>StartInterval</key><integer>900</integer>
+  <key>StandardErrorPath</key><string>/tmp/fra-scheduler.log</string>
+</dict></plist>
+```
+`launchctl load ~/Library/LaunchAgents/com.you.fra-scheduler.plist`
+</details>
+
+A scheduled run is an ordinary turn — same tools, same read-only broker boundary,
+same tracing and long-term memory — with its own session id, so it starts from a
+clean conversation instead of inheriting whatever the TUI was mid-thought about.
+A recurring task reschedules from its **due** time, not from when it finished, so a
+daily 09:00 brief doesn't creep into the afternoon; a machine that was asleep for
+three days resumes at the next real occurrence rather than firing three catch-ups.
+A task that errors is retried on the next tick, then parked after three attempts so
+a permanently-broken prompt stops billing model calls forever.
+
+### Delivery channels
+
+Channels are a registry (`channels.py`) in the same shape as the
+[pluggable brokers](#pluggable-brokers): each declares a key, whether its env
+resolves, and how to send. Shipped: **telegram**, **desktop** (an OS banner) and
+**stdout**. `NOTIFY_CHANNELS` pins a subset; unset means every configured one; a
+task can name its own. Adding email or Slack is one `register_channel` call.
+
+**Telegram.** Create a bot with [@BotFather](https://t.me/botfather), message it
+once, and read your chat id from
+`https://api.telegram.org/bot<TOKEN>/getUpdates`:
+
+```bash
+export TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+export TELEGRAM_CHAT_ID=987654321
+financial-research-assistant --notify-test    # confirms it end-to-end
+```
+
+Long answers are split at line boundaries rather than truncated (the
+recommendation is usually at the end), and sent as plain text — an analysis is
+full of `*`, `_` and `$` from tickers and figures, and Telegram rejects a whole
+message whose Markdown doesn't parse.
+
+Delivery is best-effort: a channel that's down is reported, never fatal. Work that
+finished must not be re-run — and re-billed — because a notification API blipped,
+so the answer stays in the task's record and falls back to stdout if it reached
+nowhere.
+
+### Replying from your phone (opt-in)
+
+With `TELEGRAM_ALLOWED_CHAT_IDS` set, `--run-due`/`--watch` also drain the bot's
+inbox: message it and the agent answers, keeping context per chat. `/tasks` and
+`/cancel <id>` are handled without a model call; anything else is a prompt, so you
+can schedule from the phone too.
+
+This is **off unless you list chat ids** — it is not implied by having configured
+outbound. Anyone can message a bot whose username they guess, and an inbound
+message is untrusted text driving a tool-using agent that can read your imported
+statements and positions. Messages from chats not on the list are dropped unread
+(no reply, which would confirm the bot is live). The read-only broker filter still
+applies, so the reach is exactly an interactive turn's: it can research and read
+the account, never trade. The bot token never appears in an error or a log — it's a
+bearer credential in the request URL, and it's masked on the way out.
+
 ## Durable conversation memory (survives restarts)
 
 By default the graph checkpoints to an in-process `MemorySaver`, so conversation

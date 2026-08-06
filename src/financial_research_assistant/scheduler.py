@@ -1,0 +1,274 @@
+"""The runner — executes due tasks and inbound messages, and pushes the answers.
+
+``tasks.py`` remembers what to run, ``channels.py`` knows where to send it; this is
+the part that actually runs a turn while nobody is watching. Two entry points, both
+wired to CLI flags:
+
+- ``run_due()`` — run everything due right now, then return. Model-free until it
+  finds work, so it costs nothing on an empty tick and is safe to call from cron
+  or launchd every few minutes (the ``--digest`` / ``--flex-sync`` pattern).
+- ``watch()`` — the same thing on a loop, for a machine where adding a cron entry
+  is more trouble than leaving a process running. It is deliberately a thin wrapper:
+  the scheduling logic must not fork into a "cron version" and a "daemon version".
+
+Both also drain the Telegram inbox when inbound is enabled, so the phone path needs
+no separate process.
+
+**A scheduled run is a normal turn.** It goes through ``adapter.run_turn`` with its
+own session id, so it gets the same tools, the same read-only broker boundary, the
+same tracing and the same long-term memory as anything typed into the TUI. The only
+differences are that nothing streams to a terminal and the final answer is
+delivered rather than printed.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+import asyncio
+import sys
+from datetime import datetime
+
+from . import channels, tasks
+
+#: Prefix on every delivered message, so a phone notification is self-identifying
+#: rather than an anonymous wall of analysis.
+_HEADER = "🤖 {label}"
+
+#: Inbound messages run under one session per chat, so a conversation on the phone
+#: keeps its context across messages the way the TUI does.
+_CHAT_SESSION = "telegram-{chat_id}"
+
+#: Prepended to every scheduled prompt.
+#:
+#: A task runs in its own fresh session, so it cannot see the conversation that
+#: created it — and a prompt written as a back-reference ("send a summary of the
+#: analysis we did") arrives as an instruction about something that, from the run's
+#: point of view, does not exist. Observed in the wild: the run replied "I don't
+#: have a record of that research" and that non-answer was delivered to the user's
+#: phone, counted as a success.
+#:
+#: `schedule_task`'s docstring already asks for standalone prompts; this states it
+#: as a fact of the environment instead of advice, and — the load-bearing part —
+#: says what to do when the instruction refers to something missing: go and produce
+#: it, rather than report that you can't find it.
+_TASK_PREAMBLE = (
+    "[SCHEDULED TASK] You are running work the user queued earlier. This is a fresh "
+    "session: you CANNOT see the conversation that created this task, and no prior "
+    "research from it is available to you. Treat the instruction below as "
+    "self-contained and gather everything it needs with your tools NOW. If it refers "
+    "to a report, analysis or figure you have no record of, PRODUCE that work from "
+    "scratch — never reply that you cannot find it or ask a follow-up question, "
+    "because nobody is at a terminal to answer. Your reply is delivered to the user "
+    "as a message, so make it complete and self-explanatory on its own."
+)
+
+
+def _log(msg: str) -> None:
+    """Progress goes to stderr: stdout is the answer, which a cron entry may pipe
+    into mail or a file."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+async def _answer(prompt: str, session_id: str, fake: bool = False) -> tuple[bool, str]:
+    """Run one turn and return ``(ok, answer_or_error)``.
+
+    Consumes the whole event stream rather than the final event alone: ``run_turn``
+    ends in exactly one ``final`` or ``error``, and an error carries the only
+    explanation of what went wrong — which is what gets stored and delivered.
+    """
+    from . import sessions
+    from .adapter import run_turn
+    from .tracing import traced
+
+    from .adapter import _resolved_model
+
+    model = "scripted-fake" if fake else _resolved_model(None)
+    final = ""
+    error = ""
+    async for ev in traced(
+        run_turn(prompt, session_id, fake=fake),
+        user_msg=prompt, session_id=session_id, model=model, fake=fake,
+    ):
+        if ev.kind == "final":
+            final = ev.text
+        elif ev.kind == "error":
+            error = ev.text
+        elif ev.kind == "alert":
+            # A rule that fires inside a scheduled run still deserves a push — it
+            # is exactly the "tell me when" the user asked for, and there is no
+            # terminal here to show the toast.
+            channels.deliver(f"🔔 {ev.text}")
+    # Persist the turn like the headless CLI does. A background run is the case
+    # where a transcript matters MOST — nobody watched it, so without this a task
+    # that fails leaves only a one-line reason and there is no way to see what it
+    # actually did. `--resume task-s1` replays it.
+    try:
+        sessions.log_turn(session_id, prompt, error or final or "(no answer)")
+    except OSError:
+        pass  # a lost transcript must not fail a run that produced an answer
+    if error:
+        return False, error
+    return bool(final), final or "the run produced no answer"
+
+
+async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
+    """Run one claimed task, deliver its answer, and record the outcome.
+
+    Delivery failure does NOT fail the task. The work is done and the model call is
+    spent; marking it failed would re-run the whole analysis on the next tick
+    because a notification API was down. The failure is logged and the answer stays
+    in the task's stored result.
+    """
+    tid = str(task.get("id"))
+    prompt = str(task.get("prompt", ""))
+    session = str(task.get("session") or f"task-{tid}")
+    _log(f"▶ task {tid}: {prompt[:80]}")
+    try:
+        # The stored prompt stays clean (it's what `--tasks` shows and what the user
+        # wrote); the framing is added only on the way into the model.
+        ok, answer = await _answer(f"{_TASK_PREAMBLE}\n\n{prompt}", session, fake=fake)
+    except asyncio.CancelledError:
+        # Ctrl-C or a killed watcher: hand the task back rather than leaving it
+        # stuck in "running", which nothing would ever claim again.
+        tasks.release(tid)
+        raise
+    except Exception as exc:  # noqa: BLE001 - a task must not take down the tick
+        from .adapter import describe_error
+
+        ok, answer = False, describe_error(exc)
+
+    label = f"task {tid}" + ("" if ok else " (failed)")
+    body = f"{_HEADER.format(label=label)}\n\n{answer}"
+    delivered, failed = channels.deliver(body, str(task.get("channel") or ""))
+    if failed:
+        _log(f"  delivery failed on: {', '.join(failed)}")
+    if not delivered:
+        # Nowhere to push it: stdout is the last resort so a run is never silently
+        # lost, and a cron entry redirecting stdout still captures the answer.
+        print(body, flush=True)
+
+    record = tasks.record_result(tid, ok, answer)
+    # A failure keeps its original due time (it retries on the next tick), so
+    # printing "next <due>" for one reads as a reschedule that didn't happen.
+    tail = ""
+    if record and record.get("status") == "pending":
+        tail = f"; retrying next tick ({record['attempts']}/{tasks.MAX_ATTEMPTS})" if not ok \
+            else f"; next {record['due']}"
+    _log(f"  {'✓' if ok else '✗'} task {tid}"
+         + (f" → {', '.join(delivered)}" if delivered else "") + tail)
+    return {"id": tid, "ok": ok, "delivered": delivered, "failed": failed, "answer": answer}
+
+
+async def run_due(
+    now: datetime | None = None, fake: bool = False, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Claim and run everything due. Returns one result per task run.
+
+    Sequential, not concurrent: each task is a full tool-using turn, and running
+    several at once multiplies both the token spend and the load on the same rate-
+    limited market-data endpoints. A backlog drains over consecutive ticks.
+    """
+    # Stamp EVERY pass, including empty ones — an idle runner still proves a runner
+    # exists, which is what `schedule_task` checks before promising a delivery.
+    tasks.record_tick()
+    claimed = tasks.claim_due(now, limit=limit)
+    if not claimed:
+        return []
+    _log(f"{len(claimed)} task(s) due")
+    results = []
+    for task in claimed:
+        results.append(await run_task(task, fake=fake))
+    return results
+
+
+async def poll_inbox(fake: bool = False, timeout: int = 0) -> list[dict[str, Any]]:
+    """Answer allowlisted Telegram messages. Returns one result per message.
+
+    ``timeout`` is the long-poll window: 0 for a cron tick (take what is waiting
+    and return), or a few seconds in a watch loop.
+
+    Two commands are handled without the model, because they must work even when
+    no credential is configured and must never cost a model call: ``/tasks`` lists
+    what is scheduled, ``/cancel ID`` removes one. Anything else is a prompt.
+    """
+    from . import telegram
+
+    if not telegram.inbound_enabled():
+        return []
+    try:
+        messages = telegram.get_updates(timeout=timeout)
+    except RuntimeError as exc:
+        _log(f"telegram poll failed: {exc}")
+        return []
+
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        chat_id, text = msg["chat_id"], msg["text"]
+        _log(f"✉ {msg['name']}: {text[:80]}")
+        reply = _builtin_command(text)
+        ok = True
+        if reply is None:
+            ok, reply = await _answer(
+                text, _CHAT_SESSION.format(chat_id=chat_id), fake=fake
+            )
+        try:
+            telegram.send_message(reply, chat_id=chat_id)
+        except RuntimeError as exc:
+            _log(f"  reply failed: {exc}")
+        out.append({"chat_id": chat_id, "ok": ok})
+    return out
+
+
+def _builtin_command(text: str) -> str | None:
+    """Handle the model-free chat commands, or None to treat the text as a prompt."""
+    raw = (text or "").strip()
+    low = raw.lower()
+    if low in ("/tasks", "/schedule", "/scheduled"):
+        return tasks.list_scheduled_tasks()
+    if low.startswith("/cancel"):
+        arg = raw[len("/cancel"):].strip()
+        return tasks.cancel_scheduled_task(arg) if arg else "Usage: /cancel <id> (see /tasks)"
+    if low in ("/help", "/start"):
+        return (
+            "Send me anything and I'll research it. Commands:\n"
+            "  /tasks — what's scheduled\n"
+            "  /cancel <id> — drop a scheduled task\n"
+            "Ask me to 'analyse NVDA earnings tomorrow 9am' and I'll schedule it."
+        )
+    return None
+
+
+async def watch(
+    interval: float = 60.0, fake: bool = False, iterations: int | None = None
+) -> None:
+    """Run due tasks (and drain the inbox) forever, every ``interval`` seconds.
+
+    A thin loop over ``run_due`` on purpose — the moment the daemon path grows its
+    own scheduling logic, the cron path and the loop path start disagreeing about
+    what "due" means. ``iterations`` bounds the loop for tests.
+    """
+    _log(f"watching for due tasks every {interval:g}s (Ctrl-C to stop)")
+    count = 0
+    while iterations is None or count < iterations:
+        count += 1
+        try:
+            await run_due(fake=fake)
+            # Long-poll the inbox for most of the interval: it costs one idle HTTP
+            # request and makes a phone reply feel immediate instead of waiting out
+            # the tick.
+            waited = 0.0
+            from . import telegram
+
+            if telegram.inbound_enabled():
+                poll = max(1, min(int(interval), telegram.POLL_TIMEOUT))
+                await poll_inbox(fake=fake, timeout=poll)
+                waited = float(poll)
+            if interval > waited:
+                await asyncio.sleep(interval - waited)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a bad tick must not stop the watch
+            from .adapter import describe_error
+
+            _log(f"tick failed: {describe_error(exc)}")
+            await asyncio.sleep(interval)
