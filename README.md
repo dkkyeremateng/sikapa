@@ -956,7 +956,9 @@ collapsible `💭 thinking` panel (toggle with `/toggle_thinking`). A status bar
 shows `model · provider · ctx N% of CAP · in/out tok · cache R +W w · $cost`, plus a
 spinner + elapsed timer while a turn runs (cache reads and writes are listed
 separately — they bill at very different rates). Type `/` for the command palette; **Esc** cancels a running
-turn; typing while busy **queues** the message; **Ctrl+O**/**Ctrl+T** collapse
+turn (a cancel that lands between a tool call and its result leaves the thread in
+a state every provider rejects, so the next turn repairs it and says so rather
+than erroring until you `/clear`); typing while busy **queues** the message; **Ctrl+O**/**Ctrl+T** collapse
 all tool / thinking panels. `/compact` summarizes the older turns and rewrites
 the thread so the running context (and `ctx %`) shrinks while recent turns stay
 verbatim (this also happens automatically for **any** interface when

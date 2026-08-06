@@ -259,6 +259,109 @@ def _resolved_model(model: str | None) -> str:
     return resolved_model(model)
 
 
+#: What a synthesized result says. Phrased as a fact about the RUN rather than
+#: about the tool, because the tool may well have worked — the turn just died
+#: before its answer was recorded, and a model told "the tool failed" would
+#: report a failure that never happened.
+INTERRUPTED_TOOL_RESULT = (
+    "No result was recorded — the previous turn ended before this tool call "
+    "completed (cancelled, or the run failed). Call the tool again if you still "
+    "need it; do not report its outcome from memory."
+)
+
+
+def _tool_call_ids(message: BaseMessage) -> list[tuple[str, str]]:
+    """``(id, name)`` for every tool call an AI message will serialize.
+
+    Includes ``invalid_tool_calls`` — a call whose arguments failed to parse is
+    still sent to the provider as a ``tool_use`` block, so it still needs a
+    result to pair with.
+    """
+    out: list[tuple[str, str]] = []
+    for group in ("tool_calls", "invalid_tool_calls"):
+        for call in getattr(message, group, None) or []:
+            cid = call.get("id") if isinstance(call, dict) else getattr(call, "id", "")
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
+            if cid:
+                out.append((cid, name or "tool"))
+    return out
+
+
+def repair_tool_call_pairs(
+    messages: list[BaseMessage],
+) -> tuple[list[BaseMessage], int, int]:
+    """Make a message history satisfy "every tool call is answered, exactly once".
+
+    Anthropic (and OpenAI) reject a conversation where a ``tool_use`` block has no
+    ``tool_result`` in the next message. A turn that dies between the model node
+    and the tool node — cancelled with Esc, killed mid-run, or failed inside the
+    tool node — checkpoints exactly that shape, and then EVERY later turn on the
+    thread is rejected before it starts. The session is bricked until ``/clear``,
+    which throws away the conversation to fix a bookkeeping artifact.
+
+    So the history is repaired on the way in rather than trusted: an unanswered
+    call gets a synthetic error result, and a result whose call is not in the
+    history at all is dropped. Returns ``(messages, synthesized, dropped)``.
+    """
+    declared = {cid for m in messages for cid, _n in _tool_call_ids(m)}
+    out: list[BaseMessage] = []
+    pending: list[tuple[str, str]] = []
+    synthesized = dropped = 0
+
+    def flush() -> None:
+        nonlocal synthesized
+        for cid, name in pending:
+            out.append(ToolMessage(
+                content=INTERRUPTED_TOOL_RESULT,
+                tool_call_id=cid,
+                name=name,
+                status="error",
+            ))
+            synthesized += 1
+        pending.clear()
+
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            if msg.tool_call_id not in declared:
+                dropped += 1  # a result for a call no longer in the history
+                continue
+            # Results arrive as a run directly after their AI message, so this
+            # only clears what that message is still waiting on.
+            pending[:] = [p for p in pending if p[0] != msg.tool_call_id]
+            out.append(msg)
+            continue
+        flush()  # any other message ends the run of results
+        out.append(msg)
+        pending.extend(_tool_call_ids(msg))
+    flush()
+    return out, synthesized, dropped
+
+
+async def heal_thread(graph: Any, config: RunnableConfig, as_node: str) -> int:
+    """Repair a thread's checkpoint in place. Returns how many calls it answered.
+
+    Runs before every turn, so a thread broken by a cancel or a crash recovers on
+    the next message instead of erroring forever. A clean thread costs one state
+    read and is left untouched.
+    """
+    from langchain_core.messages import RemoveMessage
+    from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+    state = await graph.aget_state(config)
+    messages = list(state.values.get("messages", []) or [])
+    if not messages:
+        return 0
+    fixed, synthesized, dropped = repair_tool_call_pairs(messages)
+    if not (synthesized or dropped):
+        return 0
+    await graph.aupdate_state(
+        config,
+        {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *fixed]},
+        as_node=as_node,
+    )
+    return synthesized
+
+
 COMPACT_KEEP_LAST = 4  # recent messages left verbatim after the summary seed
 
 
@@ -815,6 +918,24 @@ async def run_turn(
         # all within this task. It also raises here when no model is configured,
         # which must surface as an "error" event too.
         async with _graph_ctx(session_id, fake, model, think) as graph:
+            # A turn that died between the model node and the tool node leaves a
+            # tool call with no result in the checkpoint, and every provider
+            # rejects that history — so the session would answer nothing until
+            # it was cleared. Heal it here instead, and say so rather than
+            # editing the conversation behind the user's back.
+            try:
+                healed = await heal_thread(
+                    graph, config, "respond" if fake else "model"
+                )
+            except Exception:  # noqa: BLE001 - a failed repair must not block the turn
+                healed = 0
+            if healed:
+                yield AgentEvent(
+                    "status",
+                    f"recovered {healed} unfinished tool call(s) from an "
+                    "interrupted turn — their results are gone, so ask again if "
+                    "an answer below looks thin",
+                )
             # One code path for both modes: the fake graph streams its answer as a
             # complete AIMessage (no token chunks) carrying reasoning_content, so
             # the reasoning panel is exercised and the answer is read back below.
