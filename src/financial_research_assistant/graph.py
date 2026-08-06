@@ -169,6 +169,8 @@ SYSTEM_PROMPT = (
     "Put the headline numbers in `highlights` (one per line, `label | value | note`, "
     "max 6) and the narrative in `markdown` — do not repeat the same figures in "
     "both. Say what it returns; it reports where the file went.\n"
+    "- `theme='dark'`/`'light'` when the user asks for a dark or light one-pager, "
+    "and `output='image'` or `'pdf'` when they want only one of the two files.\n"
     "- A TILE `value` IS A FIGURE ($11.78, +24.0%, HOLD) — not a phrase. Context "
     "goes in the label and the note; a sentence in the value slot shrinks to fit.\n"
     "- ONE TILE PER LINE in `highlights`. All of them on a single line collapses "

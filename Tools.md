@@ -424,7 +424,7 @@ the body — rendered to **PNG + PDF** and delivered as a file through the same
 channel registry (§12). It is the natural output for a scheduled task, whose
 answer arrives on a phone.
 
-#### `render_report(title, markdown, highlights="", subtitle="", deliver=True)`
+#### `render_report(title, markdown, highlights="", subtitle="", deliver=True, allow_prose=False, theme="", output="")`
 `markdown` is the body — headings, bold, lists, tables, and `>` for a warning
 callout all render. `highlights` is the stat-tile row, **one per line** as
 `label | value | note` (max 6); put the headline numbers there rather than

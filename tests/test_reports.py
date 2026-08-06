@@ -928,3 +928,73 @@ def test_a_dark_cover_ships_with_a_light_document(monkeypatch, tmp_path):
     cover = Image.open(paths["png"])
     assert luma(doc_page) > 200, "the document is not light"
     assert luma(cover) < 120, "the cover is not dark"
+
+
+# --- generation modes ------------------------------------------------------------
+
+
+def test_the_renderer_can_be_pinned(monkeypatch, tmp_path):
+    """Pinning matters for a container or for reproducing a bug; the only way to
+    force the browser-free path used to be aiming the Chrome variable at a path
+    that does not exist."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.delenv("FINANCIAL_RESEARCH_CHROME", raising=False)
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_RENDERER", "fpdf2")
+    payload = {"title": "T", "markdown": "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n"}
+    assert reports.render(reports.build_html(**payload), "t", content=payload)["renderer"] == "fpdf2"
+
+
+def test_a_pinned_chrome_does_not_silently_fall_back(monkeypatch, tmp_path):
+    """Pinning means pinning: falling back would hide the very failure being
+    reproduced."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_RENDERER", "chrome")
+    monkeypatch.setattr(reports, "chrome_path", lambda: "")
+    payload = {"title": "T", "markdown": "## S\n\n- **A:** 10%\n"}
+    assert "pdf" not in reports.render(reports.build_html(**payload), "t", content=payload)
+
+
+def test_an_unknown_mode_falls_back_rather_than_breaking(monkeypatch):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_RENDERER", "inkscape")
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_OUTPUT", "hologram")
+    assert reports.renderer_mode() == "auto"
+    assert reports.output_mode() == "both"
+
+
+def test_pdf_only_output_skips_the_cover(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_CHROME", "/nonexistent/chrome")
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_OUTPUT", "pdf")
+    payload = {"title": "T", "markdown": "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n"}
+    paths = reports.render(reports.build_html(**payload), "t", content=payload)
+    assert "pdf" in paths and "png" not in paths
+
+
+def test_output_mode_selects_what_is_delivered(monkeypatch, tmp_path):
+    sent: list[str] = []
+    monkeypatch.setattr(reports, "render", lambda *a, **k: {
+        "png": str(tmp_path / "r.png"), "pdf": str(tmp_path / "r.pdf"), "renderer": "chrome",
+    })
+    monkeypatch.setattr(reports, "page_count", lambda p: 1)
+    monkeypatch.setattr(
+        channels, "deliver_file",
+        lambda p, caption="", prefer="", full_quality=False: (
+            sent.append(p.rsplit(".", 1)[-1]), (["telegram"], []))[1],
+    )
+    md = "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n"
+    reports.render_report("t", md, output="image")
+    assert sent == ["png"]
+    sent.clear()
+    reports.render_report("t", md, output="pdf")
+    assert sent == ["pdf"]
+
+
+def test_a_per_report_theme_overrides_the_default_and_is_restored(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "light")
+    seen: list[str] = []
+    monkeypatch.setattr(reports, "render",
+                        lambda *a, **k: seen.append(reports.cover_theme()) or {})
+    reports.render_report("t", "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n",
+                          deliver=False, theme="dark")
+    assert seen == ["dark"]
+    assert reports.cover_theme() == "light", "the environment must be left as found"
