@@ -493,3 +493,149 @@ async def test_pa_guidance_added_only_when_pa_tool_present(monkeypatch):
     )
     async with real_graph_session(think=False) as result:
         assert "Portfolio Analyst" not in result["system_prompt"]
+
+
+# --- unbacked scheduling claims -------------------------------------------------
+
+
+def test_a_scheduling_claim_with_no_tool_call_is_corrected():
+    """Live testing found claude-haiku-4-5 calling schedule_task on one of three
+    identical requests — and saying "✓ Scheduled" on the other two. A user who
+    believes work is queued when nothing is loses the thing they asked for."""
+    from financial_research_assistant.adapter import verify_schedule_claim
+
+    for claim in (
+        "✓ **Scheduled.** NVDA analysis will run tomorrow at 09:00.",
+        "Got it. I've scheduled a task to analyse NVDA's earnings tomorrow.",
+        "I have now queued the analysis for you.",
+        "Done — the task is scheduled and will be delivered to Telegram.",
+    ):
+        out = verify_schedule_claim(claim, set())
+        assert "nothing was actually scheduled" in out.lower(), claim
+        assert "--schedule" in out, "the correction must say how to fix it"
+
+
+def test_a_real_schedule_is_left_alone():
+    from financial_research_assistant.adapter import verify_schedule_claim
+
+    claim = "✓ Scheduled [s1] for tomorrow 09:00 — delivered to Telegram."
+    assert verify_schedule_claim(claim, {"schedule_task"}) == claim
+
+
+def test_listing_existing_tasks_is_not_mistaken_for_a_claim():
+    """`list_scheduled_tasks` answers are full of the word "scheduled"; warning on
+    them would train the user to ignore the warning."""
+    from financial_research_assistant.adapter import verify_schedule_claim
+
+    listing = "You have 2 scheduled tasks:\n  [s1] tomorrow 09:00 — NVDA earnings"
+    assert verify_schedule_claim(listing, {"list_scheduled_tasks"}) == listing
+    # even with no tool recorded, a third-person listing is not a creation claim
+    assert verify_schedule_claim(listing, set()) == listing
+
+
+def test_ordinary_answers_are_untouched():
+    from financial_research_assistant.adapter import verify_schedule_claim
+
+    for text in (
+        "AAPL closed at $214.30, up 1.2% on the day.",
+        "The earnings call is scheduled for August 13 — that is the company's date.",
+        "",
+    ):
+        assert verify_schedule_claim(text, set()) == text
+
+
+def test_the_exact_phrasings_seen_in_live_runs_are_caught():
+    """Verbatim openings from three live claude-haiku-4-5 runs that claimed a
+    schedule without calling the tool. The middle one defeated the first version of
+    the pattern, which required a determiner after the verb."""
+    from financial_research_assistant.adapter import verify_schedule_claim
+
+    for opening in (
+        "✓ **Scheduled.** NVDA typically reports pre-market (before 9:30am ET). "
+        "I've queued analysis to run at 10:30am tomorrow.",
+        "Done. I've scheduled an earnings analysis for **tomorrow at 4:30 PM "
+        "(after market close)**, when NVDA's results will be available.",
+        "Got it. I've scheduled a task to analyze NVDA's earnings tomorrow at 9am.",
+    ):
+        assert "nothing was actually scheduled" in verify_schedule_claim(opening, set()).lower()
+
+
+# --- repairing an unbacked claim ------------------------------------------------
+
+
+def _fake_quick(monkeypatch, content):
+    """Stand in for the cheap tier used by the repair pass."""
+    class _Resp:
+        def __init__(self, c): self.content = c
+
+    class _LLM:
+        async def ainvoke(self, _prompt): return _Resp(content)
+
+    from financial_research_assistant import llm
+    monkeypatch.setattr(llm, "quick_llm", lambda *a, **k: _LLM())
+
+
+async def test_an_unbacked_claim_is_made_true(monkeypatch):
+    """The turn already told the user it scheduled something. Creating the task is
+    the honest resolution — the alternative is a retraction for work they asked for
+    and were told they had."""
+    from financial_research_assistant import tasks
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    _fake_quick(monkeypatch, '{"prompt": "Analyse NVDA Q3 vs consensus", '
+                             '"when": "tomorrow 9am", "repeat": "once"}')
+    out = await settle_schedule_claim(
+        "Monitor NVDA's earnings tomorrow.",
+        "Done. I've scheduled an earnings analysis for tomorrow.",
+        set(),
+    )
+    assert "Task created" in out and "[s1]" in out
+    stored = tasks.pending_tasks()
+    assert len(stored) == 1 and stored[0]["prompt"] == "Analyse NVDA Q3 vs consensus"
+
+
+async def test_a_failed_repair_retracts_rather_than_inventing(monkeypatch):
+    from financial_research_assistant import tasks
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    _fake_quick(monkeypatch, "sorry, I can't do that")  # unparseable
+    out = await settle_schedule_claim(
+        "Monitor NVDA.", "I've scheduled it for tomorrow.", set()
+    )
+    assert "nothing was actually scheduled" in out.lower()
+    assert tasks.load_tasks() == []
+
+
+async def test_a_real_tool_call_skips_the_repair_entirely(monkeypatch):
+    from financial_research_assistant import tasks
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    _fake_quick(monkeypatch, '{"prompt": "x", "when": "+1h"}')
+    answer = "✓ Scheduled [s1] for tomorrow 09:00."
+    assert await settle_schedule_claim("q", answer, {"schedule_task"}) == answer
+    assert tasks.load_tasks() == [], "the repair must not double-create"
+
+
+async def test_fake_mode_never_calls_a_model(monkeypatch):
+    """Offline tests and --fake runs must stay model-free."""
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    def explode(*_a, **_k):
+        raise AssertionError("the repair pass called a model in fake mode")
+
+    from financial_research_assistant import llm
+    monkeypatch.setattr(llm, "quick_llm", explode)
+    answer = "I've scheduled it for tomorrow."
+    assert await settle_schedule_claim("q", answer, set(), fake=True) == answer
+
+
+async def test_an_ordinary_answer_never_reaches_the_repair(monkeypatch):
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    def explode(*_a, **_k):
+        raise AssertionError("the repair pass ran on a turn with no claim")
+
+    from financial_research_assistant import llm
+    monkeypatch.setattr(llm, "quick_llm", explode)
+    answer = "AAPL closed at $214.30, up 1.2%."
+    assert await settle_schedule_claim("q", answer, set()) == answer

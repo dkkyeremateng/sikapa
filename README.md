@@ -634,6 +634,15 @@ go. The system prompt makes calling it mandatory for anything in the future: the
 model is instructed never to write *"I will …"* about a later moment without
 having scheduled it.
 
+**The confirmation is enforced, not trusted.** A model that says "✓ Scheduled"
+without calling the tool would leave you waiting for work that doesn't exist —
+measured at roughly one real call in four on `claude-haiku-4-5`. So the answer's
+claim is checked against the turn's actual tool calls: if a task was claimed but
+never created, the details are recovered from the exchange and the task is created,
+and the reply says so (`✅ Task created — [s1], running …`). If even that fails, the
+claim is visibly retracted rather than left standing. Either way the reply and the
+queue agree — check with `--tasks`.
+
 From the shell, no model needed:
 
 ```bash

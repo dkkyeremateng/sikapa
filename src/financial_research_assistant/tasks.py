@@ -655,17 +655,18 @@ def purge(keep_errors: bool = True) -> int:
 
 
 def schedule_task(prompt: str, when: str, repeat: str = "once", channel: str = "") -> str:
-    """Schedule work to run LATER, on its own, with the answer pushed to the user.
+    """Create a scheduled task that runs later and pushes its answer to the user.
 
-    THIS IS THE ONLY WAY to do anything in the future. You cannot "check back",
-    "monitor", or "follow up" — you exist only during this turn. If the user asks
-    for anything after now ('monitor NOMD earnings tomorrow', 'watch AAPL this
-    week', 'remind me Friday', 'every morning'), call this and say it is scheduled.
-    Never promise a future action without calling it.
+    Call this for ANY request about a future moment: 'monitor NOMD earnings
+    tomorrow', 'watch AAPL this week', 'let me know when the 10-Q lands', 'remind me
+    Friday', 'every morning before the open'. Calling it is what creates the task —
+    describing a schedule in your reply does NOT create one, and a reply that claims
+    a task exists when this tool was not called is shown to the user as a false
+    confirmation. Report only what this tool returns.
 
-    ``prompt`` is the instruction the future run receives — write it standalone,
-    as if to a fresh assistant that cannot see this conversation ("NOMD reported
-    Q3 on Aug 13; pull actual EPS/revenue vs consensus and give a buy/hold/sell").
+    ``prompt`` is the instruction the future run receives — write it standalone, as
+    if to a fresh assistant that cannot see this conversation ("NOMD reported Q3 on
+    Aug 13; pull actual EPS/revenue vs consensus and give a buy/hold/sell").
     ``when`` accepts '2026-08-14 09:00', 'tomorrow 9am', 'friday', '+2h'.
     ``repeat`` is once (default), hourly, daily, weekdays or weekly.
     ``channel`` is a delivery channel name (e.g. 'telegram'); blank sends to every
