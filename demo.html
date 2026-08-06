@@ -170,10 +170,11 @@
     <header>
       <div class="eyebrow">Financial Research Assistant</div>
       <h1>A research desk that lives in your terminal.</h1>
-      <p class="lede">A local AI analyst with 51 tools — as-reported SEC filings, DCF valuation, options,
-        portfolio analytics, and your own documents. Mostly keyless. Watch it work.</p>
+      <p class="lede">A local AI analyst with 60 tools — as-reported SEC filings, DCF valuation, options,
+        portfolio analytics, your own documents, and background work that finds you. Mostly keyless.
+        Watch it work.</p>
       <div class="stats">
-        <span class="stat"><b>51</b> tools</span>
+        <span class="stat"><b>60</b> tools</span>
         <span class="stat"><b>keyless</b> by default</span>
         <span class="stat">SEC EDGAR · Yahoo · Ken French</span>
         <span class="stat">read-only, cited, offline-first</span>
@@ -204,7 +205,7 @@
   <div class="stage">
     <div class="section-h">
       <h2>Everything it can do</h2>
-      <p>The demo shows six moments. Under the hood the agent routes across eleven areas — the full list lives in <code>Tools.md</code>.</p>
+      <p>The demo shows seven moments. Under the hood the agent routes across thirteen areas — the full list lives in <code>Tools.md</code>.</p>
     </div>
     <div class="grid" id="grid"></div>
   </div>
@@ -322,6 +323,24 @@
         '  <span class="a">#3 AAPL</span>  slower growth, best capital return',
         '<span class="m">Illustrative, not investment advice.</span>'
       ]
+    },
+    {
+      feat: "Works while you're away", blurb: "Queues research for later, runs it in the background with no terminal open, and pushes the answer to your phone.",
+      prompt: "Monitor NOMD's earnings tomorrow and analyse the results.",
+      tool: 'schedule_task("Analyse NOMD Q3 actuals vs consensus…", "tomorrow 9am")',
+      out: [
+        '<span class="g">✓</span> Scheduled <span class="a">[s1]</span> for <span class="a">tomorrow 09:00</span> — delivered to Telegram',
+        '',
+        '<span class="m">— next morning · laptop closed · no session open —</span>',
+        '',
+        '<span class="a">⇢ runner tick</span>  1 task due',
+        '  <span class="g">✓</span> task s1  <span class="m">→ telegram</span>',
+        '',
+        '<span class="q">🤖 task s1</span>',
+        '<span class="q">NOMD Q3: EPS $0.41 vs $0.37 cons. (beat), revenue</span>',
+        '<span class="q">+3.1% organic; guidance held. Full note below.</span>',
+        '<span class="cite">                              arrived on Telegram</span>'
+      ]
     }
   ];
 
@@ -330,13 +349,15 @@
     ["Fundamentals", "6", "Snapshots, analyst ratings, earnings, dividends, ETF look-through.", "stock_fundamentals · compare_stocks · etf_exposure"],
     ["Valuation & options", "2", "Two-stage DCF intrinsic value and a single-leg options explainer.", "dcf_valuation · explain_option"],
     ["Deep research", "3", "Broad gather → synthesis: reports, move-explainers, bull/bear debate.", "research_report · explain_stock_move · bull_bear_debate"],
-    ["SEC EDGAR", "9", "As-reported financials, filings, 8-Ks, cited excerpts, tone, rank.", "sec_financials · sec_filing_excerpt · compare_sec_financials"],
+    ["SEC EDGAR", "11", "As-reported financials, filings, 8-Ks, cited excerpts, insider Form 4, tone, rank.", "sec_financials · sec_filing_excerpt · insider_transactions"],
     ["Stock screener", "1", "Screen a universe (incl. S&P 500) on cap, highs, EPS-beat streaks.", "screen_stocks"],
     ["Portfolio & statements", "10", "Import a broker statement; positions, gains, income, benchmarks.", "import_ibkr_statement · realized_gains · allocation"],
-    ["Advanced analytics", "5", "Tax-loss harvest, correlation, look-through, factor exposure, digest.", "tax_loss_harvest · portfolio_lookthrough · factor_exposure"],
+    ["Advanced analytics", "6", "Tax-loss harvest, correlation, look-through, risk, factor exposure, digest.", "tax_loss_harvest · portfolio_lookthrough · factor_exposure"],
     ["Document RAG", "4", "Ingest your files; answer with page-level citations.", "ingest_document · ask_document · list_documents"],
     ["Subagents", "2", "Delegate focused research in parallel or in sequence.", "dispatch_subagent · dispatch_subagents"],
-    ["Calculators & FX", "4", "Percent change, CAGR, position weight, currency conversion.", "cagr · pct_change · convert_currency"]
+    ["Calculators & FX", "4", "Percent change, CAGR, position weight, currency conversion.", "cagr · pct_change · convert_currency"],
+    ["Alerts", "3", "Standing rules the digest checks — a price move, a level, earnings soon.", "add_alert · list_alerts · remove_alert"],
+    ["Scheduled work", "3", "Queue research for later; a runner executes it and pushes the answer to Telegram.", "schedule_task · list_scheduled_tasks · cancel_scheduled_task"]
   ];
 
   // ---- build static UI ----

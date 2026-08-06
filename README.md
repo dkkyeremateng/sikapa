@@ -9,9 +9,10 @@ tool for stock/market news. It ships a Textual chat TUI, a headless CLI, an
 offline deterministic fake mode, and a generic eval harness.
 
 > ### ▶ [Watch the guided demo](https://claude.ai/code/artifact/b39ec2f9-1b91-4af5-996c-a351aa3c62a0)
-> A self-playing terminal walkthrough of six features — company comparison, DCF
-> valuation, cited SEC-filing answers, the options explainer, document Q&A, and
-> parallel subagents — plus a map of all 51 tools. Source: [`demo.html`](demo.html)
+> A self-playing terminal walkthrough of seven features — company comparison, DCF
+> valuation, cited SEC-filing answers, the options explainer, document Q&A,
+> parallel subagents, and background work delivered to your phone — plus a map of
+> all 60 tools. Source: [`demo.html`](demo.html)
 > (open it locally in any browser). See also the full [`Tools.md`](Tools.md) reference.
 
 > **The broker is pluggable — two registry-driven seams.** A different broker's
@@ -20,6 +21,15 @@ offline deterministic fake mode, and a generic eval harness.
 > broker's **statement export** imports through a format dispatcher — IBKR
 > Activity CSV or cross-broker **OFX/QFX** (Vanguard, E\*TRADE, Schwab, most
 > banks). Both land in the same store and read back through the same tools.
+
+> **Work that outlives the session.** A chat turn ends when its answer does, so
+> *"monitor NOMD's earnings tomorrow and analyse the results"* used to be a promise
+> nothing could keep. `schedule_task` queues it, a background runner
+> (`--run-due` from cron, or `--watch`) executes it hours later with no terminal
+> open, and the answer is **pushed to you** — Telegram by default, through a
+> [pluggable channel registry](#delivery-channels). The system prompt makes calling
+> it mandatory for anything in the future, so the agent schedules rather than
+> promising to check back. See [Scheduled tasks](#scheduled-tasks-work-that-runs-later-and-finds-you).
 
 > **News search.** `web_search` returns recent headlines (title, source, date,
 > snippet, URL). Keyless by default (DuckDuckGo news); set `TAVILY_API_KEY` for
@@ -333,6 +343,10 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── research.py    # deep-research report (parallel gather → synthesize) + --research
 │   ├── monitor.py     # portfolio monitoring digest (movers/earnings/ex-divs) + --digest
 │   ├── alerts.py      # user-defined alert rules the digest checks (add/list/remove_alert)
+│   ├── tasks.py       # scheduled-task store + schedule_task/list/cancel (work to run later)
+│   ├── scheduler.py   # the runner: --run-due (cron) / --watch (loop) + Telegram inbox
+│   ├── channels.py    # pluggable delivery-channel registry (telegram/desktop/stdout)
+│   ├── telegram.py    # Bot API client — outbound delivery + allowlisted inbound
 │   ├── flex.py        # IBKR Flex Web Service pull (--flex-sync); XML parser is a seam
 │   ├── statements.py  # IBKR CSV + OFX/QFX parsers, format dispatch, SQLite store
 │   ├── tui.py         # Textual chat app
@@ -820,6 +834,14 @@ financial-research-assistant --login                # list model providers, exit
 financial-research-assistant --login anthropic-key  # store a credential, exit
 financial-research-assistant --logout [PROVIDER]    # stop using / forget one, exit
 MEMORY_BACKEND=local financial-research-assistant --memory   # list long-term memory, exit
+
+# scheduled work (see "Scheduled tasks")
+financial-research-assistant --schedule 'tomorrow 9am|Analyse NOMD Q3 vs consensus'
+financial-research-assistant --tasks                # what's queued, with outcomes
+financial-research-assistant --unschedule s1        # cancel one (or 'all')
+financial-research-assistant --run-due              # run everything due, exit (cron)
+financial-research-assistant --watch 60             # same pass every 60s, stay running
+financial-research-assistant --notify-test          # check the delivery channels
 python -m financial_research_assistant.main --prompt "hi" --fake   # module form
 ```
 
@@ -1117,6 +1139,13 @@ aren't included; add them to the `Dockerfile`'s install line if you need them.
   (`ibkr_csv`, `ofx`); `_detect_format` sniffs the source and `import_statement`
   dispatches. Add a broker's bespoke export by writing a parser that returns the
   normalized dict `store_statement` consumes and registering it there.
+- **Delivery channels** — channels register in `channels.py` via
+  `register_channel(Channel(key, configured, send, label))`; `deliver()` fans out to
+  every configured one (or the `NOTIFY_CHANNELS` subset, or a task's own choice).
+  Adding email, Slack or ntfy is one entry — `scheduler.py` and `tasks.py` never
+  learn its name. A `send` must return whether it went and may raise; `deliver`
+  never propagates either, because finished work must not be re-run over a failed
+  notification. See [Delivery channels](#delivery-channels).
 - **Local calculators** — add typed, docstring'd functions to `tools.py` and
   list them in `TOOLS`.
 - **System prompt / model** — `SYSTEM_PROMPT` and `_build_real_graph()` in
