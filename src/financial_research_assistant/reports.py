@@ -5,12 +5,13 @@ poor on a phone: a scheduled task's analysis arrives as a wall of Telegram
 message. This renders the same content as a typeset sheet — headline, stat tiles,
 body — and hands it to the delivery channels as files.
 
-**The PDF is the document; the PNG is its cover.** For a one-page sheet the cover
-is that page. For a multi-page report it is a purpose-built *infographic* — the
-headline figures plus whatever series the body contains, charted — because page 1
-of a five-page report is the masthead and whatever happened to fit, the least
-informative slice of the document. Everything is PDF-first either way, with
-``pypdfium2`` rasterising a single page afterwards.
+**The PDF is the document; the PNG is a purpose-built infographic of it** — the
+headline figures plus whatever series the body contains, charted. It replaces the
+old "screenshot the first page" cover at every length: page 1 of a long report is
+the masthead and whatever happened to fit, and page 1 of a short one is a wall of
+prose that a picture summarises better. A report with neither tiles nor series
+falls back to page 1, since a sheet with nothing to visualise has no value over the
+document itself. Everything is PDF-first, with ``pypdfium2`` rasterising one page.
 
 **Two renderers, one content model.** Both consume the same markdown and the same
 ``highlights``:
@@ -648,11 +649,11 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
 
     png = out_dir / f"{stem}.png"
     pages = page_count(str(pdf))
-    # Page 1 is the right cover for a one-page sheet and a poor one for a five-page
-    # report — it shows the masthead and whatever happened to fit. Multi-page gets a
-    # purpose-built summary instead, falling back to page 1 if that fails, since a
-    # cover is worth less than the report it introduces.
-    if pages > 1 and content is not None:
+    # The infographic is the cover whenever there is anything to visualise — the
+    # distilled figures read better than the document's first page at any length.
+    # It falls back to page 1 if the sheet would be empty or the render fails,
+    # since a cover is worth less than the report it introduces.
+    if content is not None and _worth_charting(content):
         cover = _build_cover(out_dir, stem, content, pages, chrome)
         if cover and rasterize_first_page(str(cover), str(png)):
             paths["png"] = str(png)
@@ -662,6 +663,19 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
         paths["png"] = str(png)
         paths["cover"] = "page-1"
     return paths
+
+
+def _worth_charting(content: dict[str, str]) -> bool:
+    """Whether a summary sheet would carry anything the reader cannot get faster.
+
+    Tiles or charts are the whole value of a cover. Without either it is a title
+    over some bullets, and page 1 — which for a one-page report IS the report —
+    strictly beats it.
+    """
+    return bool(
+        parse_highlights(content.get("highlights", ""))
+        or extract_series(content.get("markdown", ""))
+    )
 
 
 def _build_cover(
@@ -736,8 +750,9 @@ def render_report(
     else:
         pages = page_count(paths["pdf"])
         cover = paths.get("cover")
-        if pages > 1 and cover == "infographic":
-            shape = f"; the image is a one-sheet infographic summarising all {pages} pages."
+        if cover == "infographic":
+            summarising = f" summarising all {pages} pages" if pages > 1 else ""
+            shape = f"; the image is a one-sheet infographic{summarising}."
         elif pages > 1:
             shape = "; the image is page 1."
         else:
@@ -1007,7 +1022,8 @@ def build_infographic_html(
         charts_html = '<div class="charts">' + "".join(cards) + "</div>"
     notes = _notes_html(markdown, {s["title"] for s in series})
 
-    tail = f"Summary of a {pages}-page report — full PDF attached" if pages > 1 else ""
+    tail = (f"Summary of a {pages}-page report — full PDF attached" if pages > 1
+            else "Summary — full report attached as PDF")
     return _INFO_DOC.format(
         css=_INFO_CSS.format(
             w=_WIDTH, h=max(200, min(int(page_height), _MAX_H)),
@@ -1161,8 +1177,8 @@ def _fpdf_infographic(
         end = pdf.get_y()
         pdf.set_font(family, "", 7)
         pdf.set_text_color(*_MUTED)
-        tail = (f"Summary of a {pages}-page report - full PDF attached"
-                if pages > 1 else _stamp())
+        tail = (f"Summary of a {pages}-page report - full PDF attached" if pages > 1
+                else "Summary - full report attached as PDF")
         pdf.set_xy(margin, end + 8)
         pdf.multi_cell(inner, 9, conv(f"{tail}  ·  {_DISCLAIMER}"), align="L")
         return pdf, pdf.get_y()

@@ -529,11 +529,30 @@ def test_a_multi_page_report_gets_an_infographic_cover(monkeypatch, tmp_path, re
     assert "29.3" in text
 
 
-def test_a_single_page_report_still_uses_page_one(monkeypatch, tmp_path):
-    payload = {"title": "Short", "markdown": "## H\n\nA short body.", "highlights": ""}
+def test_a_single_page_report_also_gets_the_infographic(monkeypatch, tmp_path):
+    """The distilled figures read better than the document's first page at any
+    length, so the cover is not reserved for long reports."""
+    payload = {
+        "title": "Short", "markdown": _REPORT_MD,
+        "highlights": "Portfolio Value | $38,420 | +$1,860",
+    }
     paths = _render_with(monkeypatch, tmp_path, payload, "fpdf2")
     assert reports.page_count(paths["pdf"]) == 1
+    assert paths["cover"] == "infographic"
+
+
+def test_a_report_with_nothing_to_chart_keeps_page_one(monkeypatch, tmp_path):
+    """No tiles and no series means the sheet would be a title over some bullets,
+    and page 1 — which for a one-page report IS the report — strictly beats it."""
+    payload = {"title": "Prose only", "markdown": "## H\n\nJust narrative text.",
+               "highlights": ""}
+    assert reports._worth_charting(payload) is False
+    paths = _render_with(monkeypatch, tmp_path, payload, "fpdf2")
     assert paths["cover"] == "page-1"
+
+
+def test_tiles_alone_are_enough_to_be_worth_a_cover():
+    assert reports._worth_charting({"highlights": "A | 1 | x", "markdown": "prose"}) is True
 
 
 def test_a_failed_cover_falls_back_to_page_one(monkeypatch, tmp_path):
