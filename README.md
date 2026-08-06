@@ -750,6 +750,12 @@ which is the difference between a scheduled analysis being read on a phone and
 being scrolled past. Ask for *"a PDF"*, *"an infographic"*, or *"send me a one-pager"*, or let a
 scheduled task produce one.
 
+Per report, the agent can pass `theme="dark"` (image only — the PDF stays
+print-friendly) and `output="image"` or `"pdf"` to send just one of the two files;
+both fall back to the configured defaults. Operator-level, `FINANCIAL_RESEARCH_REPORT_RENDERER=chrome|fpdf2`
+pins the engine, which is worth doing in a container or when reproducing a
+rendering bug.
+
 `highlights` is the stat-tile row, one per line as `label | value | note` (max 6).
 The body is ordinary markdown: headings, tables, and `>` for a warning callout.
 Files land in `~/.financial-research-assistant/reports`.

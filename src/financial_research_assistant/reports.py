@@ -123,6 +123,30 @@ def _env_theme(var: str, default: str = "light") -> str:
     return name if name in _THEMES else default
 
 
+#: Which engine draws the sheet. Operator-level rather than a tool argument: the
+#: model has no basis for choosing an engine, and every parameter costs schema on
+#: every call. "auto" prefers Chrome and falls back; the explicit values are for
+#: pinning a container or reproducing a bug.
+_RENDERERS = ("auto", "chrome", "fpdf2")
+
+
+def renderer_mode() -> str:
+    name = (os.environ.get("FINANCIAL_RESEARCH_REPORT_RENDERER") or "").strip().lower()
+    return name if name in _RENDERERS else "auto"
+
+
+#: What the tool produces and delivers. "both" is the default; "image" suits a
+#: phone-only workflow, "pdf" a filing one. The PDF is rendered either way — the
+#: cover is rasterised FROM it — so "image" withholds the file rather than skipping
+#: the work.
+_OUTPUTS = ("both", "image", "pdf")
+
+
+def output_mode(override: str = "") -> str:
+    name = (override or os.environ.get("FINANCIAL_RESEARCH_REPORT_OUTPUT") or "").strip().lower()
+    return name if name in _OUTPUTS else "both"
+
+
 def cover_theme() -> str:
     """Theme for the image — the artifact that lands in a chat."""
     return _env_theme("FINANCIAL_RESEARCH_REPORT_THEME")
@@ -720,7 +744,8 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
     html_path = out_dir / f"{stem}.html"
     pdf = out_dir / f"{stem}.pdf"
     made = False
-    chrome = chrome_path()
+    mode = renderer_mode()
+    chrome = "" if mode == "fpdf2" else chrome_path()
     # The document is drawn under its own theme — see `pdf_theme`. The HTML is
     # REBUILT here when the raw fields are available: taking it pre-built made the
     # document's theme depend on whoever called this, which silently produced a
@@ -738,7 +763,7 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
             made = _chrome_pdf(chrome, html_path, pdf)
             if made:
                 paths["renderer"] = "chrome"
-        if not made and content is not None:
+        if not made and content is not None and mode != "chrome":
             made = _fpdf_pdf(
                 pdf,
                 content.get("title", ""),
@@ -759,6 +784,8 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
     # distilled figures read better than the document's first page at any length.
     # It falls back to page 1 if the sheet would be empty or the render fails,
     # since a cover is worth less than the report it introduces.
+    if output_mode() == "pdf":
+        return paths
     if content is not None and _worth_charting(content):
         with use_theme(cover_theme()):
             cover = _build_cover(out_dir, stem, content, pages, chrome)
@@ -817,6 +844,8 @@ def render_report(
     subtitle: str = "",
     deliver: bool = True,
     allow_prose: bool = False,
+    theme: str = "",
+    output: str = "",
 ) -> str:
     """Typeset a summary as a PDF + cover image and send it to the user's channels.
 
@@ -841,6 +870,10 @@ def render_report(
     ``highlights`` is optional stat tiles, ONE PER LINE as ``label | value | note``
     (up to 6), e.g. "Adjusted EPS | $1.84 | vs $1.91 consensus". Put the numbers
     that matter there, not in the body. ``subtitle`` is one line under the title.
+    ``theme`` is "light" or "dark" for the IMAGE — use it when the user asks for a
+    dark (or light) one-pager; blank follows the configured default, and the PDF
+    stays print-friendly either way. ``output`` is "both" (default), "image" for a
+    phone-only send, or "pdf" to skip the cover entirely.
     ``deliver=False`` renders without sending. ``allow_prose=True`` renders a
     report that genuinely has no numbers to chart — without it, a body containing
     no list, table or inline breakdown is REFUSED so you can restructure it.
@@ -872,18 +905,31 @@ def render_report(
             "allow_prose=True."
         )
 
-    with use_theme(pdf_theme()):
-        document_html = build_html(title, markdown, highlights, subtitle)
-    paths = render(
-        document_html,
-        title,
-        content={
-            "title": title,
-            "markdown": markdown,
-            "highlights": highlights,
-            "subtitle": subtitle,
-        },
-    )
+    wanted = output_mode(output)
+    content = {
+        "title": title, "markdown": markdown,
+        "highlights": highlights, "subtitle": subtitle,
+    }
+    # A per-report theme overrides the configured one for the COVER only; the
+    # document keeps its own default so a dark request never produces a PDF that
+    # prints as a full page of ink.
+    chosen = theme.strip().lower()
+    env_theme = os.environ.get("FINANCIAL_RESEARCH_REPORT_THEME")
+    if chosen in _THEMES:
+        os.environ["FINANCIAL_RESEARCH_REPORT_THEME"] = chosen
+    prior_output = os.environ.get("FINANCIAL_RESEARCH_REPORT_OUTPUT")
+    os.environ["FINANCIAL_RESEARCH_REPORT_OUTPUT"] = wanted
+    try:
+        with use_theme(pdf_theme()):
+            document_html = build_html(title, markdown, highlights, subtitle)
+        paths = render(document_html, title, content=content)
+    finally:
+        for var, prior in (("FINANCIAL_RESEARCH_REPORT_THEME", env_theme),
+                           ("FINANCIAL_RESEARCH_REPORT_OUTPUT", prior_output)):
+            if prior is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = prior
 
     lines = []
     if "pdf" not in paths:
@@ -913,8 +959,9 @@ def render_report(
 
         sent: list[str] = []
         failed: list[str] = []
+        wanted_keys = {"both": ("png", "pdf"), "image": ("png",), "pdf": ("pdf",)}[wanted]
         for key, caption in (("png", title), ("pdf", f"{title} (PDF)")):
-            if key in paths:
+            if key in paths and key in wanted_keys:
                 ok, bad = channels.deliver_file(
                     paths[key], caption=caption, full_quality=True
                 )
