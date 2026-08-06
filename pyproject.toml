@@ -30,6 +30,14 @@ dependencies = [
     # supports 3.10. Already present transitively (pydantic/langchain); declared
     # here because the package imports it directly.
     "typing-extensions>=4.4",
+    # Report rendering (`render_report`). Both are pip-only wheels with no system
+    # libraries: fpdf2 writes the PDF when no browser is installed — the case in
+    # this project's own container — and pypdfium2 rasterises page 1 for the cover
+    # image, which a page-less screenshot cannot express. Small next to pandas and
+    # langchain, and the feature is bound into the tool catalog rather than
+    # optional, so they are core rather than an extra.
+    "fpdf2>=2.8",
+    "pypdfium2>=4.0",
 ]
 
 [project.optional-dependencies]
