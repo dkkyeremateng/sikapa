@@ -343,22 +343,51 @@ _FONT_CANDIDATES = (
     ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", ""),
 )
 
-_ASCII_MAP = {
+#: Always stripped, whatever the font. No text face carries emoji, and a missing
+#: glyph in a TTF renders as an empty box rather than raising — silently ugly.
+_EMOJI_MAP = {"🔔": "*", "🤖": "", "📈": "", "📉": "", "⚠️": "!"}
+
+#: Only applied on the core-font path, which is Latin-1 and RAISES on an em dash.
+#: With a real Unicode face these characters render properly and are left alone.
+_LATIN1_MAP = {
     "—": "-", "–": "-", "‘": "'", "’": "'", "“": '"', "”": '"', "…": "...",
     "→": "->", "≈": "~", "×": "x", "✓": "[ok]", "▼": "v", "▲": "^", "⚠": "!",
-    "🔔": "*", "🤖": "", "€": "EUR ", "≥": ">=", "≤": "<=", "·": "-",
+    "€": "EUR ", "≥": ">=", "≤": "<=", "·": "-",
 }
 
 
-def _ascii(text: str) -> str:
-    """Transliterate the typographic characters the core PDF fonts cannot encode.
+def _strip_emoji(text: str) -> str:
+    for src, dst in _EMOJI_MAP.items():
+        text = text.replace(src, dst)
+    return text
 
-    Only used when no Unicode TTF is on the machine. Losing an em dash beats
+
+def _ascii(text: str) -> str:
+    """Transliterate everything the core PDF fonts cannot encode.
+
+    Only used when no Unicode TTF is available at all. Losing an em dash beats
     ``FPDFUnicodeEncodingException`` taking the whole render down.
     """
-    for src, dst in _ASCII_MAP.items():
+    text = _strip_emoji(text)
+    for src, dst in _LATIN1_MAP.items():
         text = text.replace(src, dst)
     return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def _bundled_font() -> tuple[str, str]:
+    """The vendored Inter faces, or ``("", "")`` if the package data is missing.
+
+    Vendored so a sheet renders identically everywhere: relying on system fonts
+    made the output depend on the machine — Arial on macOS, DejaVu on Linux, and
+    transliterated ASCII in a slim container. Inter is SIL OFL 1.1 (licence beside
+    the files) and is the closest free face to the ``system-ui`` stack the Chrome
+    path renders, so the two renderers look like the same publication.
+    """
+    base = Path(__file__).parent / "assets" / "fonts"
+    regular, bold = base / "Inter-Regular.ttf", base / "Inter-Bold.ttf"
+    if regular.exists():
+        return str(regular), (str(bold) if bold.exists() else "")
+    return "", ""
 
 
 def _tag_styles(family: str) -> dict[str, Any]:
@@ -391,6 +420,9 @@ def _unicode_font() -> tuple[str, str]:
     if explicit and Path(explicit).exists():
         bold = re.sub(r"(-Regular)?\.(ttf|otf)$", r"-Bold.\2", explicit)
         return explicit, (bold if Path(bold).exists() else "")
+    bundled = _bundled_font()
+    if bundled[0]:
+        return bundled
     for regular, bold in _FONT_CANDIDATES:
         if Path(regular).exists():
             return regular, (bold if bold and Path(bold).exists() else "")
@@ -459,7 +491,7 @@ def _fpdf_pdf(
                 family = "sheet"
             except Exception:  # noqa: BLE001 - unreadable font: fall back to core
                 family = "helvetica"
-        conv = (lambda s: s) if family != "helvetica" else _ascii
+        conv = _strip_emoji if family != "helvetica" else _ascii
         pdf.family = family
         # Bound as a plain attribute holding a function: `staticmethod(...)` on an
         # instance is not callable through the instance on 3.10.

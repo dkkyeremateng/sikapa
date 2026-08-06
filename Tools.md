@@ -437,7 +437,8 @@ and cropped to the measured content height (`FINANCIAL_RESEARCH_REPORT_SCALE`).
 A long report paginates and the delivered image is **page 1**. Rendering prefers
 headless **Chrome/Chromium** (better typography) and falls back to a built-in
 **fpdf2** renderer when no browser is installed, so it works everywhere including
-containers; `pypdfium2` makes the cover image either way.
+containers; `pypdfium2` makes the cover image either way. The fallback bundles the
+Inter typeface, so its output is identical on every machine.
 - **Ask:** "Send me that as a PDF." / "Make an infographic of the FISV results and put it on Telegram." / "Every Friday, email me a one-pager on my holdings."
 - **Call:** `render_report(title="FISV Q2 2026 — miss and guidance cut", highlights="Adjusted EPS | $1.84 | vs $1.91 consensus\nMean target | $66.62 | +26.5%", markdown="## Headline\n\nFiserv missed and **cut guidance**…")`
 
