@@ -63,6 +63,52 @@ _TASK_PREAMBLE = (
 )
 
 
+#: Openings that mean "I did not do the work", not "here is the work".
+#:
+#: A task used to count as successful whenever the model returned ANY text, so a
+#: run that replied "I don't have a record of that research" was marked done and
+#: pushed to the user's phone as if it were the analysis they asked for. There is
+#: no cheap way to judge an answer's QUALITY without a second model call, but this
+#: class of non-answer is recognisable: it is what the run says instead of starting.
+#:
+#: Matched only in the opening of the answer, and only for short-to-middling ones.
+#: A real report opens with results; one that mentions "no record of a prior filing"
+#: in its third paragraph is doing its job, and must not be thrown away.
+_NON_ANSWER_PATTERNS = (
+    "i don't have a record", "i do not have a record", "no record of",
+    "i wasn't able to find", "i was unable to find", "i'm unable to find",
+    "could you clarify", "can you clarify", "please clarify",
+    "could you provide", "please provide more", "what would you like",
+    "i need more information", "i need you to",
+)
+_NON_ANSWER_WINDOW = 300   # only the opening counts
+_NON_ANSWER_MAX_LEN = 1500  # a long answer did the work, whatever its first line
+_MIN_ANSWER_LEN = 40       # shorter than this is not an analysis of anything
+
+
+def _non_answer_reason(text: str) -> str:
+    """Why this reply isn't an answer, or "" if it looks like one.
+
+    Deliberately conservative: a false positive costs a retry (and, on the last
+    attempt, still delivers), while a false negative is what already happened —
+    a confused non-answer delivered as the real thing.
+    """
+    body = (text or "").strip()
+    if len(body) < _MIN_ANSWER_LEN:
+        return f"the run returned {len(body)} characters, which is not an answer"
+    if len(body) > _NON_ANSWER_MAX_LEN:
+        return ""
+    opening = body[:_NON_ANSWER_WINDOW].lower()
+    for pattern in _NON_ANSWER_PATTERNS:
+        if pattern in opening:
+            return (
+                f"the run opened with {pattern!r} instead of doing the work — it "
+                "either could not find what the prompt referred to, or asked a "
+                "question nobody is there to answer"
+            )
+    return ""
+
+
 def _log(msg: str) -> None:
     """Progress goes to stderr: stdout is the answer, which a cron entry may pipe
     into mail or a file."""
@@ -137,30 +183,69 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
 
         ok, answer = False, describe_error(exc)
 
+    # A reply that isn't an answer counts as a failure, so the task retries with
+    # the framing preamble rather than delivering a shrug as the finished work.
+    reason = _non_answer_reason(answer) if ok else ""
+    if reason:
+        ok = False
+        _log(f"  not an answer: {reason}")
+
+    # Record BEFORE delivering: whether this is the last attempt decides whether
+    # the user hears about the failure now or after the retries are exhausted.
+    record = tasks.record_result(tid, ok, reason or answer)
+    if record is not None and not ok and record.get("status") == "pending":
+        # Silent on purpose: three phone notifications for one task that is still
+        # being retried is noise, and the outcome is not known yet.
+        _log(f"  ✗ task {tid}; retrying next tick "
+             f"({record.get('attempts')}/{tasks.MAX_ATTEMPTS})")
+        return {"id": tid, "ok": False, "delivered": [], "failed": [], "answer": answer}
+
     label = f"task {tid}" + ("" if ok else " (failed)")
     body = f"{_HEADER.format(label=label)}\n\n{answer}"
     delivered, failed = channels.deliver(body, str(task.get("channel") or ""))
     if failed:
         _log(f"  delivery failed on: {', '.join(failed)}")
     if not delivered:
-        # Nowhere to push it: stdout is the last resort so a run is never silently
-        # lost, and a cron entry redirecting stdout still captures the answer.
+        # The work is done and paid for, so the answer is parked and re-sent on
+        # later ticks instead of being lost to a channel that was briefly down.
+        # stdout too, so a cron entry redirecting output still captures it.
+        tasks.queue_delivery(tid, body)
         print(body, flush=True)
+        _log("  nowhere to deliver — parked for redelivery (see --tasks)")
 
-    record = tasks.record_result(tid, ok, answer)
-    # A failure keeps its original due time (it retries on the next tick), so
-    # printing "next <due>" for one reads as a reschedule that didn't happen.
-    tail = ""
-    if record and record.get("status") == "pending":
-        tail = f"; retrying next tick ({record['attempts']}/{tasks.MAX_ATTEMPTS})" if not ok \
-            else f"; next {record['due']}"
+    tail = f"; next {record['due']}" if record and record.get("status") == "pending" else ""
     _log(f"  {'✓' if ok else '✗'} task {tid}"
          + (f" → {', '.join(delivered)}" if delivered else "") + tail)
     return {"id": tid, "ok": ok, "delivered": delivered, "failed": failed, "answer": answer}
 
 
+async def retry_deliveries() -> list[str]:
+    """Re-send answers that reached no channel. Returns the task ids that went out.
+
+    Runs at the top of every tick, before any model call: an answer already paid
+    for should reach the user before new work is started.
+    """
+    out: list[str] = []
+    for task in tasks.undelivered():
+        tid = str(task.get("id"))
+        body = str(task.get("pending_delivery") or "")
+        if tasks.delivery_exhausted(task):
+            _log(f"  giving up on delivering task {tid} after "
+                 f"{tasks.MAX_DELIVERY_ATTEMPTS} attempts; the answer is in the log")
+            tasks.delivery_done(tid)
+            continue
+        delivered, _failed = channels.deliver(body, str(task.get("channel") or ""))
+        if delivered:
+            tasks.delivery_done(tid)
+            out.append(tid)
+            _log(f"  redelivered task {tid} → {', '.join(delivered)}")
+        else:
+            tasks.queue_delivery(tid, body)  # bumps the attempt counter
+    return out
+
+
 async def run_due(
-    now: datetime | None = None, fake: bool = False, limit: int = 10
+    now: datetime | None = None, fake: bool = False, limit: int | None = None
 ) -> list[dict[str, Any]]:
     """Claim and run everything due. Returns one result per task run.
 
@@ -171,10 +256,18 @@ async def run_due(
     # Stamp EVERY pass, including empty ones — an idle runner still proves a runner
     # exists, which is what `schedule_task` checks before promising a delivery.
     tasks.record_tick()
+    # Answers already paid for go out before any new work is started.
+    await retry_deliveries()
+    waiting = tasks.due_count(now)
     claimed = tasks.claim_due(now, limit=limit)
     if not claimed:
         return []
-    _log(f"{len(claimed)} task(s) due")
+    deferred = waiting - len(claimed)
+    # Name what the batch cap dropped: a silent truncation reads as "everything
+    # ran" when it didn't.
+    _log(f"{len(claimed)} task(s) due"
+         + (f" (+{deferred} deferred to the next tick; "
+            f"raise FINANCIAL_RESEARCH_TASK_BATCH to widen)" if deferred > 0 else ""))
     results = []
     for task in claimed:
         results.append(await run_task(task, fake=fake))

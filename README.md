@@ -675,7 +675,9 @@ A recurring task reschedules from its **due** time, not from when it finished, s
 daily 09:00 brief doesn't creep into the afternoon; a machine that was asleep for
 three days resumes at the next real occurrence rather than firing three catch-ups.
 A task that errors is retried on the next tick, then parked after three attempts so
-a permanently-broken prompt stops billing model calls forever.
+a permanently-broken prompt stops billing model calls forever. A tick runs at most
+10 tasks (`FINANCIAL_RESEARCH_TASK_BATCH`) and says how many it deferred, so a
+backlog drains over consecutive ticks instead of firing everything at once.
 
 ### Delivery channels
 
@@ -701,9 +703,20 @@ full of `*`, `_` and `$` from tickers and figures, and Telegram rejects a whole
 message whose Markdown doesn't parse.
 
 Delivery is best-effort: a channel that's down is reported, never fatal. Work that
-finished must not be re-run — and re-billed — because a notification API blipped,
-so the answer stays in the task's record and falls back to stdout if it reached
-nowhere.
+finished must not be re-run — and re-billed — because a notification API blipped.
+An answer that reached **no** channel is parked on its task and re-sent at the top
+of every later tick (before any new model call), for up to 8 attempts; `--tasks`
+shows it as *answer waiting to be delivered*. Redelivery costs one HTTP request,
+which is why it retries far more patiently than a failed *run* does.
+
+A run only counts as done if it produced something that looks like an answer. A
+reply that opens with "I don't have a record of that" or "could you clarify", or
+that is under 40 characters, is treated as a failure and retried — otherwise a
+confused non-answer arrives on your phone labelled as the analysis you asked for.
+The check is deliberately shallow (opening lines, short replies only): judging
+quality properly would mean a second model call per task. A retry that is still
+pending isn't pushed to you; only the final verdict is, so one broken task costs
+one notification rather than three.
 
 ### Replying from your phone (opt-in)
 

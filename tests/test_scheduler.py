@@ -32,7 +32,11 @@ def answers(monkeypatch):
         # A task run is framed with _TASK_PREAMBLE; script and answer off the task's
         # own text so the tests below read as what the user actually scheduled.
         bare = prompt.rsplit("\n\n", 1)[-1]
-        return script.get(bare, (True, f"answer to {bare}"))
+        # Long enough to clear the non-answer gate: a reply under ~40 characters is
+        # treated as "the run didn't do the work", which is the point of the gate.
+        return script.get(
+            bare, (True, f"answer to {bare} — with figures, sources and a verdict."),
+        )
 
     monkeypatch.setattr(scheduler, "_answer", fake_answer)
     return {"seen": seen, "script": script}
@@ -82,7 +86,9 @@ def test_a_failed_run_is_recorded_and_retried(answers, delivered):
     assert results[0]["ok"] is False
     stored = tasks.load_tasks()[0]
     assert stored["status"] == "pending" and stored["attempts"] == 1
-    assert "failed" in delivered[0][1], "a failure must be reported, not swallowed"
+    # Reported to the user only once the retries are spent — see
+    # test_the_final_failure_is_pushed_so_it_is_never_silent.
+    assert delivered == []
 
 
 def test_an_exception_in_the_turn_does_not_take_down_the_tick(monkeypatch, delivered):
@@ -90,7 +96,7 @@ def test_an_exception_in_the_turn_does_not_take_down_the_tick(monkeypatch, deliv
     async def explode(prompt, session_id, fake=False):
         if prompt.endswith("bad"):
             raise RuntimeError("model exploded")
-        return True, "fine"
+        return True, "a complete answer, long enough to clear the non-answer gate"
 
     monkeypatch.setattr(scheduler, "_answer", explode)
     tasks.add_task("bad", "+0m")
@@ -193,7 +199,8 @@ def test_an_inbound_message_is_answered_in_a_per_chat_session(inbox, answers):
     )
     asyncio.run(scheduler.poll_inbox())
     assert answers["seen"][0] == ("how is NVDA?", "telegram-999")
-    assert inbox["replies"][0] == ("999", "answer to how is NVDA?")
+    chat_id, reply = inbox["replies"][0]
+    assert chat_id == "999" and reply.startswith("answer to how is NVDA?")
 
 
 def test_chat_commands_are_answered_without_a_model_call(inbox, answers):
@@ -285,3 +292,128 @@ def test_an_inbound_chat_message_gets_no_task_framing(inbox, answers):
     )
     asyncio.run(scheduler.poll_inbox())
     assert answers["seen"][0][0] == "how is NVDA?"
+
+
+# --- gap 1: a reply that isn't an answer must not count as done ------------------
+
+
+def test_a_non_answer_is_not_counted_as_success(answers, delivered):
+    """Observed in the wild: the run replied "I don't have a record of that
+    research" and that was marked done and pushed to the user's phone as if it
+    were the analysis they asked for."""
+    answers["script"]["Analyse FISV"] = (
+        True,
+        "I appreciate the context, but I need to clarify: I don't have a record of "
+        "pulling a FISV Q2 2026 earnings analysis in our conversation history.",
+    )
+    tasks.add_task("Analyse FISV", "+0m")
+    results = asyncio.run(scheduler.run_due())
+    assert results[0]["ok"] is False
+    stored = tasks.load_tasks()[0]
+    assert stored["status"] == "pending" and stored["attempts"] == 1
+
+
+def test_an_empty_or_tiny_reply_is_a_non_answer(answers, delivered):
+    answers["script"]["x"] = (True, "Done.")
+    tasks.add_task("x", "+0m")
+    assert asyncio.run(scheduler.run_due())[0]["ok"] is False
+
+
+def test_a_real_report_that_mentions_a_missing_record_later_still_counts(answers, delivered):
+    """The detector reads the opening only. A long report noting "no record of a
+    prior filing" in its third paragraph is doing its job, not refusing."""
+    body = ("FISERV Q2 2026: revenue $5.2bn, EPS $2.45 vs $2.40 consensus. " * 40
+            + "\nNote: there is no record of an 8-K covering this.")
+    answers["script"]["deep dive"] = (True, body)
+    tasks.add_task("deep dive", "+0m")
+    assert asyncio.run(scheduler.run_due())[0]["ok"] is True
+    assert tasks.load_tasks()[0]["status"] == "done"
+
+
+def test_a_retrying_failure_is_not_pushed_to_the_user_yet(answers, delivered):
+    """Three phone notifications for one task still being retried is noise, and
+    the outcome isn't known yet."""
+    answers["script"]["broken"] = (False, "boom")
+    tasks.add_task("broken", "+0m")
+    asyncio.run(scheduler.run_due())
+    assert delivered == []
+
+
+def test_the_final_failure_is_pushed_so_it_is_never_silent(answers, delivered):
+    answers["script"]["broken"] = (False, "boom")
+    tasks.add_task("broken", "+0m")
+    for _ in range(tasks.MAX_ATTEMPTS):
+        asyncio.run(scheduler.run_due())
+    assert tasks.load_tasks()[0]["status"] == "error"
+    assert len(delivered) == 1, "exactly one message: the final verdict"
+    assert "failed" in delivered[0][1]
+
+
+# --- gap 2: no silent truncation ------------------------------------------------
+
+
+def test_a_truncated_tick_says_what_it_deferred(answers, delivered, capsys):
+    """A cap that drops work silently reads as "everything ran" when it didn't."""
+    for i in range(4):
+        tasks.add_task(f"job {i}", "+0m")
+    asyncio.run(scheduler.run_due(limit=2))
+    err = capsys.readouterr().err
+    assert "2 task(s) due" in err and "+2 deferred" in err
+
+
+def test_the_batch_size_is_configurable(monkeypatch, answers, delivered):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_TASK_BATCH", "1")
+    for i in range(3):
+        tasks.add_task(f"job {i}", "+0m")
+    assert len(asyncio.run(scheduler.run_due())) == 1
+
+
+# --- gap 3: a paid-for answer survives a channel outage -------------------------
+
+
+def test_an_undeliverable_answer_is_parked_and_resent_next_tick(monkeypatch, answers):
+    """The model call is already spent; losing the answer to a blip wastes it."""
+    monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
+    tasks.add_task("Analyse FISV", "+0m")
+    asyncio.run(scheduler.run_due())
+    parked = tasks.undelivered()
+    assert len(parked) == 1 and "answer to Analyse FISV" in parked[0]["pending_delivery"]
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        channels, "deliver",
+        lambda text, prefer="": (sent.append(text), (["telegram"], []))[1],
+    )
+    assert asyncio.run(scheduler.retry_deliveries()) == ["s1"]
+    assert "answer to Analyse FISV" in sent[0]
+    assert tasks.undelivered() == [], "a delivered answer must not be sent forever"
+
+
+def test_redelivery_is_attempted_on_a_tick_with_no_due_work(monkeypatch, answers):
+    monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
+    tasks.add_task("x", "+0m")
+    asyncio.run(scheduler.run_due())
+    calls: list[str] = []
+    monkeypatch.setattr(
+        channels, "deliver",
+        lambda text, prefer="": (calls.append(text), (["telegram"], []))[1],
+    )
+    assert asyncio.run(scheduler.run_due()) == [], "nothing is due"
+    assert calls, "but the parked answer still went out"
+
+
+def test_redelivery_eventually_gives_up(monkeypatch, answers):
+    """Otherwise an answer for a permanently-dead channel is retried forever."""
+    monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
+    tasks.add_task("x", "+0m")
+    asyncio.run(scheduler.run_due())
+    for _ in range(tasks.MAX_DELIVERY_ATTEMPTS + 1):
+        asyncio.run(scheduler.retry_deliveries())
+    assert tasks.undelivered() == []
+
+
+def test_a_parked_answer_is_visible_in_the_listing(monkeypatch, answers):
+    monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
+    tasks.add_task("x", "+0m")
+    asyncio.run(scheduler.run_due())
+    assert "answer waiting to be delivered" in tasks.list_scheduled_tasks()

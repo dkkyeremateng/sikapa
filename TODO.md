@@ -1,7 +1,7 @@
 # TODO
 
 Open items from the scheduled-tasks + delivery-channels work (2026-08-06).
-Everything below is *pending*; what shipped is described in README → "Scheduled
+Unchecked boxes are pending; what shipped is described in README → "Scheduled
 tasks" and in the git history.
 
 ## Blocking — nothing runs scheduled work across a reboot
@@ -33,16 +33,27 @@ tasks" and in the git history.
          Python upgrade changes that path and the grant silently stops applying.
       3. **Keep `--watch`** and accept restarting it after every reboot.
 
-- [ ] **Restart the running watcher** (Ctrl-C, then `--watch 60`) so it picks up the
-      task-framing fix. The process running as of 2026-08-06 17:2x started before it.
-      Do it when `--tasks` shows nothing waiting, so no task is mid-run.
+- [x] **Restart the running watcher.** ~~The process running as of 17:2x predates the
+      task-framing fix.~~ Done 2026-08-06: restarted at 18:31:38 (PID 28492), which
+      postdates every change, so it carries the task framing, the non-answer gate,
+      the redelivery outbox and the batch-cap logging. Verified: heartbeat fresh,
+      `runner_is_live()` True (so `schedule_task` no longer warns), queue empty and
+      nothing parked awaiting delivery.
+
+      Note this has to be repeated after any change to `scheduler.py`, `tasks.py` or
+      `channels.py` — a long-lived `--watch` process keeps running the code it
+      started with. The launchd agent would not have this problem: it starts a fresh
+      process per tick.
 
 ## Ship
 
-- [ ] **Commit and merge.** The whole feature is uncommitted: `tasks.py`,
-      `channels.py`, `telegram.py`, `scheduler.py`, plus edits to `catalog.py`,
-      `graph.py`, `main.py`, `conftest.py`, `README.md`, `.env.example` and four test
-      modules. 633 tests pass, pyright clean.
+- [x] **Commit and merge.** ~~The whole feature is uncommitted.~~ Done 2026-08-06:
+      `254bd20` on `feat/scheduled-tasks`, merged to `main` as `85975a6` (`--no-ff`),
+      15 files / +2,668 lines — `tasks.py`, `channels.py`, `telegram.py`,
+      `scheduler.py`, plus edits to `catalog.py`, `graph.py`, `main.py`,
+      `conftest.py`, `README.md`, `.env.example`, `TODO.md` and four test modules.
+      633 tests pass, pyright clean on merged `main`; working tree clean. Local only
+      — this repo has no remote configured, so nothing is pushed.
 
 ## Optional / not yet enabled
 
@@ -65,12 +76,25 @@ tasks" and in the git history.
       research" and that non-answer was delivered as a success), but the fix itself
       has only been verified by test.
 
-## Known gaps in the feature (design notes, not bugs)
+## Known gaps in the feature
 
-- A task is judged successful whenever the model returns *any* text — there is no
-  quality check, so a confused-but-non-empty answer counts as done. Detecting that
-  would need a judge call per task; deliberately not built.
-- `--run-due` runs due tasks sequentially and caps a tick at 10, so a large backlog
-  drains over several ticks rather than firing everything at once.
-- Delivery is best-effort: a channel that is down is reported, never retried. The
-  answer stays in the task record and falls back to stdout.
+All three closed 2026-08-06 (644 tests, pyright clean).
+
+- [x] ~~A task is judged successful whenever the model returns *any* text.~~ A reply
+      that opens with "I don't have a record of that" / "could you clarify", or that
+      is under 40 characters, now counts as a failure and retries — the exact
+      regression seen on task s1. The check is deterministic and deliberately
+      shallow (opening lines and short replies only): judging quality properly still
+      means a second model call per task, which remains unbuilt. **Residual risk:** a
+      false positive costs one retry; a real report that merely *mentions* a missing
+      record later is untouched, and there is a test pinning that.
+      Also: a retry that is still pending is no longer pushed to you, so one broken
+      task costs one notification instead of three.
+- [x] ~~A tick caps at 10 tasks.~~ It still does — that is the right behaviour — but
+      the cap is no longer silent: the runner logs `+N deferred to the next tick`,
+      and `FINANCIAL_RESEARCH_TASK_BATCH` widens it.
+- [x] ~~Delivery is best-effort and never retried.~~ An answer that reached no
+      channel is parked on its task and re-sent at the top of every later tick,
+      before any new model call, for up to 8 attempts (redelivery is free — the
+      model call is already spent). `--tasks` shows it as *answer waiting to be
+      delivered*; after 8 attempts it gives up and leaves the answer in the log.
