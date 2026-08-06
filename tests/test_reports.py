@@ -4,6 +4,8 @@ Offline — Chrome is never invoked (the one test that would is skipped without 
 binary), and no channel sends anything real.
 """
 
+from pathlib import Path
+
 import pytest
 
 from financial_research_assistant import channels, reports
@@ -291,26 +293,24 @@ def test_a_short_report_is_one_page_with_no_trailing_dead_band(
 
 
 @pytest.mark.parametrize("renderer", ["chrome", "fpdf2"])
-def test_a_long_report_paginates_and_the_image_is_page_one(
+def test_a_long_report_paginates_and_its_cover_is_a_single_sheet(
     monkeypatch, tmp_path, renderer
 ):
-    """The requirement a screenshot could not express: the cover is page 1, not
-    the whole scroll."""
+    """A long report paginates, and its cover is one whole sheet — the summary
+    infographic, not a slice of the document."""
     paths = _render_with(monkeypatch, tmp_path, _LONG, renderer)
     pages = reports.page_count(paths["pdf"])
     assert pages > 1, f"{renderer} did not paginate a long report"
+    assert paths["cover"] == "infographic"
 
     import pypdfium2 as pdfium
     from PIL import Image
 
-    doc = pdfium.PdfDocument(paths["pdf"])
-    # pypdfium2's scale is pixels per POINT, so the cover is page-height-in-points
+    cover_pdf = Path(paths["pdf"]).with_name(Path(paths["pdf"]).stem + "-cover.pdf")
+    # pypdfium2's scale is pixels per POINT, so the image is page-height-in-points
     # times the scale — not the CSS pixel height.
-    expected = doc[0].get_size()[1] * reports.render_scale()
-    cover = Image.open(paths["png"])
-    assert cover.height == pytest.approx(expected, rel=0.02), (
-        "the cover image is not exactly one page tall"
-    )
+    expected = pdfium.PdfDocument(str(cover_pdf))[0].get_size()[1] * reports.render_scale()
+    assert Image.open(paths["png"]).height == pytest.approx(expected, rel=0.02)
 
 
 def test_the_fallback_is_used_only_when_chrome_is_absent(monkeypatch, tmp_path):
@@ -412,3 +412,135 @@ def test_typography_survives_with_the_bundled_font(monkeypatch, tmp_path):
     text = pdfium.PdfDocument(paths["pdf"])[0].get_textpage().get_text_range()
     assert "—" in text, "the em dash was transliterated despite a Unicode font"
     assert "·" in text
+
+
+# --- the multi-page infographic cover -------------------------------------------
+
+_REPORT_MD = """## Top Holdings (68.9% concentration)
+
+1. **VOO** – 29.3% ($12,150) | +$2,940 unrealized gain
+2. **UNH** – 13.6% ($5,420) | +$1,210 unrealized gain
+3. **AMZN** – 10.2% ($4,310) | +$1,180 unrealized gain
+4. **NVO** – 6.8% ($2,875) | +$15 unrealized gain
+
+## True Sector Exposure
+
+- **Healthcare:** 28.4% — UNH, NVO, MOH
+- **Technology:** 21.6% — NVDA, MSFT, AMZN
+- **Consumer Cyclical:** 15.9% — AMZN, TSLA
+- **Industrials:** 8.1% — CPRT, FISV
+
+## Movers
+
+- **MSFT** +28.55% ($388.84 → $499.86) — AI optimism
+- **NVDA** +11.20% ($196.93 → $218.99) — AI demand
+- **TSLA** -20.69% ($402.90 → $319.53) — headwinds
+- **MOH** -17.61% ($232.90 → $191.88) — earnings miss
+
+## Key Observations
+
+- One hundred percent equities, with no fixed income or international exposure
+- Healthcare is a large overweight relative to the benchmark weighting
+- Hidden overlap: several names are held both directly and through VOO
+"""
+
+
+def test_series_are_extracted_from_the_shapes_a_report_actually_uses():
+    """Ranked holdings, sector weights and signed movers — the three list shapes
+    these reports produce."""
+    series = reports.extract_series(_REPORT_MD)
+    assert [s["title"] for s in series] == [
+        "Top Holdings (68.9% concentration)", "True Sector Exposure", "Movers",
+    ]
+    assert series[0]["items"][0] == ("VOO", 29.3)
+    assert series[1]["items"][0] == ("Healthcare", 28.4)
+    assert series[0]["signed"] is False
+
+
+def test_signed_values_mark_a_series_diverging():
+    """Gains and losses must read as opposites, not as magnitudes."""
+    movers = reports.extract_series(_REPORT_MD)[2]
+    assert movers["signed"] is True
+    assert ("TSLA", -20.69) in movers["items"]
+
+
+def test_a_list_without_percentages_is_not_charted():
+    assert reports.extract_series("## Steps\n\n- do a thing\n- do another\n- and more") == []
+
+
+def test_prose_between_lists_separates_series():
+    md = ("## A\n\n- x 10%\n- y 20%\n- z 30%\n\nSome prose here breaks the run.\n\n"
+          "- p 40%\n- q 50%\n- r 60%\n")
+    assert len(reports.extract_series(md)) == 2
+
+
+def test_series_and_items_are_capped():
+    md = "".join(
+        f"## S{i}\n\n" + "".join(f"- item{j} {j}%\n" for j in range(1, 12)) + "\n"
+        for i in range(6)
+    )
+    series = reports.extract_series(md)
+    assert len(series) <= 3
+    assert all(len(s["items"]) <= 8 for s in series)
+
+
+def test_the_infographic_charts_every_series_and_says_what_it_summarises():
+    html = reports.build_infographic_html(
+        "Portfolio Analysis Report", _REPORT_MD,
+        highlights="Portfolio Value | $38,420 | +$1,860", subtitle="As of August 6",
+        pages=3,
+    )
+    assert "TOP HOLDINGS" in html.upper() and "MOVERS" in html.upper()
+    assert "$38,420" in html
+    assert "Summary of a 3-page report" in html, "the cover must not pose as the report"
+    assert "Key observations" in html
+    assert "#e34948" in html, "losses must use the diverging negative pole"
+
+
+def test_an_odd_third_chart_spans_the_grid_rather_than_leaving_a_hole():
+    html = reports.build_infographic_html("t", _REPORT_MD, pages=2)
+    assert 'class="card wide"' in html
+
+
+@pytest.mark.parametrize("renderer", ["chrome", "fpdf2"])
+def test_a_multi_page_report_gets_an_infographic_cover(monkeypatch, tmp_path, renderer):
+    """Page 1 of a five-page report is the masthead and whatever fitted — the least
+    informative slice of the document."""
+    monkeypatch.setattr(reports, "_SINGLE_MAX_H", 500)
+    monkeypatch.setattr(reports, "_PAGE_H", 500)  # force several pages
+    payload = {
+        "title": "Portfolio Analysis Report", "markdown": _REPORT_MD,
+        "highlights": "Portfolio Value | $38,420 | +$1,860\nvs SPY | -10.46 pp | since inception",
+        "subtitle": "As of August 6, 2026",
+    }
+    paths = _render_with(monkeypatch, tmp_path, payload, renderer)
+    assert reports.page_count(paths["pdf"]) > 1
+    assert paths["cover"] == "infographic"
+
+    import pypdfium2 as pdfium
+
+    cover_pdf = tmp_path / (Path(paths["pdf"]).stem + "-cover.pdf")
+    text = " ".join(
+        pdfium.PdfDocument(str(cover_pdf))[0].get_textpage().get_text_range().split()
+    )
+    assert "VOO" in text and "Healthcare" in text and "MSFT" in text, (
+        "the cover must carry the whole report's series, not one page of it"
+    )
+    assert "29.3" in text
+
+
+def test_a_single_page_report_still_uses_page_one(monkeypatch, tmp_path):
+    payload = {"title": "Short", "markdown": "## H\n\nA short body.", "highlights": ""}
+    paths = _render_with(monkeypatch, tmp_path, payload, "fpdf2")
+    assert reports.page_count(paths["pdf"]) == 1
+    assert paths["cover"] == "page-1"
+
+
+def test_a_failed_cover_falls_back_to_page_one(monkeypatch, tmp_path):
+    """A cover is worth less than the report it introduces."""
+    monkeypatch.setattr(reports, "_SINGLE_MAX_H", 500)
+    monkeypatch.setattr(reports, "_PAGE_H", 500)
+    monkeypatch.setattr(reports, "_build_cover", lambda *a, **k: None)
+    payload = {"title": "P", "markdown": _REPORT_MD, "highlights": "A | 1 | x"}
+    paths = _render_with(monkeypatch, tmp_path, payload, "fpdf2")
+    assert paths["cover"] == "page-1" and "png" in paths
