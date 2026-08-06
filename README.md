@@ -779,11 +779,13 @@ highlights:
 renderer available the HTML is still written and its path returned — a finished
 analysis is never lost to a rendering problem.
 
-The fallback embeds a system Unicode font when it finds one (DejaVu on Linux,
-Arial on macOS; override with `FINANCIAL_RESEARCH_REPORT_FONT`) so `—`, `·` and
-friends survive; without one it transliterates them, because the built-in PDF
-fonts are Latin-1 and *raise* on an em dash. Nothing is vendored — a font file in
-the repo is a licence to track.
+The fallback embeds **Inter** (bundled, SIL OFL 1.1, licence beside the files) so
+a sheet renders identically on every machine — relying on system fonts made the
+output depend on the host: Arial on macOS, DejaVu on Linux, transliterated ASCII
+in a slim container. Override with `FINANCIAL_RESEARCH_REPORT_FONT`; if the
+bundled font is ever missing it falls back to a system face, then to the built-in
+PDF fonts, which are Latin-1 and *raise* on an em dash — hence the transliteration
+of last resort.
 
 Channels declare file support explicitly (`Channel.send_file`), so a
 desktop-banner channel is skipped rather than being handed a PDF it can't show.

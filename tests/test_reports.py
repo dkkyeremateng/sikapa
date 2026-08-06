@@ -362,3 +362,53 @@ def test_headings_do_not_inherit_fpdf2s_red_defaults():
         assert colour is not None
         rgb = (colour.r, colour.g, colour.b)
         assert not (rgb[0] > 0.4 and rgb[1] < 0.2 and rgb[2] < 0.2), f"{tag} is red"
+
+
+# --- the vendored font ----------------------------------------------------------
+
+
+def test_the_bundled_font_is_present_and_preferred(monkeypatch):
+    """Relying on system fonts made output depend on the machine — Arial on macOS,
+    DejaVu on Linux, transliterated ASCII in a slim container."""
+    monkeypatch.delenv("FINANCIAL_RESEARCH_REPORT_FONT", raising=False)
+    regular, bold = reports._bundled_font()
+    assert regular.endswith("Inter-Regular.ttf") and bold.endswith("Inter-Bold.ttf")
+    assert reports._unicode_font() == (regular, bold), "the bundled pair must win"
+
+
+def test_the_font_licence_ships_beside_it():
+    from pathlib import Path
+
+    licence = Path(reports._bundled_font()[0]).with_name("Inter-LICENSE.txt")
+    assert licence.exists()
+    assert "SIL Open Font License" in licence.read_text(encoding="utf-8")
+
+
+def test_an_explicit_font_still_overrides_the_bundled_one(monkeypatch, tmp_path):
+    custom = tmp_path / "Custom-Regular.ttf"
+    custom.write_bytes(b"x")
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_FONT", str(custom))
+    assert reports._unicode_font()[0] == str(custom)
+
+
+def test_emoji_are_stripped_whatever_the_font():
+    """No text face carries them, and a missing TTF glyph renders as an empty box
+    rather than raising — silently ugly."""
+    assert "🔔" not in reports._strip_emoji("🔔 alert fired")
+    assert "🤖" not in reports._strip_emoji("🤖 task s1")
+
+
+def test_typography_survives_with_the_bundled_font(monkeypatch, tmp_path):
+    """The point of vendoring: em dashes and friends reach the PDF as themselves,
+    not as hyphens, on any machine."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_CHROME", "/nonexistent/chrome")
+    payload = {"title": "Sheet — dashes", "markdown": "Body — with an em dash · and a middot."}
+    paths = reports.render(reports.build_html(**payload), "font", content=payload)
+    assert paths["renderer"] == "fpdf2"
+
+    import pypdfium2 as pdfium
+
+    text = pdfium.PdfDocument(paths["pdf"])[0].get_textpage().get_text_range()
+    assert "—" in text, "the em dash was transliterated despite a Unicode font"
+    assert "·" in text
