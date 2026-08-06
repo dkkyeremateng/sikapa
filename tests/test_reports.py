@@ -563,3 +563,62 @@ def test_a_failed_cover_falls_back_to_page_one(monkeypatch, tmp_path):
     payload = {"title": "P", "markdown": _REPORT_MD, "highlights": "A | 1 | x"}
     paths = _render_with(monkeypatch, tmp_path, payload, "fpdf2")
     assert paths["cover"] == "page-1" and "png" in paths
+
+
+def test_the_model_is_told_which_shapes_become_charts():
+    """The cover is only as good as the shapes in the body. The same figures in a
+    paragraph produce no chart, so the convention has to be stated where the model
+    reads it — both in the prompt and in the tool's own description."""
+    from financial_research_assistant.graph import SYSTEM_PROMPT
+
+    for text in (SYSTEM_PROMPT, reports.render_report.__doc__ or ""):
+        lowered = text.lower()
+        assert "breakdowns as lists" in lowered
+        assert "28.4%" in text, "the example must show the exact shape"
+        assert "signed" in lowered, "diverging bars need signed values"
+
+
+def test_the_documented_example_shapes_actually_chart():
+    """The convention taught to the model must be one the extractor recognises —
+    otherwise the prompt is telling it to write something that produces nothing."""
+    md = (
+        "## Sector exposure\n\n"
+        "- **Healthcare:** 28.4% — UNH, NVO, MOH\n"
+        "- **Technology:** 21.6% — NVDA, MSFT\n"
+        "- **Industrials:** 8.1% — CPRT\n\n"
+        "## Holdings\n\n"
+        "1. **VOO** – 29.3% ($12,150)\n2. **UNH** – 13.6% ($5,420)\n"
+        "3. **AMZN** – 10.2% ($4,310)\n"
+    )
+    series = reports.extract_series(md)
+    assert len(series) == 2
+    assert series[0]["items"][0] == ("Healthcare", 28.4)
+    assert series[1]["items"][0] == ("VOO", 29.3)
+
+
+def test_prose_observations_that_quote_percentages_are_not_charted():
+    """From a live run: the model wrote observations citing percentages, and they
+    were charted as a series — a row of ellipsised sentences. Category labels are
+    short; sentences are not."""
+    md = (
+        "## Sector breakdown\n\n"
+        "- **Healthcare:** 28.4% — UNH\n- **Technology:** 21.6% — NVDA\n"
+        "- **Consumer Cyclical:** 15.9% — AMZN\n\n"
+        "## Key observations\n\n"
+        "- Healthcare dominance (28.4%) creates concentration risk in a regulated sector\n"
+        "- Technology and cyclical exposure together reach 41.4% of the portfolio\n"
+        "- Significant concentration: top three holdings are 57.8% of total value\n"
+    )
+    series = reports.extract_series(md)
+    assert [s["title"] for s in series] == ["Sector breakdown"]
+    notes = reports.extract_notes(md, {"Sector breakdown"})
+    assert any("Healthcare dominance" in n for n in notes), (
+        "the prose belongs in observations, not on an axis"
+    )
+
+
+def test_a_long_category_name_is_still_charted():
+    """The guard must not reject real labels — 'Communication Services' is 22."""
+    md = ("## Sectors\n\n- **Communication Services:** 3.1%\n"
+          "- **Consumer Defensive:** 1.4%\n- **Basic Materials:** 0.5%\n")
+    assert len(reports.extract_series(md)) == 1

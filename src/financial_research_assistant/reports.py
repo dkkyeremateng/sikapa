@@ -718,8 +718,17 @@ def render_report(
     than a wall of message text.
 
     ``title`` is the headline. ``markdown`` is the body — normal markdown works:
-    headings, bold, lists, tables, `>` blockquote for a warning callout. A long
-    body paginates, and the image sent alongside is page 1.
+    headings, bold, lists, tables, `>` blockquote for a warning callout.
+
+    WRITE BREAKDOWNS AS LISTS, NOT SENTENCES. The image sent alongside the PDF is
+    an infographic charted from the SHAPE of this markdown: any run of 3+ list
+    items that each carry a percentage, under one heading, becomes a bar chart (up
+    to 3). Write ``- **Healthcare:** 28.4% — UNH, NVO, MOH`` or
+    ``1. **VOO** – 29.3% ($12,150)``, one per line, under a heading naming the
+    breakdown. The same numbers inside a paragraph produce no chart. Keep gains and
+    losses signed (``+28.6%`` / ``-20.7%``) so they render as up/down bars around
+    zero rather than as magnitudes. Short bullets with no percentage become the
+    "key observations" block.
     ``highlights`` is optional stat tiles, ONE PER LINE as ``label | value | note``
     (up to 6), e.g. "Adjusted EPS | $1.84 | vs $1.91 consensus". Put the numbers
     that matter there, not in the body. ``subtitle`` is one line under the title.
@@ -814,6 +823,11 @@ _ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$")
 _MAX_SERIES = 3
 _MAX_ITEMS = 8
 _MIN_ITEMS = 3
+#: Longest a chart label can be before it stops being a category. Real ones are
+#: short ("Healthcare", "VOO", "Communication Services" at 22); a prose observation
+#: that happens to quote a percentage is far longer, and charting it produces a row
+#: of ellipsised sentences — observed in a live run.
+_MAX_LABEL = 24
 
 
 def _clean_label(text: str) -> str:
@@ -837,7 +851,10 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
 
     def flush() -> None:
         nonlocal items, signed
-        if len(items) >= _MIN_ITEMS:
+        # Prose, not a series: a run whose labels are mostly sentence-length is an
+        # observations list that happens to cite percentages.
+        long_labels = sum(1 for label, _v in items if len(label) > _MAX_LABEL)
+        if len(items) >= _MIN_ITEMS and long_labels * 2 <= len(items):
             series.append({
                 "title": heading or "Breakdown",
                 "signed": signed,
