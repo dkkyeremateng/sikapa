@@ -61,6 +61,20 @@ _RESULT_SNIPPET = 400
 #: every tick forever.
 MAX_ATTEMPTS = 3
 
+#: How many undeliverable answers to re-attempt before giving up on the channel.
+#: Higher than MAX_ATTEMPTS because a redelivery is FREE — the model call is
+#: already spent — so the only cost of trying again is one HTTP request.
+MAX_DELIVERY_ATTEMPTS = 8
+
+#: Tasks run per tick. Bounded so a backlog built up while the machine was off
+#: drains over consecutive ticks instead of firing twenty model runs at once.
+DEFAULT_BATCH = 10
+
+
+def batch_limit() -> int:
+    raw = (os.environ.get("FINANCIAL_RESEARCH_TASK_BATCH") or "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_BATCH
+
 
 def tasks_file() -> Path:
     raw = os.environ.get("FINANCIAL_RESEARCH_TASKS_FILE")
@@ -389,6 +403,11 @@ def describe(task: dict[str, Any]) -> str:
     line = f"{head} — {prompt[:120]}{'…' if len(prompt) > 120 else ''}"
     if task.get("last_run") and task.get("last_ok") is False:
         line += f"\n      last run failed: {str(task.get('last_result', ''))[:160]}"
+    if task.get("pending_delivery"):
+        # Visible, because otherwise a finished answer nobody received looks
+        # identical to one that was delivered.
+        line += (f"\n      answer waiting to be delivered "
+                 f"({task.get('delivery_attempts', 0)} attempt(s) so far)")
     return line
 
 
@@ -468,7 +487,22 @@ def pending_tasks() -> list[dict[str, Any]]:
     return sorted(items, key=lambda t: t.get("due") or "")
 
 
-def claim_due(now: datetime | None = None, limit: int = 10) -> list[dict[str, Any]]:
+def due_count(now: datetime | None = None) -> int:
+    """How many tasks are due right now, ignoring the per-tick batch limit.
+
+    So a truncated tick can SAY what it deferred. A cap that silently drops work
+    reads as "everything ran" when it didn't.
+    """
+    now = now or now_utc()
+    return sum(
+        1 for t in load_tasks()
+        if t.get("status") == "pending"
+        and (due := _parse_due(t.get("due"))) is not None
+        and due <= now
+    )
+
+
+def claim_due(now: datetime | None = None, limit: int | None = None) -> list[dict[str, Any]]:
     """Mark every task due at ``now`` as running and return them.
 
     Selection and marking happen inside ONE lock — that is the whole point. Two
@@ -477,9 +511,11 @@ def claim_due(now: datetime | None = None, limit: int = 10) -> list[dict[str, An
 
     ``limit`` bounds one tick: a store that accumulated a backlog while the machine
     was off should drain over several ticks rather than firing twenty model runs at
-    once.
+    once. Defaults to ``batch_limit()`` (``FINANCIAL_RESEARCH_TASK_BATCH``); pair it
+    with ``due_count`` to report what a truncated tick deferred.
     """
     now = now or now_utc()
+    limit = batch_limit() if limit is None else limit
     claimed: list[dict[str, Any]] = []
     with _locked():
         items = load_tasks()
@@ -550,6 +586,54 @@ def record_result(task_id: str, ok: bool, result: str, now: datetime | None = No
             save_tasks(items)
             return t
     return None
+
+
+# --- undelivered answers -------------------------------------------------------
+#
+# Delivery is best-effort and must never fail a completed run (see channels.py),
+# but "best-effort" used to mean the answer was gone: a Telegram blip at the wrong
+# moment cost a run that had already been paid for in tokens. So an answer that
+# reached NO channel is parked on its task and re-sent on later ticks. Redelivery
+# is free — the model call is already spent — which is why it retries far more
+# patiently than a failed run does.
+#
+# Kept on the task record rather than in a second file: it needs the same lock and
+# the same atomic write, and the set is bounded by "answers currently undeliverable",
+# which is normally empty. `last_result` stays truncated; this holds the full text
+# precisely because it still has to be delivered.
+
+
+def queue_delivery(task_id: str, text: str) -> None:
+    """Park an answer that reached no channel, for a later tick to re-send."""
+    with _locked():
+        items = load_tasks()
+        for t in items:
+            if str(t.get("id")) == str(task_id):
+                t["pending_delivery"] = text
+                t["delivery_attempts"] = int(t.get("delivery_attempts") or 0) + 1
+                save_tasks(items)
+                return
+
+
+def undelivered() -> list[dict[str, Any]]:
+    """Tasks holding an answer that still has to be delivered, oldest first."""
+    return [t for t in load_tasks() if t.get("pending_delivery")]
+
+
+def delivery_done(task_id: str) -> None:
+    """Clear a parked answer once it has gone out."""
+    with _locked():
+        items = load_tasks()
+        for t in items:
+            if str(t.get("id")) == str(task_id) and t.get("pending_delivery"):
+                t.pop("pending_delivery", None)
+                t.pop("delivery_attempts", None)
+                save_tasks(items)
+                return
+
+
+def delivery_exhausted(task: dict[str, Any]) -> bool:
+    return int(task.get("delivery_attempts") or 0) >= MAX_DELIVERY_ATTEMPTS
 
 
 def purge(keep_errors: bool = True) -> int:
