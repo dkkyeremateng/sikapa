@@ -762,12 +762,30 @@ downscales, which turns dense body text to mush no matter what resolution it was
 rendered at — as a document the bytes arrive untouched and the client still shows a
 tappable preview.
 
-Rendering uses **headless Chrome or Chromium**, auto-detected on the usual macOS
-and Linux paths (override with `FINANCIAL_RESEARCH_CHROME`). It is the one layout
-engine already on most machines, and it produces a raster preview and a
-print-quality vector PDF from one source. Without a browser the HTML is still
-written and its path returned — a finished analysis is never lost to a rendering
-problem. Channels declare file support explicitly (`Channel.send_file`), so a
+**The PDF is the document; the image is its first page.** A long report paginates
+and the cover image is page 1 — which a full-page screenshot cannot express, since
+a screenshot has no pages. A short report becomes a single page sized exactly to
+its content, so there is no trailing dead band.
+
+**Two renderers, one content model.** Both consume the same markdown and
+highlights:
+
+| | Renderer | Notes |
+|---|---|---|
+| Preferred | **headless Chrome/Chromium** | The CSS template — better typography. Auto-detected on the usual macOS and Linux paths; override with `FINANCIAL_RESEARCH_CHROME`. |
+| Fallback | **fpdf2** (built in) | Used when no browser is installed — including this project's own Docker image. Plainer, ~10x faster, always available. |
+
+`pypdfium2` rasterises page 1 whichever renderer produced the PDF. With neither
+renderer available the HTML is still written and its path returned — a finished
+analysis is never lost to a rendering problem.
+
+The fallback embeds a system Unicode font when it finds one (DejaVu on Linux,
+Arial on macOS; override with `FINANCIAL_RESEARCH_REPORT_FONT`) so `—`, `·` and
+friends survive; without one it transliterates them, because the built-in PDF
+fonts are Latin-1 and *raise* on an em dash. Nothing is vendored — a font file in
+the repo is a licence to track.
+
+Channels declare file support explicitly (`Channel.send_file`), so a
 desktop-banner channel is skipped rather than being handed a PDF it can't show.
 
 ### Replying from your phone (opt-in)

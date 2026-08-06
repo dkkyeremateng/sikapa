@@ -8,6 +8,8 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Install the package. Add optional extras as needed, e.g. `pip install '.[tracing]'`.
+# No browser is installed here on purpose: `render_report` falls back to its
+# built-in fpdf2 renderer, so PDFs and cover images work in this image.
 COPY pyproject.toml ./
 COPY src ./src
 RUN pip install .

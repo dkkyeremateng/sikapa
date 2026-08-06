@@ -112,7 +112,7 @@ def test_a_throwing_file_channel_is_recorded_not_raised(file_channels):
 
 
 def test_the_tool_reports_where_the_file_went(monkeypatch, tmp_path):
-    monkeypatch.setattr(reports, "render", lambda html, name: {
+    monkeypatch.setattr(reports, "render", lambda html, name, content=None: {
         "html": str(tmp_path / "r.html"), "png": str(tmp_path / "r.png"),
     })
     monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="", full_quality=False: (["telegram"], []))
@@ -121,22 +121,24 @@ def test_the_tool_reports_where_the_file_went(monkeypatch, tmp_path):
 
 
 def test_the_tool_says_so_when_nothing_can_receive_a_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(reports, "render", lambda html, name: {"png": str(tmp_path / "r.png")})
+    monkeypatch.setattr(reports, "render", lambda html, name, content=None: {"png": str(tmp_path / "r.png")})
     monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="", full_quality=False: ([], []))
     assert "No channel accepted a file" in reports.render_report("t", "b")
 
 
-def test_a_missing_chrome_still_returns_the_html(monkeypatch, tmp_path):
+def test_with_no_renderer_at_all_the_html_still_survives(monkeypatch, tmp_path):
     """A finished analysis must never be lost to a rendering problem."""
     monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
     monkeypatch.setattr(reports, "chrome_path", lambda: "")
-    paths = reports.render(reports.build_html("t", "b"), "t")
+    monkeypatch.setattr(reports, "_fpdf_pdf", lambda *a, **k: False)
+    paths = reports.render(
+        reports.build_html("t", "b"), "t", content={"title": "t", "markdown": "b"}
+    )
     assert set(paths) == {"html"}
-    assert paths["html"].endswith(".html")
 
-    monkeypatch.setattr(reports, "render", lambda html, name: paths)
+    monkeypatch.setattr(reports, "render", lambda html, name, content=None: paths)
     out = reports.render_report("t", "b", deliver=False)
-    assert "no Chrome/Chromium found" in out
+    assert "Could not produce a PDF" in out
 
 
 def test_empty_input_is_refused_before_rendering():
@@ -203,7 +205,7 @@ def test_the_sheet_is_sent_uncompressed(monkeypatch, tmp_path):
     """sendPhoto re-encodes to JPEG and downscales, which turns dense body text to
     mush regardless of the render resolution. The sheet must go as a document."""
     seen: list[bool] = []
-    monkeypatch.setattr(reports, "render", lambda html, name: {"png": str(tmp_path / "r.png")})
+    monkeypatch.setattr(reports, "render", lambda html, name, content=None: {"png": str(tmp_path / "r.png")})
     monkeypatch.setattr(
         channels, "deliver_file",
         lambda p, caption="", prefer="", full_quality=False: (
@@ -211,3 +213,152 @@ def test_the_sheet_is_sent_uncompressed(monkeypatch, tmp_path):
     )
     reports.render_report("t", "b")
     assert seen == [True]
+
+
+# --- the two renderers must not diverge -----------------------------------------
+#
+# A fallback nobody looks at rots. These run BOTH renderers over identical input
+# and assert the same structural facts, so a divergence fails here rather than
+# surfacing months later as an ugly PDF nobody asked for.
+
+import pytest  # noqa: E402
+
+_SAMPLE = {
+    "title": "FISV Q2 2026 — earnings miss",
+    "subtitle": "Reported 6 August 2026",
+    "highlights": "Adjusted EPS | $1.84 | vs $1.91\nClose | $52.68 | down 2.64%",
+    "markdown": (
+        "## Headline\n\nFiserv **missed** and cut guidance — the first quarter "
+        "under a new CEO.\n\n> Detail sits in the 8-K.\n\n"
+        "| Metric | Q1 | Q2 |\n|---|---|---|\n| EPS | $1.79 | $1.84 |\n\n"
+        "- median $62.50\n- mean $66.62\n"
+    ),
+}
+
+_LONG = dict(
+    _SAMPLE,
+    markdown="\n".join(
+        f"## Section {i}\n\n" + ("Body text for this section. " * 45)
+        for i in range(1, 26)
+    ),
+)
+
+
+def _render_with(monkeypatch, tmp_path, payload, renderer):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    if renderer == "fpdf2":
+        monkeypatch.setenv("FINANCIAL_RESEARCH_CHROME", "/nonexistent/chrome")
+    else:
+        monkeypatch.delenv("FINANCIAL_RESEARCH_CHROME", raising=False)
+        if not reports.chrome_path():
+            pytest.skip("no Chrome/Chromium on this machine")
+    return reports.render(
+        reports.build_html(**payload), payload["title"], content=payload
+    )
+
+
+@pytest.mark.parametrize("renderer", ["chrome", "fpdf2"])
+def test_both_renderers_produce_a_pdf_with_the_content_as_real_text(
+    monkeypatch, tmp_path, renderer
+):
+    paths = _render_with(monkeypatch, tmp_path, _SAMPLE, renderer)
+    assert paths.get("renderer") == renderer
+    assert "pdf" in paths and "png" in paths
+
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(paths["pdf"])
+    text = " ".join(doc[0].get_textpage().get_text_range().split())
+    # Case-insensitive: the CSS uppercases section headings via `text-transform`,
+    # which Chrome bakes into the text layer ("HEADLINE") while fpdf2 has no such
+    # transform ("Headline"). A cosmetic divergence, not a missing heading.
+    lower = text.lower()
+    assert "fisv q2 2026" in lower
+    assert "$1.84" in text, "a stat-tile value went missing"
+    assert "headline" in lower, "a body heading went missing"
+    assert "$1.79" in text, "a table cell went missing"
+    assert "not investment advice" in lower, "the disclaimer must always ship"
+
+
+@pytest.mark.parametrize("renderer", ["chrome", "fpdf2"])
+def test_a_short_report_is_one_page_with_no_trailing_dead_band(
+    monkeypatch, tmp_path, renderer
+):
+    """Both paths fit the page to the content: a near-empty second page is the
+    defect this replaced."""
+    paths = _render_with(monkeypatch, tmp_path, _SAMPLE, renderer)
+    assert reports.page_count(paths["pdf"]) == 1
+
+
+@pytest.mark.parametrize("renderer", ["chrome", "fpdf2"])
+def test_a_long_report_paginates_and_the_image_is_page_one(
+    monkeypatch, tmp_path, renderer
+):
+    """The requirement a screenshot could not express: the cover is page 1, not
+    the whole scroll."""
+    paths = _render_with(monkeypatch, tmp_path, _LONG, renderer)
+    pages = reports.page_count(paths["pdf"])
+    assert pages > 1, f"{renderer} did not paginate a long report"
+
+    import pypdfium2 as pdfium
+    from PIL import Image
+
+    doc = pdfium.PdfDocument(paths["pdf"])
+    # pypdfium2's scale is pixels per POINT, so the cover is page-height-in-points
+    # times the scale — not the CSS pixel height.
+    expected = doc[0].get_size()[1] * reports.render_scale()
+    cover = Image.open(paths["png"])
+    assert cover.height == pytest.approx(expected, rel=0.02), (
+        "the cover image is not exactly one page tall"
+    )
+
+
+def test_the_fallback_is_used_only_when_chrome_is_absent(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_CHROME", "/nonexistent/chrome")
+    paths = reports.render(reports.build_html(**_SAMPLE), "x", content=_SAMPLE)
+    assert paths["renderer"] == "fpdf2"
+
+
+def test_the_fallback_cannot_run_without_the_raw_content(monkeypatch, tmp_path):
+    """`render()` is given HTML; the browser-free path needs the fields themselves,
+    so a caller that omits them gets HTML only rather than a silent blank sheet."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_CHROME", "/nonexistent/chrome")
+    assert set(reports.render(reports.build_html(**_SAMPLE), "x")) == {"html"}
+
+
+# --- font handling in the fallback ----------------------------------------------
+
+
+def test_typographic_characters_are_transliterated_not_fatal():
+    """The core PDF fonts are Latin-1 only and RAISE on an em dash — losing the
+    dash beats losing the render."""
+    out = reports._ascii("EPS — $1.84 · ▼ 2.64% ✓ → €")
+    assert "—" not in out and "▼" not in out
+    out.encode("latin-1")  # must not raise
+
+
+def test_a_bold_face_is_only_claimed_when_a_real_one_exists(monkeypatch, tmp_path):
+    """fpdf2 does not synthesize bold for an embedded TTF, so registering the
+    regular file under "B" renders **bold** as plain body text."""
+    regular = tmp_path / "Some-Regular.ttf"
+    regular.write_bytes(b"x")
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_FONT", str(regular))
+    assert reports._unicode_font() == (str(regular), "")
+
+    bold = tmp_path / "Some-Bold.ttf"
+    bold.write_bytes(b"x")
+    assert reports._unicode_font() == (str(regular), str(bold))
+
+
+def test_headings_do_not_inherit_fpdf2s_red_defaults():
+    """Its stock heading colour is dark red; in this palette red means
+    miss/critical, so every section heading would read as an alarm."""
+    styles = reports._tag_styles("helvetica")
+    assert styles, "tag styles must be applied"
+    for tag in ("h1", "h2", "h3"):
+        colour = styles[tag].color
+        assert colour is not None
+        rgb = (colour.r, colour.g, colour.b)
+        assert not (rgb[0] > 0.4 and rgb[1] < 0.2 and rgb[2] < 0.2), f"{tag} is red"
