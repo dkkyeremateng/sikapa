@@ -802,3 +802,73 @@ def test_a_percentage_followed_by_prose_yields_no_pair():
     """`29.3%) means a wide outcome` must not produce a label of 'means a wide'."""
     md = "## D\n\n- High volatility (29.3%) means a wide outcome distribution\n"
     assert reports.extract_series(md) == []
+
+
+# --- theme ----------------------------------------------------------------------
+
+
+def test_the_theme_defaults_to_light_and_is_selectable(monkeypatch):
+    monkeypatch.delenv("FINANCIAL_RESEARCH_REPORT_THEME", raising=False)
+    assert reports.report_theme() == "light"
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "dark")
+    assert reports.report_theme() == "dark"
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "neon")
+    assert reports.report_theme() == "light", "an unknown theme must not break rendering"
+
+
+def test_dark_is_selected_not_an_inverted_light(monkeypatch):
+    """Dark takes its own steps from the same ramps, chosen for the dark surface —
+    flipping the light values would fail contrast against it."""
+    light, dark = reports._THEMES["light"], reports._THEMES["dark"]
+    assert dark["surface"] != light["surface"] and dark["ink"] != light["ink"]
+    # the diverging poles are re-stepped, not reused
+    assert dark["pos"] != light["pos"] and dark["neg"] != light["neg"]
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_both_themes_reach_the_rendered_sheet(monkeypatch, theme):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", theme)
+    html = reports.build_infographic_html(
+        "t", "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n", highlights="L | 1 | n",
+    )
+    surface = reports._THEMES[theme]["surface"]
+    assert f"--surface:{surface}" in html
+    assert reports._THEMES[theme]["pos"] in html, "bars must use the theme's pole"
+
+
+def test_the_fallback_renderer_follows_the_theme(monkeypatch):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "dark")
+    assert reports._ink("surface") == (26, 26, 25)
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "light")
+    assert reports._ink("surface") == (252, 252, 251)
+
+
+# --- tile values ----------------------------------------------------------------
+
+
+def test_a_long_tile_value_steps_down_instead_of_wrapping():
+    """Observed: "Q1 2026: +24.0% surprise" wrapped onto a second line, making that
+    tile taller than its neighbours. An earlier attempt rewrote the text and turned
+    "Trailing P/E: 11.33" into the meaningless "Trailing P/E: 11" — the type steps
+    down instead, so every character survives."""
+    assert reports._tile_size("$11.78") == ""
+    assert reports._tile_size("Q1 2026: +24.0% surprise") == " sm"
+    assert reports._tile_size("a value far too long to sit on one line at all") == " xs"
+
+
+def test_the_tile_value_is_never_rewritten():
+    tiles = reports.parse_highlights("Valuation | Trailing P/E: 11.33 | Forward P/E 6.38")
+    assert tiles[0]["value"] == "Trailing P/E: 11.33"
+
+
+def test_the_size_class_reaches_the_html():
+    html = reports.build_infographic_html(
+        "t", "body", highlights="Beat | Q1 2026: +24.0% surprise | note",
+    )
+    assert 'class="val sm"' in html
+
+
+def test_the_prompt_asks_for_a_figure_in_the_value_slot():
+    from financial_research_assistant.graph import SYSTEM_PROMPT
+
+    assert "A TILE `value` IS A FIGURE" in SYSTEM_PROMPT

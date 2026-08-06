@@ -169,6 +169,8 @@ SYSTEM_PROMPT = (
     "Put the headline numbers in `highlights` (one per line, `label | value | note`, "
     "max 6) and the narrative in `markdown` — do not repeat the same figures in "
     "both. Say what it returns; it reports where the file went.\n"
+    "- A TILE `value` IS A FIGURE ($11.78, +24.0%, HOLD) — not a phrase. Context "
+    "goes in the label and the note; a sentence in the value slot shrinks to fit.\n"
     "- ONE TILE PER LINE in `highlights`. All of them on a single line collapses "
     "into one tile with an unreadable run-on note.\n"
     "- WRITE BREAKDOWNS AS LISTS OR TABLES, NOT SENTENCES. The image is charted from "
