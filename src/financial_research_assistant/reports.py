@@ -723,6 +723,7 @@ def render_report(
     highlights: str = "",
     subtitle: str = "",
     deliver: bool = True,
+    allow_prose: bool = False,
 ) -> str:
     """Typeset a summary as a PDF + cover image and send it to the user's channels.
 
@@ -747,12 +748,36 @@ def render_report(
     ``highlights`` is optional stat tiles, ONE PER LINE as ``label | value | note``
     (up to 6), e.g. "Adjusted EPS | $1.84 | vs $1.91 consensus". Put the numbers
     that matter there, not in the body. ``subtitle`` is one line under the title.
-    ``deliver=False`` renders without sending.
+    ``deliver=False`` renders without sending. ``allow_prose=True`` renders a
+    report that genuinely has no numbers to chart — without it, a body containing
+    no list, table or inline breakdown is REFUSED so you can restructure it.
 
     Returns where the files went and whether delivery succeeded.
     """
     if not (title or "").strip() and not (markdown or "").strip():
         return "Nothing to render — give at least a title or some body text."
+
+    # Refuse a chartless body rather than shipping a cover of tiles and text.
+    # A narrative report is a legitimate outcome, but it should be a decision:
+    # `allow_prose=True` says "I looked, there is genuinely nothing to chart",
+    # which is the difference between choosing prose and defaulting into it.
+    if not allow_prose and not extract_series(markdown):
+        return (
+            "NOT RENDERED — nothing in this body can be charted, so the cover image "
+            "would be tiles and text with no visual summary.\n"
+            "Restructure at least one section into a shape that charts, then call "
+            "render_report again:\n"
+            "  • a list of 3+ items each with a percentage, under a heading — "
+            "`- **Healthcare:** 28.4% — UNH, NVO`\n"
+            "  • a markdown table whose first column names the row and one column "
+            "holds a single number per row — `| Q1 2026 | $0.19 to $0.23 | +24.0% |`\n"
+            "  • or an enumeration inside one line — "
+            "`(North America ~65%, Europe ~35%)`\n"
+            "Look for a composition, ranking, history, scenario ladder or peer "
+            "comparison the report already discusses in prose. If this report "
+            "genuinely has no such figures, call render_report again with "
+            "allow_prose=True."
+        )
 
     paths = render(
         build_html(title, markdown, highlights, subtitle),
@@ -843,12 +868,33 @@ _MIN_ITEMS = 3
 #: that happens to quote a percentage is far longer, and charting it produces a row
 #: of ellipsised sentences — observed in a live run.
 _MAX_LABEL = 24
+#: A label left dangling on a connective is a sentence the splitter cut mid-phrase
+#: — "High volatility of 29.3% means..." yields "High volatility of", which is
+#: short enough to pass the length rule and means nothing on an axis.
+_DANGLING_RE = re.compile(
+    r"\b(?:of|at|by|to|in|on|is|are|was|were|from|with|and|or|the|an?|for|near|"
+    r"about|around|over|under|than|that|which|means?|reached|hit)$",
+    re.IGNORECASE,
+)
+
+
+def _is_label(text: str) -> bool:
+    """Whether a cleaned label reads as a category rather than a cut sentence.
+
+    The dangling check only applies to multi-word labels: a one-word label is a
+    name even when the word happens to be "A", while "High volatility of" is a
+    sentence the splitter cut mid-phrase.
+    """
+    if not text or len(text) > _MAX_LABEL:
+        return False
+    return " " not in text.strip() or not _DANGLING_RE.search(text)
 
 
 def _clean_label(text: str) -> str:
+    """The label a list item is charted under. NOT truncated — the caller needs the
+    real length to tell a category from a sentence fragment."""
     text = re.sub(r"\*\*|__|`", "", text).strip()
-    label = _LABEL_SPLIT.split(text, maxsplit=1)[0].strip(" .:–—-")
-    return label[:28]
+    return _LABEL_SPLIT.split(text, maxsplit=1)[0].strip(" .:–—-")
 
 
 #: A single number in a table cell: currency, percent or bare, sign preserved.
@@ -940,6 +986,13 @@ def _table_series(rows: list[list[str]], heading: str) -> dict[str, Any] | None:
 _PAIR_RE = re.compile(
     r"([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)\s*[:~≈]?\s*([+-]?\d+(?:\.\d+)?)\s*%"
 )
+#: ``65% North America``: the same split written the other way round. The label
+#: must end on punctuation or a conjunction, so ``29.3%) means a wide outcome``
+#: yields nothing rather than a label of "means a wide outcome".
+_PAIR_REV_RE = re.compile(
+    r"([+-]?\d+(?:\.\d+)?)\s*%\s+([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)"
+    r"(?=\s*[,;)]|\s+(?:and|or)\b|$)"
+)
 #: An enumeration inside one sentence needs only two members to be worth a chart —
 #: a 65/35 split is a comparison, not a lone statistic.
 _MIN_INLINE = 2
@@ -955,6 +1008,8 @@ def _inline_series(line: str, heading: str) -> dict[str, Any] | None:
     """
     text = re.sub(r"\*\*|__|`", "", line)
     pairs = _PAIR_RE.findall(text)
+    if len(pairs) < _MIN_INLINE:
+        pairs = [(label, digits) for digits, label in _PAIR_REV_RE.findall(text)]
     if len(pairs) < _MIN_INLINE:
         return None
     items: list[tuple[str, float]] = []
@@ -999,10 +1054,11 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
 
     def flush() -> None:
         nonlocal items, signed
-        # Prose, not a series: a run whose labels are mostly sentence-length is an
-        # observations list that happens to cite percentages.
-        long_labels = sum(1 for label, _v in items if len(label) > _MAX_LABEL)
-        if len(items) >= _MIN_ITEMS and long_labels * 2 <= len(items):
+        # Prose, not a series. ANY over-long label disqualifies the run: if a label
+        # has to be cut to fit an axis it was never a category, and a "majority"
+        # rule let through a bear-case list that charted a drawdown, a geographic
+        # share and a volatility figure together on one axis.
+        if len(items) >= _MIN_ITEMS and all(_is_label(l) for l, _v in items):
             series.append({
                 "title": heading or "Breakdown",
                 "signed": signed,
