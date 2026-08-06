@@ -227,13 +227,17 @@ def _upload(method: str, path: Path, fields: dict[str, str], file_field: str) ->
         raise RuntimeError(_safe(f"telegram {method} failed: {exc}")) from None
 
 
-def send_file(path: str, caption: str = "", chat_id: str = "") -> bool:
-    """Send a file. Images go as photos (inline preview), everything else as a
-    document. False when not configured or the file is missing/too big.
+def send_file(
+    path: str, caption: str = "", chat_id: str = "", full_quality: bool = False
+) -> bool:
+    """Send a file. False when not configured or the file is missing/too big.
 
-    An image is worth sending as a photo because Telegram shows it in the chat —
-    the whole point of rendering a report as a picture is that it is readable
-    without opening anything.
+    ``full_quality`` decides how an IMAGE travels, and it matters more than any
+    render setting: ``sendPhoto`` re-encodes to JPEG and downscales, which turns
+    the body text of a dense report to mush no matter what resolution it was
+    rendered at. ``sendDocument`` transfers the bytes untouched — the client still
+    shows a tappable preview — so a text-bearing sheet goes that way and only
+    genuinely photographic content should take the compressed path.
     """
     target = (chat_id or default_chat_id()).strip()
     src = Path(path)
@@ -242,7 +246,11 @@ def send_file(path: str, caption: str = "", chat_id: str = "") -> bool:
     size = src.stat().st_size
     if size > _DOC_MAX_BYTES:
         return False
-    as_photo = src.suffix.lower() in _PHOTO_SUFFIXES and size <= _PHOTO_MAX_BYTES
+    as_photo = (
+        not full_quality
+        and src.suffix.lower() in _PHOTO_SUFFIXES
+        and size <= _PHOTO_MAX_BYTES
+    )
     fields = {"chat_id": target}
     if caption:
         # Telegram caps a caption at 1024 characters and rejects the whole upload

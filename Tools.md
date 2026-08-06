@@ -430,8 +430,10 @@ callout all render. `highlights` is the stat-tile row, **one per line** as
 `label | value | note` (max 6); put the headline numbers there rather than
 repeating them in the body. Files are saved under
 `~/.financial-research-assistant/reports` (`FINANCIAL_RESEARCH_REPORTS_DIR`) and
-the PNG + PDF are sent to every configured channel that can carry a file — Telegram
-today, where an image previews inline and a PDF arrives as a document.
+the PNG + PDF are sent to every configured channel that can carry a file. They go
+as **documents, not photos**: Telegram recompresses a photo and would soften the
+body text, while a document transfers untouched and still previews. Rendered at 3x
+and cropped to the measured content height (`FINANCIAL_RESEARCH_REPORT_SCALE`).
 Needs **Chrome or Chromium** (auto-detected; override with
 `FINANCIAL_RESEARCH_CHROME`); without one you still get the HTML and are told why.
 - **Ask:** "Send me that as a PDF." / "Make an infographic of the FISV results and put it on Telegram." / "Every Friday, email me a one-pager on my holdings."

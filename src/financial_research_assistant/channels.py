@@ -36,10 +36,11 @@ from typing import Callable
 Sender = Callable[[str], bool]
 
 
-#: A channel's file sender: takes a path and a caption, returns whether it went.
+#: A channel's file sender: (path, caption, full_quality) -> delivered?
+#: ``full_quality`` asks the channel not to recompress — see telegram.send_file.
 #: Optional — a channel that can only carry text simply leaves it None, and
 #: ``deliver_file`` skips it rather than pretending.
-FileSender = Callable[[str, str], bool]
+FileSender = Callable[[str, str, bool], bool]
 
 
 @dataclass(frozen=True)
@@ -136,7 +137,9 @@ def deliver(text: str, prefer: str = "") -> tuple[list[str], list[str]]:
     return delivered, failed
 
 
-def deliver_file(path: str, caption: str = "", prefer: str = "") -> tuple[list[str], list[str]]:
+def deliver_file(
+    path: str, caption: str = "", prefer: str = "", full_quality: bool = False
+) -> tuple[list[str], list[str]]:
     """Send a file to the active channels that can carry one.
 
     Returns ``(delivered, failed)``. A channel with no ``send_file`` is neither —
@@ -149,7 +152,7 @@ def deliver_file(path: str, caption: str = "", prefer: str = "") -> tuple[list[s
         if ch.send_file is None:
             continue
         try:
-            (delivered if ch.send_file(path, caption) else failed).append(ch.key)
+            (delivered if ch.send_file(path, caption, full_quality) else failed).append(ch.key)
         except Exception:  # noqa: BLE001 - a channel failure is never fatal here either
             failed.append(ch.key)
     return delivered, failed
@@ -175,10 +178,10 @@ def _telegram_configured() -> bool:
     return telegram.configured()
 
 
-def _telegram_send_file(path: str, caption: str) -> bool:
+def _telegram_send_file(path: str, caption: str, full_quality: bool = False) -> bool:
     from . import telegram
 
-    return telegram.send_file(path, caption)
+    return telegram.send_file(path, caption, full_quality=full_quality)
 
 
 def _desktop_send(text: str) -> bool:
