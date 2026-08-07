@@ -38,17 +38,26 @@ def _never_actually_play_audio(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _never_touch_the_real_task_store(tmp_path_factory, monkeypatch):
-    """Point every test at a throwaway tasks.json, and unset the delivery channels.
+    """Point every test at a throwaway tasks.json and journal.json, and unset the
+    delivery channels.
 
-    Two separate hazards, one fixture. A test that schedules something would
-    otherwise queue work in the developer's real store — which a later `--run-due`
-    would faithfully execute, spending real tokens on a test fixture's prompt. And
-    a test that runs the scheduler would deliver to whatever channel the developer
-    has configured, i.e. send a Telegram message from the suite.
+    Three hazards, one fixture. A test that schedules something would otherwise
+    queue work in the developer's real store — which a later `--run-due` would
+    faithfully execute, spending real tokens on a test fixture's prompt. A test
+    that runs the scheduler would deliver to whatever channel the developer has
+    configured, i.e. send a Telegram message from the suite. And the journal is
+    read by the capability probe on EVERY graph build, so without redirecting it
+    the developer's real recorded calls would decide which tools the suite sees
+    bound — making the toolset tests pass or fail on the contents of a file
+    outside the repo.
     """
     monkeypatch.setenv(
         "FINANCIAL_RESEARCH_TASKS_FILE",
         str(tmp_path_factory.mktemp("tasks") / "tasks.json"),
+    )
+    monkeypatch.setenv(
+        "FINANCIAL_RESEARCH_JOURNAL_FILE",
+        str(tmp_path_factory.mktemp("journal") / "journal.json"),
     )
     monkeypatch.setenv(
         "FINANCIAL_RESEARCH_TELEGRAM_STATE",

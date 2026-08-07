@@ -97,6 +97,7 @@ from .documents import DOCUMENT_TOOLS  # noqa: E402
 from .alerts import ALERT_TOOLS  # noqa: E402
 from .tasks import TASK_TOOLS  # noqa: E402
 from .reports import REPORT_TOOLS  # noqa: E402
+from .journal import JOURNAL_TOOLS  # noqa: E402
 
 # `.extend` rather than `+=`: both mutate in place, but `+=` reads as a rebind of
 # an upper-case (i.e. constant) name to a type checker, which flags every line.
@@ -114,6 +115,7 @@ TOOLS.extend(DOCUMENT_TOOLS)
 TOOLS.extend(ALERT_TOOLS)
 TOOLS.extend(TASK_TOOLS)
 TOOLS.extend(REPORT_TOOLS)
+TOOLS.extend(JOURNAL_TOOLS)
 
 
 # --- Capability gating -----------------------------------------------------
@@ -182,11 +184,21 @@ def _has_tasks() -> bool:
         return False
 
 
+def _has_journal() -> bool:
+    from . import journal
+
+    try:
+        return bool(journal.load_entries())
+    except OSError:
+        return False
+
+
 _CAPABILITY_PROBES = {
     "statements": _has_statements,
     "documents": _has_documents,
     "alerts": _has_alerts,
     "tasks": _has_tasks,
+    "journal": _has_journal,
 }
 
 # Tools dropped when their capability is absent. Deliberately excluded from these
@@ -211,6 +223,10 @@ _GATED_TOOLS: dict[str, frozenset[str]] = {
     # act after the turn ends, so gating it on "a task already exists" would mean
     # the agent could never create its first one.
     "tasks": frozenset({"list_scheduled_tasks", "cancel_scheduled_task"}),
+    # `record_thesis` is the bootstrap tool, for the same reason. `review_theses`
+    # reads a store that is empty until the first call is logged, and its whole
+    # value is reading back a record that exists.
+    "journal": frozenset({"review_theses"}),
 }
 
 

@@ -1,6 +1,6 @@
 # Tools Reference
 
-Every agent tool the assistant can call, grouped by area. **61 tools.**
+Every agent tool the assistant can call, grouped by area. **63 tools.**
 
 You don't call these directly — you ask the assistant in plain English and it
 picks the tool(s). Each entry below shows:
@@ -35,6 +35,7 @@ tools need a broker statement imported first.
 11. [Subagent delegation](#11-subagent-delegation)
 12. [Scheduled work](#12-scheduled-work)
 13. [Rendered reports](#13-rendered-reports)
+14. [Thesis journal](#14-thesis-journal)
 
 ---
 
@@ -475,6 +476,43 @@ containers; `pypdfium2` makes the cover image either way. The fallback bundles t
 Inter typeface, so its output is identical on every machine.
 - **Ask:** "Send me that as a PDF." / "Make an infographic of the FISV results and put it on Telegram." / "Every Friday, email me a one-pager on my holdings."
 - **Call:** `render_report(title="FISV Q2 2026 — miss and guidance cut", highlights="Adjusted EPS | $1.84 | vs $1.91 consensus\nMean target | $66.62 | +26.5%", markdown="## Headline\n\nFiserv missed and **cut guidance**…")`
+
+---
+
+## 14. Thesis journal
+
+The assistant's other learning layers check the *process* (was a source thin?) or a
+fixed regression set. None of them ever checks whether its market calls were right,
+so all three can be satisfied while it is consistently wrong. This closes that loop.
+
+#### `record_thesis(symbol, verdict, thesis, horizon_days=90, benchmark="SPY")`
+Log a directional view — `bullish` / `bearish` / `neutral` — with the price **captured
+here from market data**, not reported by the model. A runner tick scores it once the
+horizon passes: price then vs now, and the same window for the benchmark. Logging a
+call is explicitly not making a recommendation.
+- **Ask:** *(the assistant calls this itself whenever it takes a side)*
+- **Call:** `record_thesis(symbol="NVDA", verdict="bullish", thesis="Data-centre demand still outrunning supply; guidance looks conservative.", horizon_days=90)`
+
+#### `review_theses(symbol="")`
+Open calls, how the scored ones turned out, and the running hit rate plus mean
+performance against the benchmark. The assistant checks this before taking a fresh
+view on a ticker it has covered, so a view it has already been wrong on gets said
+out loud rather than quietly repeated.
+- **Ask:** "How have your calls done?" / "What did you say about NVDA before?"
+- **Call:** `review_theses(symbol="NVDA")`
+- **CLI:** `financial-research-assistant --theses` (model-free)
+
+**Scoring.** Direction decides the hit — that is what was actually claimed — and the
+benchmark comparison rides alongside to answer whether being right was worth
+anything (`bullish +8%` against an index that did `+14%` is a hit with negative
+alpha). `neutral` counts as right when the move stays inside ±5%. Scoring is two
+price lookups and a subtraction, so it is model-free, runs on the existing
+`--run-due` / `--watch` tick, and cannot hallucinate. A call the price source can't
+answer for stays **open** for a later tick rather than being burned as a miss.
+
+**What it is not.** A handful of past calls on whatever you happened to ask about —
+far too small a sample, and not a random one, to say anything about the next call.
+Every surface reports it as calibration and says so.
 
 ---
 
