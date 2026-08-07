@@ -60,6 +60,61 @@ def test_a_bare_time_rolls_forward_to_the_next_occurrence():
     assert got > now, "a time already past today must mean tomorrow"
 
 
+def _at(hour, minute=0):
+    """A fixed 'now', given as local wall-clock and returned in UTC — the shape
+    parse_when takes. Pinned rather than relative to the real clock so these cases
+    ('it is already past 09:00') hold whenever the suite runs.
+
+    The hour is set on the NAIVE local time before `astimezone` attaches an offset:
+    replacing the hour on an already-aware value keeps the offset belonging to the
+    real current time, which is the wrong one for that wall clock on the two DST
+    transition days a year.
+    """
+    naive = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return naive.astimezone().astimezone(timezone.utc)
+
+
+def test_tonight_means_this_evening_not_this_morning():
+    """"tonight" defaulted to the same 09:00 as every other bare day word, so past
+    mid-morning it produced a time in the PAST — the task was immediately due and
+    ran on the next tick, seconds after being scheduled."""
+    got = tasks.parse_when("tonight", _at(14)).astimezone()
+    assert got.hour == 20, "tonight is an evening hour"
+    assert got.date() == datetime.now().astimezone().date(), "and it is still tonight"
+
+
+def test_a_day_word_never_resolves_into_the_past():
+    """A task dated earlier than now is immediately due, so it fires on the very
+    next tick — the failure this guards is 'I scheduled it and it ran at once'."""
+    for text, now in (
+        ("today", _at(15)),        # default hour already gone by
+        ("tonight", _at(23)),      # evening default already gone by
+        ("today 16:00", _at(17)),  # an explicit time the user got wrong
+        ("tomorrow", _at(23)),
+    ):
+        # `>=`, not `>`: a bare "today" past its default hour resolves to exactly
+        # now (see below), which is the earliest a task may legitimately be due.
+        assert tasks.parse_when(text, now) >= now, f"{text!r} at {now}"
+
+
+def test_today_with_no_time_stays_today():
+    """When the default hour has passed, "today" resolves to now — the task runs on
+    the next tick, which is still today. Rolling it to tomorrow would contradict
+    the one word the user actually said."""
+    now = _at(15)
+    got = tasks.parse_when("today", now)
+    assert got - now < timedelta(seconds=2)
+
+
+def test_an_explicit_past_time_rolls_to_the_next_occurrence():
+    """"today 16:00" at 17:00 is a mistake about the clock, and the next 16:00 is
+    what the bare-time branch already means by "16:00" — so the two agree."""
+    now = _at(17)
+    got = tasks.parse_when("today 16:00", now).astimezone()
+    assert got.hour == 16
+    assert got.date() == (now.astimezone() + timedelta(days=1)).date()
+
+
 def test_unparseable_time_is_reported_not_guessed():
     """Silently defaulting to 'now' would run an expensive task immediately; the
     error names the formats that work."""
