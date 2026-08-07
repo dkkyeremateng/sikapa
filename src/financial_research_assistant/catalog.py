@@ -98,6 +98,8 @@ from .alerts import ALERT_TOOLS  # noqa: E402
 from .tasks import TASK_TOOLS  # noqa: E402
 from .reports import REPORT_TOOLS  # noqa: E402
 from .journal import JOURNAL_TOOLS  # noqa: E402
+from .macro import MACRO_TOOLS  # noqa: E402
+from .transcripts import TRANSCRIPT_TOOLS  # noqa: E402
 
 # `.extend` rather than `+=`: both mutate in place, but `+=` reads as a rebind of
 # an upper-case (i.e. constant) name to a type checker, which flags every line.
@@ -116,6 +118,8 @@ TOOLS.extend(ALERT_TOOLS)
 TOOLS.extend(TASK_TOOLS)
 TOOLS.extend(REPORT_TOOLS)
 TOOLS.extend(JOURNAL_TOOLS)
+TOOLS.extend(MACRO_TOOLS)
+TOOLS.extend(TRANSCRIPT_TOOLS)
 
 
 # --- Capability gating -----------------------------------------------------
@@ -193,12 +197,22 @@ def _has_journal() -> bool:
         return False
 
 
+def _has_transcripts() -> bool:
+    """Gated on the KEY, not on a store. Transcripts are the one source here with
+    no keyless provider, so without a key the tool can only ever report that —
+    which the prompt says better, and for free, than a bound tool schema does."""
+    from . import transcripts
+
+    return transcripts.configured()
+
+
 _CAPABILITY_PROBES = {
     "statements": _has_statements,
     "documents": _has_documents,
     "alerts": _has_alerts,
     "tasks": _has_tasks,
     "journal": _has_journal,
+    "transcripts": _has_transcripts,
 }
 
 # Tools dropped when their capability is absent. Deliberately excluded from these
@@ -227,6 +241,10 @@ _GATED_TOOLS: dict[str, frozenset[str]] = {
     # reads a store that is empty until the first call is logged, and its whole
     # value is reading back a record that exists.
     "journal": frozenset({"review_theses"}),
+    # No key, no provider — unlike every other group here there is no bootstrap
+    # tool that could turn it on, so the whole thing is dropped and the prompt
+    # explains the keyless 8-K route instead.
+    "transcripts": frozenset({"earnings_call_transcript"}),
 }
 
 

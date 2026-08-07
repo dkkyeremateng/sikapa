@@ -3,7 +3,7 @@
 
 Reads eval/dataset.jsonl — one JSON object per line:
     {"query": str,
-     "eval_type": "contains" | "regex" | "trajectory" | "llm_judge",
+     "eval_type": "contains" | "regex" | "trajectory" | "llm_judge" | "rubric",
      "criteria": [ ... ],           # shape depends on eval_type (see below)
      "ordered": bool}               # trajectory only, optional
 
@@ -15,6 +15,19 @@ Scoring strategies:
               subsequence of the actual calls)
   llm_judge   criteria: [{"answer": str, "weight": float}]   a stronger judge
               model rates how well the output meets each described criterion
+  rubric      criteria: [{"dimension": str, "requirement": str, "weight": float}]
+              grades the DERIVATION, not just the answer
+
+`rubric` exists because the other four cannot see how an answer was reached.
+`trajectory` checks a tool was called but not with what arguments or to what end;
+`llm_judge` reads the final text and nothing else. A financial answer can land on
+the right number from the wrong source, over the wrong period, or with its
+assumptions unstated — and each of those is invisible to a single "is this answer
+good" score, which a capable model can talk its way into. So `rubric` shows the
+judge the TOOL TRAJECTORY alongside the answer and scores each dimension
+separately, and the per-dimension breakdown is persisted to results.jsonl. That
+breakdown is the point: it names which part of the reasoning failed, which is the
+only form `improve.diagnose` can act on.
 
 For each item it runs the agent CLI in a subprocess (capturing stdout for the
 answer and a --trace JSON file for the tool trajectory), scores it, appends a
@@ -105,8 +118,130 @@ def _llm_judge(query: str, output: str, criteria: list[dict], fake: bool) -> flo
         return 0.0
 
 
-def score(item: dict, stdout: str, tools: list[dict], fake: bool) -> float:
+#: Asked of the judge for a `rubric` item. Two things separate it from
+#: `llm_judge`: it sees the TOOL TRAJECTORY, and it scores each dimension
+#: separately.
+#:
+#: Both matter for the same reason. A financial answer can land on the right
+#: number from the wrong source, over the wrong period, or with the assumptions
+#: left unstated — and a single "how good is this answer" score hides all three
+#: behind one number that a stronger model can talk its way into. Grading the
+#: derivation per dimension says WHICH part failed, which is the only form the
+#: improvement loop can act on.
+_RUBRIC_PROMPT = """You are grading the DERIVATION behind a financial research \
+answer, not just its conclusion.
+
+QUERY:
+{query}
+
+TOOLS THE AGENT ACTUALLY CALLED (in order):
+{trajectory}
+
+THE AGENT'S ANSWER:
+{answer}
+
+Score EACH dimension below from 0.0 to 1.0:
+{dimensions}
+
+Grade what the evidence shows, not what sounds plausible. A correct-looking final
+number derived from the wrong source, the wrong period, or an unstated assumption
+scores LOW on that dimension even when the number happens to be right. If the
+trajectory shows no tool call was made for something the answer asserts as fact,
+that is not grounded.
+
+Return ONLY a JSON object mapping each dimension key to its score, e.g.
+{{"source": 1.0, "period": 0.5}}. No prose, no code fence."""
+
+
+def _parse_rubric(raw: str, keys: list[str]) -> dict[str, float]:
+    """Pull ``{key: score}`` out of the judge's reply, clamped to [0, 1].
+
+    Missing keys score 0.0 rather than being skipped: a judge that omits a
+    dimension has not assessed it, and silently dropping it would raise the
+    weighted mean by shrinking the denominator — turning an unanswered dimension
+    into a free pass.
+    """
+    found: dict[str, float] = {}
+    match = re.search(r"\{.*\}", raw, re.S)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+        except ValueError:
+            data = {}
+        if isinstance(data, dict):
+            for key in keys:
+                try:
+                    found[key] = max(0.0, min(1.0, float(data[key])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    return {key: found.get(key, 0.0) for key in keys}
+
+
+def _rubric_judge(
+    query: str, output: str, tools: list[dict], criteria: list[dict], fake: bool
+) -> tuple[float, list[dict]]:
+    """Grade the derivation dimension by dimension.
+
+    Returns ``(weighted_score, breakdown)``. The breakdown is the point — it is
+    what makes a rubric failure actionable instead of just low.
+    """
+    keys = [str(c.get("dimension") or f"d{i}") for i, c in enumerate(criteria)]
+    weights = {k: float(c.get("weight", 1.0)) for k, c in zip(keys, criteria)}
+    if fake:
+        # Offline: no network. Award the dimensions only if the agent produced
+        # anything at all, mirroring `_llm_judge`'s self-test behaviour.
+        got = 1.0 if output.strip() else 0.0
+        scores = {k: got for k in keys}
+    else:
+        try:
+            from langchain_core.messages import HumanMessage
+
+            from financial_research_assistant.llm import _make_llm
+        except Exception as e:
+            print(f"  (rubric needs the package + langchain; scoring 0.0: {e})",
+                  file=sys.stderr)
+            return 0.0, []
+        called = [str(t.get("name", "")) for t in tools]
+        prompt = _RUBRIC_PROMPT.format(
+            query=query,
+            trajectory=", ".join(called) or "(none)",
+            answer=output.strip()[:6000],
+            dimensions="\n".join(
+                f'- "{k}": {c.get("requirement", "")}' for k, c in zip(keys, criteria)
+            ),
+        )
+        try:
+            llm = _make_llm(os.environ.get("EVAL_JUDGE_MODEL") or None)
+            resp = llm.invoke([HumanMessage(content=prompt)])
+        except Exception as e:
+            print(f"  (rubric model call failed; scoring 0.0: {e})", file=sys.stderr)
+            return 0.0, []
+        content = resp.content if isinstance(resp.content, str) else str(resp.content)
+        scores = _parse_rubric(content, keys)
+
+    total = sum(weights.values()) or 1.0
+    value = sum(scores[k] * weights[k] for k in keys) / total
+    breakdown = [
+        {"dimension": k, "score": round(scores[k], 3), "weight": weights[k],
+         "requirement": c.get("requirement", "")}
+        for k, c in zip(keys, criteria)
+    ]
+    return value, breakdown
+
+
+def score(
+    item: dict, stdout: str, tools: list[dict], fake: bool,
+    detail: dict | None = None,
+) -> float:
+    """Score one item. ``detail``, when given, is populated with any structured
+    breakdown the strategy produced (currently the rubric's per-dimension scores),
+    so the caller can persist it without changing this function's return type."""
     eval_type, criteria = item["eval_type"], item.get("criteria", [])
+    if eval_type == "rubric":
+        value, breakdown = _rubric_judge(item["query"], stdout, tools, criteria, fake)
+        if detail is not None and breakdown:
+            detail["rubric"] = breakdown
+        return value
     if eval_type == "llm_judge":
         return _llm_judge(item["query"], stdout, criteria, fake)
 
@@ -170,10 +305,14 @@ def run_item(item: dict, fake: bool, timeout: float, env: dict | None = None) ->
                 tools = json.load(f).get("tools", [])
         except (OSError, json.JSONDecodeError):
             pass
-        value = 0.0 if (timed_out or returncode != 0) else score(item, stdout, tools, fake)
+        detail: dict = {}
+        value = (
+            0.0 if (timed_out or returncode != 0)
+            else score(item, stdout, tools, fake, detail=detail)
+        )
     finally:
         Path(trace_path).unlink(missing_ok=True)
-    return {
+    record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "query": item["query"],
         "eval_type": item["eval_type"],
@@ -183,6 +322,10 @@ def run_item(item: dict, fake: bool, timeout: float, env: dict | None = None) ->
         "tools": [str(t.get("name", "")) for t in tools],
         "_answer": stdout,
     }
+    # Persisted (no underscore): the per-dimension scores are the diagnostic value
+    # of a rubric run, and a mean alone would throw them away.
+    record.update(detail)
+    return record
 
 
 def run_all(
@@ -217,7 +360,10 @@ def _diagnose_run(items, results, floor):
 
     diagnoses = []
     for item, r in zip(items, results):
-        d = improve.diagnose(item, r["score"], r.get("tools", []), r.get("_answer", ""), floor)
+        d = improve.diagnose(
+            item, r["score"], r.get("tools", []), r.get("_answer", ""), floor,
+            rubric=r.get("rubric"),
+        )
         if d:
             diagnoses.append(d)
     return diagnoses, improve.propose_addendum(diagnoses)

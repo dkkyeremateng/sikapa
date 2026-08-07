@@ -35,8 +35,15 @@ def improve_dir() -> Path:
     return Path.home() / ".financial-research-assistant" / "eval"
 
 
+#: A rubric dimension at or below this scored badly enough to be worth naming.
+#: Not 0.0: a dimension the judge gave 0.3 was assessed and largely failed, and
+#: waiting for a clean zero would hide most real derivation faults.
+_RUBRIC_FAIL = 0.5
+
+
 def diagnose(
-    item: dict[str, Any], score: float, tools: list[str], answer: str, floor: float = 1.0
+    item: dict[str, Any], score: float, tools: list[str], answer: str,
+    floor: float = 1.0, rubric: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Diagnose one under-performing eval item, or return None if it met ``floor``.
 
@@ -44,12 +51,34 @@ def diagnose(
     query should have driven, and the trace says which tools actually ran, so a
     miss names exactly what routing guidance to add. Content misses
     (contains/regex/llm_judge) are reported for human review but not turned into
-    automatic prompt rules — too vague to apply safely."""
+    automatic prompt rules — too vague to apply safely.
+
+    A rubric miss sits between the two. It is more specific than a content miss —
+    the breakdown names WHICH dimension of the derivation failed and carries that
+    dimension's stated requirement — but the requirement is prose written for a
+    judge, not a prompt rule, so it is reported rather than auto-applied. Turning
+    "should state its discount-rate assumption" into a system-prompt line is a
+    judgement call, and the whole design of this loop is that a human makes those.
+    """
     if score >= floor:
         return None
     eval_type = item.get("eval_type", "")
     query = item.get("query", "")
     criteria = item.get("criteria", [])
+    if eval_type == "rubric":
+        failed = [
+            {"dimension": d.get("dimension", ""), "score": d.get("score", 0.0),
+             "requirement": d.get("requirement", "")}
+            for d in (rubric or []) if float(d.get("score", 0.0)) <= _RUBRIC_FAIL
+        ]
+        return {
+            "kind": "derivation",
+            "query": query,
+            "eval_type": eval_type,
+            "score": round(score, 4),
+            "failed": failed,
+            "called": list(tools),
+        }
     if eval_type == "trajectory":
         expected = [c.get("tool", "") for c in criteria if c.get("tool")]
         missing = [t for t in expected if t not in tools]
@@ -116,6 +145,7 @@ def render_report(
     addendum, and (when A/B'd) the measured deltas. ``stamp`` is supplied by the
     caller so this stays pure/deterministic."""
     routing = [d for d in diagnoses if d.get("kind") == "routing"]
+    derivation = [d for d in diagnoses if d.get("kind") == "derivation"]
     content = [d for d in diagnoses if d.get("kind") == "content"]
     out = [f"# Eval improvement report — {stamp}", ""]
     if mean is not None:
@@ -138,6 +168,21 @@ def render_report(
                 f"- score {d['score']:.2f} — expected `{'`, `'.join(d['expected'])}`, "
                 f"called {d['called'] or '[]'} — {d['query']}"
             )
+        out.append("")
+    if derivation:
+        out.append("## Derivation misses (review only, not auto-applied)")
+        out.append("")
+        out.append(
+            "The answer may have been right; these are the dimensions of HOW it "
+            "got there that scored poorly."
+        )
+        for d in derivation:
+            out.append(f"- score {d['score']:.2f} — {d['query']}")
+            for f in d.get("failed", []):
+                out.append(
+                    f"    - `{f['dimension']}` {f['score']:.2f} — {f['requirement']}"
+                )
+            out.append(f"    - called: {d['called'] or '[]'}")
         out.append("")
     if content:
         out.append("## Content misses (review only, not auto-applied)")

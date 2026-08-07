@@ -12,7 +12,7 @@ offline deterministic fake mode, and a generic eval harness.
 > A self-playing terminal walkthrough of seven features — company comparison, DCF
 > valuation, cited SEC-filing answers, the options explainer, document Q&A,
 > parallel subagents, and background work delivered to your phone — plus a map of
-> all 63 tools. Source: [`demo.html`](demo.html)
+> all 66 tools. Source: [`demo.html`](demo.html)
 > (open it locally in any browser). See also the full [`Tools.md`](Tools.md) reference.
 
 > **The broker is pluggable — two registry-driven seams.** A different broker's
@@ -1046,11 +1046,40 @@ python eval/ci_gate.py --min-score 0.8   # fail if the mean score regresses (CI)
 ```
 
 Scorers: `contains` / `regex` (match stdout), `trajectory` (which tools were
-called), and `llm_judge`. The judge scores with the **same configured model as the
-agent** (via `graph._make_llm`), so it honors `OPENAI_API_BASE` (local servers) and
-`MODEL_PROVIDER` (Anthropic/Google/…) — no bare `OPENAI_API_KEY` required. Set
-`EVAL_JUDGE_MODEL` to override the judge model (e.g. a stronger cross-family one).
-Results append to `eval/results.jsonl`.
+called), `llm_judge`, and `rubric`. The judge scores with the **same configured
+model as the agent** (via `graph._make_llm`), so it honors `OPENAI_API_BASE` (local
+servers) and `MODEL_PROVIDER` (Anthropic/Google/…) — no bare `OPENAI_API_KEY`
+required. Set `EVAL_JUDGE_MODEL` to override the judge model (e.g. a stronger
+cross-family one). Results append to `eval/results.jsonl`.
+
+### `rubric` — grading the derivation, not the answer
+
+The other four can't see *how* an answer was reached. `trajectory` checks a tool was
+called but not with what arguments or to what end; `llm_judge` reads the final text
+and nothing else. A financial answer can land on the right number from the wrong
+source, over the wrong period, or with its assumptions unstated — and each of those
+is invisible to a single "is this good" score that a capable model can talk its way
+into. (The 2026 benchmark literature makes the same point: on BigFinanceBench the
+best frontier agent scores 58.8% on derivation rubrics, and final-answer accuracy is
+"a useful but lossy proxy".)
+
+So a `rubric` item shows the judge the **tool trajectory** alongside the answer and
+scores each dimension separately:
+
+```json
+{"query": "Was NVDA expensive in January 2025?",
+ "eval_type": "rubric",
+ "criteria": [
+   {"dimension": "as_of",  "requirement": "The answer is about JANUARY 2025, not today…", "weight": 3.0},
+   {"dimension": "source", "requirement": "Uses a source that actually has history…",     "weight": 2.0}]}
+```
+
+The per-dimension breakdown is persisted to `results.jsonl` and printed by the
+improvement report, so a failure names *which* part of the reasoning broke. Two
+deliberate choices: a dimension the judge omits scores **0**, not "skip" (dropping
+it would shrink the denominator and quietly raise the mean), and derivation misses
+are **reported, never auto-applied** — a requirement is prose written for a judge,
+and turning it into a system-prompt rule is a judgement a human should make.
 
 ### A/B a code change against a commit (`eval/ab_compare.py`)
 
