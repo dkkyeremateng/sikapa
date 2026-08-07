@@ -551,71 +551,12 @@ def test_no_answer_reads_as_empty_rather_than_borrowing_one():
 
 
 # --- unbacked scheduling claims -------------------------------------------------
-
-
-def test_a_scheduling_claim_with_no_tool_call_is_corrected():
-    """Live testing found claude-haiku-4-5 calling schedule_task on one of three
-    identical requests — and saying "✓ Scheduled" on the other two. A user who
-    believes work is queued when nothing is loses the thing they asked for."""
-    from financial_research_assistant.adapter import verify_schedule_claim
-
-    for claim in (
-        "✓ **Scheduled.** NVDA analysis will run tomorrow at 09:00.",
-        "Got it. I've scheduled a task to analyse NVDA's earnings tomorrow.",
-        "I have now queued the analysis for you.",
-        "Done — the task is scheduled and will be delivered to Telegram.",
-    ):
-        out = verify_schedule_claim(claim, set())
-        assert "nothing was actually scheduled" in out.lower(), claim
-        assert "--schedule" in out, "the correction must say how to fix it"
-
-
-def test_a_real_schedule_is_left_alone():
-    from financial_research_assistant.adapter import verify_schedule_claim
-
-    claim = "✓ Scheduled [s1] for tomorrow 09:00 — delivered to Telegram."
-    assert verify_schedule_claim(claim, {"schedule_task"}) == claim
-
-
-def test_listing_existing_tasks_is_not_mistaken_for_a_claim():
-    """`list_scheduled_tasks` answers are full of the word "scheduled"; warning on
-    them would train the user to ignore the warning."""
-    from financial_research_assistant.adapter import verify_schedule_claim
-
-    listing = "You have 2 scheduled tasks:\n  [s1] tomorrow 09:00 — NVDA earnings"
-    assert verify_schedule_claim(listing, {"list_scheduled_tasks"}) == listing
-    # even with no tool recorded, a third-person listing is not a creation claim
-    assert verify_schedule_claim(listing, set()) == listing
-
-
-def test_ordinary_answers_are_untouched():
-    from financial_research_assistant.adapter import verify_schedule_claim
-
-    for text in (
-        "AAPL closed at $214.30, up 1.2% on the day.",
-        "The earnings call is scheduled for August 13 — that is the company's date.",
-        "",
-    ):
-        assert verify_schedule_claim(text, set()) == text
-
-
-def test_the_exact_phrasings_seen_in_live_runs_are_caught():
-    """Verbatim openings from three live claude-haiku-4-5 runs that claimed a
-    schedule without calling the tool. The middle one defeated the first version of
-    the pattern, which required a determiner after the verb."""
-    from financial_research_assistant.adapter import verify_schedule_claim
-
-    for opening in (
-        "✓ **Scheduled.** NVDA typically reports pre-market (before 9:30am ET). "
-        "I've queued analysis to run at 10:30am tomorrow.",
-        "Done. I've scheduled an earnings analysis for **tomorrow at 4:30 PM "
-        "(after market close)**, when NVDA's results will be available.",
-        "Got it. I've scheduled a task to analyze NVDA's earnings tomorrow at 9am.",
-    ):
-        assert "nothing was actually scheduled" in verify_schedule_claim(opening, set()).lower()
-
-
-# --- repairing an unbacked claim ------------------------------------------------
+#
+# These pin the DETECTOR, `_SCHEDULE_CLAIM`. A match doesn't merely print a
+# warning — it sends the turn to `_repair_schedule_claim`, which creates a real
+# task. So the negative cases below carry more weight than the positive ones: a
+# missed claim costs a warning nobody sees, a false match schedules work (possibly
+# recurring, possibly billed) that the user never agreed to.
 
 
 def _fake_quick(monkeypatch, content):
@@ -628,6 +569,104 @@ def _fake_quick(monkeypatch, content):
 
     from financial_research_assistant import llm
     monkeypatch.setattr(llm, "quick_llm", lambda *a, **k: _LLM())
+
+
+def _claims_a_schedule(text: str) -> bool:
+    from financial_research_assistant.adapter import _SCHEDULE_CLAIM
+
+    return _SCHEDULE_CLAIM.search(text) is not None
+
+
+def test_a_scheduling_claim_is_detected():
+    """Live testing found claude-haiku-4-5 calling schedule_task on one of three
+    identical requests — and saying "✓ Scheduled" on the other two. A user who
+    believes work is queued when nothing is loses the thing they asked for."""
+    for claim in (
+        "✓ **Scheduled.** NVDA analysis will run tomorrow at 09:00.",
+        "Got it. I've scheduled a task to analyse NVDA's earnings tomorrow.",
+        "I have now queued the analysis for you.",
+        "Done — the task is scheduled and will be delivered to Telegram.",
+    ):
+        assert _claims_a_schedule(claim), claim
+
+
+def test_the_exact_phrasings_seen_in_live_runs_are_caught():
+    """Verbatim openings from three live claude-haiku-4-5 runs that claimed a
+    schedule without calling the tool. The middle one defeated the first version of
+    the pattern, which required a determiner after the verb."""
+    for opening in (
+        "✓ **Scheduled.** NVDA typically reports pre-market (before 9:30am ET). "
+        "I've queued analysis to run at 10:30am tomorrow.",
+        "Done. I've scheduled an earnings analysis for **tomorrow at 4:30 PM "
+        "(after market close)**, when NVDA's results will be available.",
+        "Got it. I've scheduled a task to analyze NVDA's earnings tomorrow at 9am.",
+    ):
+        assert _claims_a_schedule(opening), opening
+
+
+def test_an_offer_to_schedule_is_not_a_claim():
+    """"I'll schedule X if you confirm" is a QUESTION. Treating it as a claim makes
+    the repair pass answer it on the user's behalf — creating the task, and any
+    repeat it mentions, without the confirmation the sentence just asked for."""
+    for offer in (
+        "If you'd like, I'll schedule a check for Friday — just say the word.",
+        "Want me to keep watching? I'll schedule a daily brief if you confirm.",
+        "I can schedule that for tomorrow morning — shall I?",
+    ):
+        assert not _claims_a_schedule(offer), offer
+
+
+def test_a_task_listing_is_not_a_claim():
+    """`list_scheduled_tasks` opens with the literal line "Scheduled tasks:". The
+    called-tools guard covers the turn that ran it, but a later turn paraphrasing
+    the listing calls nothing — and creating a duplicate of a task the user is
+    being shown is the worst available reading."""
+    for listing in (
+        "You have 2 scheduled tasks:\n  [s1] tomorrow 09:00 — NVDA earnings",
+        "Scheduled tasks:\n  [s1] 2026-08-14 09:00 — NVDA earnings",
+        "**Scheduled tasks**\n  [s1] 2026-08-14 09:00 — NVDA earnings",
+    ):
+        assert not _claims_a_schedule(listing), listing
+
+
+def test_ordinary_answers_are_not_claims():
+    for text in (
+        "AAPL closed at $214.30, up 1.2% on the day.",
+        "The earnings call is scheduled for August 13 — that is the company's date.",
+        "",
+    ):
+        assert not _claims_a_schedule(text), text
+
+
+async def test_a_real_schedule_is_left_alone(monkeypatch):
+    """A turn that genuinely called the tool is never second-guessed, and must not
+    reach the repair pass — which would create a second, duplicate task."""
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    def explode(*_a, **_k):
+        raise AssertionError("the repair pass ran on a turn that really scheduled")
+
+    from financial_research_assistant import llm
+
+    monkeypatch.setattr(llm, "quick_llm", explode)
+    claim = "✓ Scheduled [s1] for tomorrow 09:00 — delivered to Telegram."
+    assert await settle_schedule_claim("q", claim, {"schedule_task"}) == claim
+
+
+async def test_the_retraction_says_how_to_fix_it(monkeypatch):
+    """When the claim can't be made true, the user is told plainly and given the
+    command that does it by hand — a correction they can't act on is just noise."""
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    _fake_quick(monkeypatch, "sorry, I can't do that")  # unparseable → no repair
+    out = await settle_schedule_claim(
+        "Monitor NVDA.", "I have now queued the analysis for you.", set()
+    )
+    assert "nothing was actually scheduled" in out.lower()
+    assert "--schedule" in out, "the correction must say how to fix it"
+
+
+# --- repairing an unbacked claim ------------------------------------------------
 
 
 async def test_an_unbacked_claim_is_made_true(monkeypatch):
