@@ -76,13 +76,39 @@ def _days(out: str) -> int:
     return int(found.group(1))
 
 
-def _window_end(out: str) -> str:
-    """The last date in the window a tool reports covering."""
+def _window(out: str) -> tuple[str, str]:
+    """The ``(start, end)`` dates of the window a tool reports covering."""
     import re
 
     found = re.findall(r"\d{4}-\d{2}-\d{2}", out.split("(")[0])
-    assert found, f"no window dates in: {out[:120]}"
-    return found[-1]
+    assert len(found) >= 2, f"no window in: {out[:120]}"
+    return found[0], found[-1]
+
+
+def _window_end(out: str) -> str:
+    return _window(out)[1]
+
+
+def _assert_window_moved_not_shrunk(dated: str, current: str, cut: str) -> None:
+    """The shared check for a tool that honours ``as_of``.
+
+    Three properties, and the third is the one that took a live run to get right.
+    The window must END at or before the cut; it must also START earlier, proving
+    the window MOVED rather than being truncated at the front; and it must be the
+    SAME LENGTH, because `days` means the same span whether or not a date was
+    passed. An earlier version of these tests asserted the dated window was
+    SHORTER — which passed only because the fetch was over-fetching and the tools
+    were silently computing on more history than they asked for.
+    """
+    d_start, d_end = _window(dated)
+    c_start, c_end = _window(current)
+    assert c_end > cut, "the fixture must span past the cut, or this proves nothing"
+    assert d_end <= cut, f"window ends {d_end}, after the cut {cut}"
+    assert d_start < c_start, "the window must move back, not just lose its tail"
+    assert abs(_sessions(dated) - _sessions(current)) <= 2, (
+        f"`days` must mean the same span either way: "
+        f"{_sessions(dated)} vs {_sessions(current)} sessions"
+    )
 
 
 # --- parsing --------------------------------------------------------------------
@@ -243,9 +269,7 @@ def test_price_history_chart_excludes_later_sessions(monkeypatch):
     dated = t.price_history_chart("AAPL", days=60, as_of="2025-01-20")
     current = t.price_history_chart("AAPL", days=60)
     assert "AS OF 2025-01-20" in dated
-    assert _window_end(current) > "2025-01-20", "fixture must span past the cut"
-    assert _window_end(dated) <= "2025-01-20"
-    assert _sessions(dated) < _sessions(current)
+    _assert_window_moved_not_shrunk(dated, current, "2025-01-20")
 
 
 def test_risk_metrics_excludes_later_sessions(monkeypatch):
@@ -259,12 +283,9 @@ def test_risk_metrics_excludes_later_sessions(monkeypatch):
     # Assert on the WINDOW, not on the strings differing: the note alone makes them
     # differ, so `dated != current` would pass even if as_of never reached the
     # fetch.
-    assert _window_end(current) > "2025-01-28", (
-        "the fixture must span past the cut, or this test proves nothing"
-    )
-    assert _window_end(dated) <= "2025-01-28"
-    # And the metrics are computed over the shorter window, not merely labelled.
-    assert _sessions(dated) < _sessions(current)
+    _assert_window_moved_not_shrunk(dated, current, "2025-01-28")
+    # And the metrics really are computed over it, not merely labelled with it.
+    assert "Sharpe" in dated and dated != current
 
 
 def test_compare_prices_excludes_later_sessions(monkeypatch):
@@ -274,9 +295,7 @@ def test_compare_prices_excludes_later_sessions(monkeypatch):
     dated = t.compare_prices("AAPL, SPY", days=60, as_of="2025-01-20")
     current = t.compare_prices("AAPL, SPY", days=60)
     assert "AS OF 2025-01-20" in dated
-    assert _window_end(current) > "2025-01-20", "fixture must span past the cut"
-    assert _window_end(dated) <= "2025-01-20"
-    assert _sessions(dated) < _sessions(current)
+    _assert_window_moved_not_shrunk(dated, current, "2025-01-20")
 
 
 def test_correlation_matrix_excludes_later_sessions(monkeypatch):
@@ -286,9 +305,7 @@ def test_correlation_matrix_excludes_later_sessions(monkeypatch):
     dated = analytics.correlation_matrix("AAPL, SPY", days=60, as_of="2025-01-20")
     current = analytics.correlation_matrix("AAPL, SPY", days=60)
     assert "AS OF 2025-01-20" in dated
-    assert _window_end(current) > "2025-01-20", "fixture must span past the cut"
-    assert _window_end(dated) <= "2025-01-20"
-    assert _sessions(dated) < _sessions(current)
+    _assert_window_moved_not_shrunk(dated, current, "2025-01-20")
 
 
 def test_factor_exposure_regresses_only_over_the_window(monkeypatch):
