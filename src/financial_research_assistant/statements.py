@@ -1073,6 +1073,37 @@ def _days_between(start_iso: str, end_iso: str) -> int:
         return 0
 
 
+def is_long_term(open_iso: str, close_iso: str) -> bool:
+    """Whether a lot opened on ``open_iso`` and closed on ``close_iso`` is a
+    long-term capital gain.
+
+    The rule is CALENDAR, and deliberately not a day count. The holding period
+    starts the day after acquisition and long-term treatment needs MORE than one
+    year, so a position bought on 1 Jan and sold the following 1 Jan is short term
+    — it turns long term on 2 Jan. Every ``> N days`` form gets some case wrong:
+    ``>= 365`` calls that 1 Jan sale long-term (understating the tax owed, in the
+    direction that costs the taxpayer rather than the IRS), while ``> 365`` breaks
+    on a span crossing 29 February, where 366 days is still exactly one year.
+
+    So the comparison is against the anniversary date itself. A 29 February
+    purchase has no anniversary in a common year; its holding period begins
+    1 March, which is the date used.
+
+    One definition, because `realized_gains` and `tax_loss_harvest` putting the
+    same lot in different buckets would be worse than either being wrong.
+    """
+    try:
+        opened = date.fromisoformat(open_iso[:10])
+        closed = date.fromisoformat(close_iso[:10])
+    except ValueError:
+        return False  # unparseable dates: the conservative bucket is short term
+    try:
+        anniversary = opened.replace(year=opened.year + 1)
+    except ValueError:  # 29 February -> the following 1 March
+        anniversary = date(opened.year + 1, 3, 1)
+    return closed > anniversary
+
+
 def _trade_split_events(
     symbol: str | None = None, account: str | None = None
 ) -> list[tuple[Any, ...]]:
@@ -1220,7 +1251,7 @@ def realized_gains(
                 take = min(sell_qty, lot[0])
                 gain = (price_per_share - lot[1]) * take
                 if counts:
-                    bucket = "long_term" if _days_between(lot[2], dt) >= 365 else "short_term"
+                    bucket = "long_term" if is_long_term(lot[2], dt) else "short_term"
                     per[sym]["realized"] += gain
                     per[sym][bucket] += gain
                 lot[0] -= take
