@@ -855,6 +855,53 @@ durable saver is opened and closed within each turn's own task (mirroring the MC
 session's task-affinity rule), so nothing dangles at shutdown. Unset (the
 default) behavior is unchanged, and `--fake`/tests stay hermetic.
 
+## Thesis journal (gets held to its calls)
+
+The other learning layers check the *process* or a fixed regression set. None of
+them ever checks whether the assistant's **market calls** were right — so all of
+them can be green while it is consistently wrong.
+
+When it takes a side — a bull/bear verdict, a DCF concluding under- or overvalued,
+"this looks cheap" — it calls `record_thesis` with the reasoning and a horizon. The
+entry price is captured from market data at that moment, not typed by the model. On
+a later runner tick (`--run-due` / `--watch`) the call is scored: price then vs now,
+and the same window for the benchmark.
+
+```
+financial-research-assistant --theses          # every call, model-free
+financial-research-assistant --theses NVDA     # just one ticker
+```
+```
+Open calls (1) — not yet scored:
+  [t2] BEARISH AAPL   from 231.40 on 2026-08-05 · scores 2026-11-03
+Scored calls (1):
+  ✓ [t1] BULLISH NVDA   +18.4% over 90d · +7.1% vs SPY
+Track record: 1/1 directionally right (100%) · mean +7.1% vs benchmark
+  (only 1 scored call(s) — far too few to mean anything; report it as such)
+```
+
+Four things worth knowing:
+
+- **Scoring is model-free.** Two price lookups and a subtraction, so it rides the
+  tick that already exists, costs nothing, and cannot hallucinate an outcome.
+- **The benchmark always travels with the score.** `bullish +8%` against an index
+  that did `+14%` is a hit with negative alpha, and the output says both.
+- **A data outage never becomes a miss.** A call the price source can't answer for
+  stays open for a later tick.
+- **It feeds back in.** A scored outcome is filed as a `lesson` memory (when
+  `MEMORY_BACKEND` is on), so the next time that ticker comes up the assistant reads
+  what it said and how it went — and is told to say so rather than quietly repeat a
+  view it has already been wrong about.
+
+**This is not a track record to trade on.** It is a handful of past calls on
+whatever you happened to ask about — not a random sample, and nowhere near large
+enough to say anything about the next one. Every surface reports it as calibration
+and says so; the point is to stop the assistant repeating a confident line it has
+already got wrong, not to advertise a hit rate.
+
+Override the store location with `FINANCIAL_RESEARCH_JOURNAL_FILE`
+(default `~/.financial-research-assistant/journal.json`, written `0600`).
+
 ## Long-term memory (learns across conversations)
 
 Durable *conversation* memory (above) makes one thread survive a restart.

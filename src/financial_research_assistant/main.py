@@ -109,6 +109,17 @@ def cli() -> None:
         help="cancel a scheduled task by id (or 'all') and exit; no model",
     )
     parser.add_argument(
+        "--theses",
+        nargs="?",
+        const="",
+        metavar="SYMBOL",
+        help=(
+            "show the recorded directional calls and how the scored ones turned "
+            "out, then exit; optionally narrowed to one ticker. Scoring itself "
+            "happens on a runner tick (--run-due/--watch); no model"
+        ),
+    )
+    parser.add_argument(
         "--notify-test",
         action="store_true",
         help=(
@@ -267,6 +278,12 @@ def _run_subcommand(args: argparse.Namespace) -> int | None:
         from . import tasks as _tasks
 
         print(_tasks.cancel_scheduled_task(args.unschedule))
+        return 0
+
+    if args.theses is not None:
+        from . import journal as _journal
+
+        print(_journal.review_theses(args.theses))
         return 0
 
     if args.schedule:

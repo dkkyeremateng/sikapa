@@ -244,6 +244,27 @@ async def retry_deliveries() -> list[str]:
     return out
 
 
+def _score_theses() -> list[dict[str, Any]]:
+    """Score the directional calls that have come due, and log each outcome.
+
+    Wrapped because it is housekeeping, not the tick's job: a price source being
+    down must not stop tasks from running, and an unscoreable call is left open
+    for a later tick rather than burned as a miss (see ``journal.score_entry``).
+    """
+    from . import journal
+
+    try:
+        scored = journal.score_due()
+    except Exception as exc:  # noqa: BLE001 - scoring must never sink a tick
+        from .adapter import describe_error
+
+        _log(f"couldn't score recorded calls: {describe_error(exc)}")
+        return []
+    for entry in scored:
+        _log(f"  {'✓' if entry.get('hit') else '✗'} {journal.describe_outcome(entry)}")
+    return scored
+
+
 async def run_due(
     now: datetime | None = None, fake: bool = False, limit: int | None = None
 ) -> list[dict[str, Any]]:
@@ -258,6 +279,10 @@ async def run_due(
     tasks.record_tick()
     # Answers already paid for go out before any new work is started.
     await retry_deliveries()
+    # Score any directional calls whose horizon has passed. Model-free (two price
+    # lookups and a subtraction), so it costs nothing on a tick with none due and
+    # cannot itself hallucinate a result.
+    _score_theses()
     waiting = tasks.due_count(now)
     claimed = tasks.claim_due(now, limit=limit)
     if not claimed:
