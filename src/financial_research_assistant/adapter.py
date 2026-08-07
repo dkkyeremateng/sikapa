@@ -472,6 +472,32 @@ def _chunk_text(chunk: BaseMessage) -> str:
     )
 
 
+def _final_answer(messages: list[BaseMessage]) -> str:
+    """The turn's answer, read back from checkpointed state.
+
+    Only reached when the run produced no streamed token chunks, which is exactly
+    where two shapes the streaming path never sees turn up:
+
+    * A provider that doesn't stream reports its reply as content BLOCKS (a list
+      of dicts), not a string. Taking ``.content`` raw handed a list to everything
+      downstream — ``settle_schedule_claim`` raised ``TypeError`` on it and the
+      outer handler reported a COMPLETED turn as an error. ``_chunk_text`` already
+      flattens both shapes, so it does the reading here too.
+    * A run stopped at the recursion limit ends on a ``ToolMessage``, whose
+      content is a tool result rather than an answer.
+
+    So this walks back to the last AI message with text, mirroring how
+    ``subagents._final_text`` reads a subagent's reply, and returns "" when there
+    is genuinely no answer instead of passing off some other message as one.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            text = _chunk_text(msg).strip()
+            if text:
+                return text
+    return ""
+
+
 def _snippet(value: Any, limit: int) -> str:
     if not isinstance(value, str):
         try:
@@ -968,7 +994,7 @@ async def run_turn(
                     # non-streaming endpoint); the run still executed and
                     # checkpointed, so read the answer back from graph state.
                     state = await graph.aget_state(config)
-                    answer = state.values["messages"][-1].content
+                    answer = _final_answer(list(state.values.get("messages") or []))
                 tokens_in, tokens_out, tokens_cache, tokens_write = _sum_usage(
                     getattr(cb, "usage_metadata", None)
                 )

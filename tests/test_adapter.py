@@ -495,6 +495,61 @@ async def test_pa_guidance_added_only_when_pa_tool_present(monkeypatch):
         assert "Portfolio Analyst" not in result["system_prompt"]
 
 
+# --- reading the answer back from state -----------------------------------------
+#
+# Only reached when the run streamed no token chunks — a non-streaming endpoint, a
+# reasoning model that reports its reply whole, or the fake graph. Everything
+# downstream (the memory write, the schedule check, the `final` event) assumes a
+# string, so this is where a provider that disagrees about the shape gets caught.
+
+
+def test_content_blocks_are_flattened_to_text():
+    """A non-streaming provider reports its reply as a LIST of content blocks.
+    Taking `.content` raw handed that list to `settle_schedule_claim`, which raised
+    TypeError inside the turn's own `except` — so a turn the model COMPLETED was
+    reported to the user as an error."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from financial_research_assistant.adapter import _final_answer
+
+    history = [
+        HumanMessage(content="what happened to NVDA?"),
+        AIMessage(content=[
+            {"type": "text", "text": "NVDA closed at $184.20, "},
+            {"type": "text", "text": "up 2.1% on the day."},
+        ]),
+    ]
+    assert _final_answer(history) == "NVDA closed at $184.20, up 2.1% on the day."
+
+
+def test_a_trailing_tool_result_is_not_mistaken_for_the_answer():
+    """A run stopped at the recursion limit ends on a ToolMessage. Its content is a
+    tool result — reporting it as the answer would show the user raw JSON and, if
+    it happened to say "scheduled", trip the claim check on it."""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from financial_research_assistant.adapter import _final_answer
+
+    history = [
+        HumanMessage(content="analyse my holdings"),
+        AIMessage(content="Here is what I found so far."),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "allocation", "args": {}}]),
+        ToolMessage(content="ALLOCATION (total 100,000 USD)…", tool_call_id="c1"),
+    ]
+    assert _final_answer(history) == "Here is what I found so far."
+
+
+def test_no_answer_reads_as_empty_rather_than_borrowing_one():
+    """With nothing from the model, echoing the user's own message back at them
+    would look like an answer. Empty is honest."""
+    from langchain_core.messages import HumanMessage
+
+    from financial_research_assistant.adapter import _final_answer
+
+    assert _final_answer([HumanMessage(content="hello?")]) == ""
+    assert _final_answer([]) == ""
+
+
 # --- unbacked scheduling claims -------------------------------------------------
 
 
