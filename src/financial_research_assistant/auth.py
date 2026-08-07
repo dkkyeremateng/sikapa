@@ -37,9 +37,10 @@ import json
 import os
 import re
 import subprocess
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+
+from .storage import write_private
 
 # The tiers `_make_llm` can be called for. "default" is also the fallback for any
 # scope that has no credential of its own, matching the "unset = inherit the
@@ -162,27 +163,12 @@ def _view(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def save(data: dict[str, Any]) -> None:
-    """Write the store ``0600``, atomically.
-
-    ``mkstemp`` in the destination directory gives a 0600 file to begin with, so
-    the secret is never briefly world-readable the way ``write_text`` + ``chmod``
-    would leave it; ``os.replace`` then swaps it in without a torn-write window.
-    """
-    path = auth_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Write the store ``0600``, atomically — the secret is never briefly
+    world-readable the way ``write_text`` + ``chmod`` would leave it. See
+    ``storage.write_private``."""
     # The tier-keyed view is derived; persisting it would let the two disagree.
     body = {k: v for k, v in data.items() if k != "credentials"}
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".auth-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(body, fh, indent=2)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_private(auth_file(), json.dumps(body, indent=2), prefix=".auth-")
 
 
 def get(scope: str = DEFAULT_SCOPE) -> dict[str, Any] | None:

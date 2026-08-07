@@ -50,6 +50,8 @@ from pathlib import Path
 from typing_extensions import override
 from typing import Any, Protocol, runtime_checkable
 
+from .storage import write_private
+
 _DEFAULT_DIR = Path.home() / ".agent-builder" / "memory"
 
 
@@ -238,8 +240,19 @@ class LocalMemory:
         return out
 
     def _write(self, entries: list[dict[str, Any]]) -> None:
-        self._file.parent.mkdir(parents=True, exist_ok=True)
-        self._file.write_text("".join(json.dumps(e) + "\n" for e in entries))
+        """Rewrite the store ``0600``, atomically.
+
+        Every save/forget rewrites the whole file, so a torn write would lose the
+        user's entire memory rather than one fact — and a truncated JSONL file
+        reads as "nothing remembered", which is silent. The contents are personal
+        by definition (risk tolerance, tax situation, holdings), so they get the
+        same permissions as the credential and task stores.
+        """
+        write_private(
+            self._file,
+            "".join(json.dumps(e) + "\n" for e in entries),
+            prefix=".memory-",
+        )
 
     def _is_dup(self, text: str, entries: list[dict[str, Any]]) -> bool:
         """True if ``text`` is an exact or near-duplicate (term Jaccard ≥ 0.85) of

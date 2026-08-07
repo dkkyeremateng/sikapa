@@ -43,10 +43,11 @@ from typing import Any
 import json
 import os
 import re
-import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from .storage import write_private
 
 #: How a finished task picks its next due time. "once" retires it.
 REPEATS = ("once", "hourly", "daily", "weekdays", "weekly")
@@ -129,27 +130,10 @@ def load_tasks() -> list[dict[str, Any]]:
 
 
 def save_tasks(items: list[dict[str, Any]]) -> None:
-    """Write the store ``0600``, atomically.
-
-    ``mkstemp`` in the destination directory gives a 0600 file from the start, so
-    a prompt naming holdings is never briefly world-readable; ``os.replace`` swaps
-    it in without a torn-write window (a tick reading a half-written file would
-    see "no tasks" and skip everything due).
-    """
-    path = tasks_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tasks-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(items, fh, indent=2)
-            fh.write("\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Write the store ``0600``, atomically — a prompt naming holdings is never
+    briefly world-readable, and a tick reading a half-written file would see "no
+    tasks" and skip everything due. See ``storage.write_private``."""
+    write_private(tasks_file(), json.dumps(items, indent=2) + "\n", prefix=".tasks-")
 
 
 # --- runner heartbeat ----------------------------------------------------------
