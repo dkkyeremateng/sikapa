@@ -241,13 +241,13 @@ def test_recent_move_summarizes_window_and_last_session(monkeypatch):
     # oldest -> newest; last session +2% (100->102), window (95->102) +7.37%
     series = [("2026-07-14", 95.0), ("2026-07-15", 97.0), ("2026-07-16", 99.0),
               ("2026-07-17", 100.0), ("2026-07-18", 102.0)]
-    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d: series)
+    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d, **_kw: series)
     out = research._recent_move("AAPL", days=4)
     assert "AAPL last close 102.00 on 2026-07-18" in out
     assert "+2.00% vs prior session" in out
     assert "+7.37%" in out                       # 95 -> 102 over the 4-session window
 
-    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d: [])
+    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d, **_kw: [])
     assert research._recent_move("NOPE", days=4) is None
 
 
@@ -257,7 +257,7 @@ def test_explain_stock_move_gathers_move_ratings_news(monkeypatch):
     import financial_research_assistant.fundamentals as f
 
     series = [("2026-07-16", 99.0), ("2026-07-17", 100.0), ("2026-07-18", 110.0)]
-    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d: series)
+    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d, **_kw: series)
     monkeypatch.setattr(tools, "web_search",
                         lambda q, max_results=5: "1. Big beat (Reuters · 2026-07-18)\n   url")
     monkeypatch.setattr(f, "_fetch_rating_changes", lambda s, limit=5: [
@@ -275,7 +275,7 @@ def test_explain_stock_move_no_price_data(monkeypatch):
     from financial_research_assistant import research
     import financial_research_assistant.tools as tools
 
-    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d: [])
+    monkeypatch.setattr(tools, "_fetch_daily", lambda s, d, **_kw: [])
     out = research.explain_stock_move("NOPE")
     assert "No recent price data" in out
 
@@ -503,7 +503,7 @@ def test_correlation_matrix(monkeypatch):
         "AAPL": [100.0, 110.0, 105.0, 115.0],
         "MSFT": [50.0, 55.0, 52.5, 57.5], # proportional to AAPL -> corr +1.00
     }
-    monkeypatch.setattr(tools, "_aligned_closes", lambda syms, days: (dates, closes))
+    monkeypatch.setattr(tools, "_aligned_closes", lambda syms, days, **_kw: (dates, closes))
     out = a.correlation_matrix("AAPL, MSFT", days=90)
     assert "AAPL" in out and "MSFT" in out
     assert "1.00" in out # diagonal + perfect corr

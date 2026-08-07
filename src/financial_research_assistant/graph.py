@@ -199,6 +199,21 @@ SYSTEM_PROMPT = (
     "AFTER the list — short bullets with no percentage become the 'key observations' "
     "block.\n\n"
 
+    "ANYTHING IN THE PAST — every market-data tool reports what is true NOW unless "
+    "you tell it otherwise. A question about a past date ('was NVDA expensive in "
+    "January 2025', 'how risky did this look before the crash', 'who was winning a "
+    "year ago') answered from current data is WRONG and looks right, so:\n"
+    "- Pass `as_of='YYYY-MM-DD'` to every tool that takes it. The price-derived "
+    "tools (`price_history_chart`, `compare_prices`, `risk_metrics`, "
+    "`correlation_matrix`) honour it exactly and report the window they used.\n"
+    "- Snapshot tools (`stock_fundamentals`, `compare_stocks`, `analyst_ratings`, "
+    "`etf_exposure`, `dcf_valuation`, `screen_stocks`) have no history. Passing "
+    "`as_of` makes them say so and name a source that does — usually the SEC tools, "
+    "which are point-in-time by construction. Follow the redirect; do NOT re-call "
+    "them without `as_of` and present today's figures as the answer.\n"
+    "- When an answer mixes as-of and current figures, label which is which. Never "
+    "let a current price sit unlabelled next to a dated fundamental.\n\n"
+
     "CURRENCY — the base/reporting currency is USD; `convert_currency` converts any "
     "amount on demand.\n\n"
 

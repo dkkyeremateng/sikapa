@@ -162,13 +162,21 @@ def _price(info: dict[str, Any]):
     return _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
 
 
-def stock_fundamentals(symbol: str) -> str:
+def stock_fundamentals(symbol: str, as_of: str = "") -> str:
     """Fundamental snapshot for a stock ``symbol``: company profile (name, sector,
     industry), valuation (market cap, trailing/forward P/E, EPS), current price and
     52-week range, dividend rate & yield, beta, and a one-line analyst summary.
     Data source: Yahoo Finance (yfinance, keyless) — reference data, not real-time
     IBKR quotes. Use for 'fundamentals / valuation / P/E / market cap / what does
-    this company do / is it a dividend stock' questions about a ticker."""
+    this company do / is it a dividend stock' questions about a ticker.
+    These figures are CURRENT ONLY. For a past date pass ``as_of`` (YYYY-MM-DD) and
+    this tool will redirect you to a source that has history, rather than returning
+    today's numbers as though they were then's."""
+    from .pointintime import snapshot_guard
+
+    refusal = snapshot_guard("stock_fundamentals", as_of)
+    if refusal:
+        return refusal
     sym = symbol.strip().upper()
     info = _fetch_info(sym)
     if not info or not (info.get("longName") or info.get("shortName")):
@@ -212,13 +220,20 @@ def stock_fundamentals(symbol: str) -> str:
     return "\n".join(lines)
 
 
-def analyst_ratings(symbol: str) -> str:
+def analyst_ratings(symbol: str, as_of: str = "") -> str:
     """Analyst ratings for a stock ``symbol``: the buy/hold/sell consensus and
     number of analysts, price targets (low / mean / median / high) with implied
     upside vs the current price, and recent upgrades/downgrades (firm, grade
     change, date). Data source: Yahoo Finance (yfinance, keyless). Use for 'what
     do analysts think / price target / upgrades / downgrades / is it a buy'
-    questions."""
+    questions. The consensus is CURRENT ONLY — pass ``as_of`` (YYYY-MM-DD) for a
+    past date and this tool will say so rather than presenting today's view as
+    the view back then."""
+    from .pointintime import snapshot_guard
+
+    refusal = snapshot_guard("analyst_ratings", as_of)
+    if refusal:
+        return refusal
     sym = symbol.strip().upper()
     info = _fetch_info(sym)
     targets = _fetch_price_targets(sym)
@@ -433,14 +448,21 @@ def _compare_cell(info: dict[str, Any], extract: Callable[[dict[str, Any]], Any]
     return _fmt(val, spec)
 
 
-def compare_stocks(symbols: str) -> str:
+def compare_stocks(symbols: str, as_of: str = "") -> str:
     """Compare 2–4 stocks side by side in one normalized metric table: price,
     market cap, trailing/forward P/E, PEG, P/S, revenue growth, profit margin,
     EPS, dividend yield, beta, plus the analyst consensus and mean price target
     with implied upside. Pass the tickers in one string (e.g. ``"AAPL, MSFT,
     NVDA"`` — comma/space separated). Data source: Yahoo Finance (yfinance,
     keyless), reference data (not real-time IBKR quotes). Use for 'compare X vs
-    Y', 'which is cheaper/growing faster', 'X or Y' questions across a few names."""
+    Y', 'which is cheaper/growing faster', 'X or Y' questions across a few names.
+    CURRENT ONLY — pass ``as_of`` (YYYY-MM-DD) for a past date and this tool will
+    point you at the as-reported source instead of comparing today's multiples."""
+    from .pointintime import snapshot_guard
+
+    refusal = snapshot_guard("compare_stocks", as_of)
+    if refusal:
+        return refusal
     syms = _parse_symbols(symbols)
     if len(syms) < 2:
         return (
@@ -505,12 +527,20 @@ def _fetch_fund_data(symbol: str) -> dict[str, Any]:
         return {}
 
 
-def etf_exposure(symbol: str) -> str:
+def etf_exposure(symbol: str, as_of: str = "") -> str:
     """Look through an ETF/fund ``symbol`` to its underlying exposure: sector
     weightings and top holdings (with weights). Use for 'what's inside this ETF /
     VOO sector breakdown / top holdings / is this fund tech-heavy / do these two
     ETFs overlap' questions. Data source: Yahoo Finance (yfinance, keyless). Only
-    works for funds/ETFs — a single stock returns a 'not a fund' note."""
+    works for funds/ETFs — a single stock returns a 'not a fund' note.
+    The basket is published CURRENT ONLY: pass ``as_of`` (YYYY-MM-DD) for a past
+    date and this tool says the historical composition isn't available, rather
+    than implying today's holdings were the ones held then."""
+    from .pointintime import snapshot_guard
+
+    refusal = snapshot_guard("etf_exposure", as_of)
+    if refusal:
+        return refusal
     sym = symbol.strip().upper()
     data = _fetch_fund_data(sym)
     if not data or (not data.get("sectors") and not data.get("holdings")):

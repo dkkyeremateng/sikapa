@@ -38,6 +38,34 @@ tools need a broker statement imported first.
 
 ---
 
+## Answering about a past date (`as_of`)
+
+Every tool here reports what is true **now** unless told otherwise, and that is the
+easiest way to get a confidently wrong answer: ask "was NVDA expensive in January
+2025?" and a current-snapshot tool hands back today's P/E, which then gets written
+into a report as though it were January's.
+
+The sources do not all have history, so `as_of` means two different things:
+
+**Honoured exactly** — `price_history_chart`, `compare_prices`, `risk_metrics`,
+`correlation_matrix`. These are computed from a daily-close series, which can be cut
+at a date. Pass `as_of="2025-01-31"` and the window ends there; the output says so
+and names the last session on or before it (so a weekend or holiday is visible
+rather than silently shifted).
+
+**Refused, with a redirect** — `stock_fundamentals`, `compare_stocks`,
+`analyst_ratings`, `etf_exposure`, `dcf_valuation`, `screen_stocks`. These read a
+current Yahoo snapshot that keeps no history: there is no January 2025 version of
+those figures to return. Passing `as_of` makes the tool say so and name a source
+that *does* have history — usually the SEC tools, which are point-in-time by
+construction (a 10-K covers a fiscal year and is not restated in place).
+
+A tool that quietly ignored `as_of` would be worse than one that never had it, so
+none of them do. Note in particular that `screen_stocks` with `as_of` declines
+rather than pretending: a screen run against today's fundamentals is not a backtest.
+
+---
+
 ## 1. Market data & charts
 
 #### `current_date()`
@@ -45,17 +73,17 @@ Current local date **and** wall-clock time with timezone — the "as of" stamp f
 - **Ask:** "What's today's date and time?"
 - **Call:** `current_date()`
 
-#### `price_history_chart(symbol, days=90)`
+#### `price_history_chart(symbol, days=90, as_of="")`
 Daily closing prices for one ticker as a terminal line chart with summary stats (first/last/high/low, % change). Keyless (Yahoo).
 - **Ask:** "Show me Apple's price over the last 6 months."
 - **Call:** `price_history_chart(symbol="AAPL", days=180)`
 
-#### `compare_prices(symbols, days=180)`
+#### `compare_prices(symbols, days=180, as_of="")`
 Several stocks on one **normalized** chart (each rebased to 100), plus each ticker's total return — comparable regardless of share price.
 - **Ask:** "Compare NVDA vs AMD vs the S&P over the past year."
 - **Call:** `compare_prices(symbols="NVDA, AMD, SPY", days=365)`
 
-#### `risk_metrics(symbol, days=365, benchmark="SPY")`
+#### `risk_metrics(symbol, days=365, benchmark="SPY", as_of="")`
 Per-ticker risk/return from daily returns: annualized volatility, max drawdown, Sharpe (rf=0), and beta vs a benchmark.
 - **Ask:** "How risky is TSLA — volatility, drawdown, beta?"
 - **Call:** `risk_metrics(symbol="TSLA", days=365, benchmark="SPY")`
@@ -93,12 +121,12 @@ Convert an amount to USD using market FX (Yahoo). `on_date` uses that day's hist
 
 ## 3. Fundamentals & company analysis
 
-#### `stock_fundamentals(symbol)`
+#### `stock_fundamentals(symbol, as_of="")`
 Snapshot: profile (sector/industry), valuation (market cap, P/E, EPS), price + 52-week range, dividend, beta, one-line analyst summary. Keyless (Yahoo).
 - **Ask:** "Give me the fundamentals on Microsoft."
 - **Call:** `stock_fundamentals(symbol="MSFT")`
 
-#### `analyst_ratings(symbol)`
+#### `analyst_ratings(symbol, as_of="")`
 Buy/hold/sell consensus, price targets (low/mean/median/high) with implied upside, recent upgrades/downgrades.
 - **Ask:** "What do analysts think of AMD? Price target?"
 - **Call:** `analyst_ratings(symbol="AMD")`
@@ -108,12 +136,12 @@ Next earnings date + EPS estimate, upcoming ex-dividend/pay dates, and recent qu
 - **Ask:** "When does Apple report next, and how have they done recently?"
 - **Call:** `earnings_calendar(symbol="AAPL")`
 
-#### `compare_stocks(symbols)`
+#### `compare_stocks(symbols, as_of="")`
 2–4 stocks side by side: price, market cap, P/E, PEG, P/S, revenue growth, margin, EPS, yield, beta, analyst consensus + target. Keyless (Yahoo snapshot).
 - **Ask:** "Compare AAPL, MSFT and NVDA — which is cheaper and growing faster?"
 - **Call:** `compare_stocks(symbols="AAPL, MSFT, NVDA")`
 
-#### `etf_exposure(symbol)`
+#### `etf_exposure(symbol, as_of="")`
 Look through an ETF/fund to sector weightings and top holdings. Funds only.
 - **Ask:** "What's inside VOO — sectors and top holdings?"
 - **Call:** `etf_exposure(symbol="VOO")`
@@ -127,7 +155,7 @@ Forward 12-month dividend income across your imported holdings — per-holding i
 
 ## 4. Valuation & options
 
-#### `dcf_valuation(symbol, growth_rate=0, discount_rate=0, terminal_growth=0, years=0)`
+#### `dcf_valuation(symbol, growth_rate=0, discount_rate=0, terminal_growth=0, years=0, as_of="")`
 Deterministic **two-stage DCF** intrinsic value. FCF history as-reported from the 10-K (SEC XBRL: operating cash flow − capex); net debt/shares/price from Yahoo. Shows every input, projected cash flows + present values, terminal value, intrinsic value/share, upside vs price, and a sensitivity grid. Rates accept `0.10` or `10`. Pass `0` to use defaults (growth = historical FCF CAGR, discount 9%, terminal 2.5%, 5y). A model, not a price target; declines for banks / pre-FCF companies.
 - **Ask:** "Run a DCF on Apple — is it over- or undervalued?"
 - **Call:** `dcf_valuation(symbol="AAPL")` · custom: `dcf_valuation(symbol="MSFT", discount_rate=10, terminal_growth=2.5, years=7)`
@@ -223,7 +251,7 @@ Where a company **ranks** on a metric among all SEC filers — its value, rank/p
 
 ## 7. Stock screener
 
-#### `screen_stocks(symbols="", universe="", min_market_cap_b=0, max_market_cap_b=0, near_high_pct=0, near_high_within_days=10, high_lookback_days=1825, market_down_pct=0, market_symbol="SPY", min_earnings_beats=0, sector="", max_symbols=40)`
+#### `screen_stocks(symbols="", universe="", min_market_cap_b=0, max_market_cap_b=0, near_high_pct=0, near_high_within_days=10, high_lookback_days=1825, market_down_pct=0, market_symbol="SPY", min_earnings_beats=0, sector="", max_symbols=40, as_of="")`
 Screen a **candidate universe** against quantitative criteria and return passers with the measured figures. Universe (first match wins): explicit `symbols`, a named `universe` (`"sp500"` / `"largecap"`), or the built-in large-cap default. Any criterion set to `0`/`""` is off. Criteria: market-cap bounds, proximity-to-high (`near_high_pct` within `near_high_within_days`, high over `high_lookback_days`), relative strength on a down-market day (`market_down_pct`), EPS-beat streak (`min_earnings_beats`), `sector`. **Quantitative only** — it reminds you to confirm qualitative claims (guidance beats) per name.
 - **Ask:** "Find large-caps (>$10B) within 1% of their high in the last two weeks that beat EPS the last 2 quarters."
 - **Call:** `screen_stocks(min_market_cap_b=10, near_high_pct=1.0, near_high_within_days=10, min_earnings_beats=2)`
@@ -294,7 +322,7 @@ Open lots now below cost basis — the harvestable losses, split short/long term
 - **Ask:** "Which positions could I harvest for tax losses?"
 - **Call:** `tax_loss_harvest(min_loss=100)`
 
-#### `correlation_matrix(symbols="", days=180)`
+#### `correlation_matrix(symbols="", days=180, as_of="")`
 Correlation of daily returns across tickers (or your holdings when empty) — a quick diversification read.
 - **Ask:** "How correlated are my holdings?"
 - **Call:** `correlation_matrix(symbols="AAPL, MSFT, SPY", days=180)`
