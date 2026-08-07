@@ -49,21 +49,35 @@ into a report as though it were January's.
 The sources do not all have history, so `as_of` means two different things:
 
 **Honoured exactly** — `price_history_chart`, `compare_prices`, `risk_metrics`,
-`correlation_matrix`. These are computed from a daily-close series, which can be cut
-at a date. Pass `as_of="2025-01-31"` and the window ends there; the output says so
-and names the last session on or before it (so a weekend or holiday is visible
-rather than silently shifted).
+`correlation_matrix`, `factor_exposure`. These are computed from a daily-close
+series, which can be cut at a date. Pass `as_of="2025-01-31"` and the window ends
+there; the output says so and names the last session on or before it (so a weekend
+or holiday is visible rather than silently shifted). `days` keeps its meaning —
+`days=365, as_of=…` is the year ending at that date, the same span `days=365`
+covers today.
 
 **Refused, with a redirect** — `stock_fundamentals`, `compare_stocks`,
-`analyst_ratings`, `etf_exposure`, `dcf_valuation`, `screen_stocks`. These read a
+`analyst_ratings`, `etf_exposure`, `dcf_valuation`, `screen_stocks`,
+`dividend_projection`. These read a
 current Yahoo snapshot that keeps no history: there is no January 2025 version of
 those figures to return. Passing `as_of` makes the tool say so and name a source
 that *does* have history — usually the SEC tools, which are point-in-time by
 construction (a 10-K covers a fiscal year and is not restated in place).
 
 A tool that quietly ignored `as_of` would be worse than one that never had it, so
-none of them do. Note in particular that `screen_stocks` with `as_of` declines
-rather than pretending: a screen run against today's fundamentals is not a backtest.
+none of them do. Two redirects are worth knowing:
+
+- `screen_stocks` declines rather than pretending — a screen against today's
+  fundamentals is not a backtest.
+- `dividend_projection` looks *forward* from today's holdings and today's declared
+  rates, so it has no past version at all; the historical question is what was
+  actually received, which `income_summary(year=…)` answers.
+
+One caveat on `factor_exposure` without a symbol: the returns are cut to `as_of`,
+but the weights are your **current** holdings, because the statement store records
+positions as of its import rather than a position history. So a dated portfolio
+regression says how today's book would have loaded back then — not what you held.
+The output states this whenever both apply.
 
 ---
 
@@ -147,7 +161,7 @@ Look through an ETF/fund to sector weightings and top holdings. Funds only.
 - **Ask:** "What's inside VOO — sectors and top holdings?"
 - **Call:** `etf_exposure(symbol="VOO")`
 
-#### `dividend_projection(account="")`
+#### `dividend_projection(account="", as_of="")`
 Forward 12-month dividend income across your imported holdings — per-holding income, yield-on-cost, current yield, FX-converted total. **Needs an imported statement.**
 - **Ask:** "How much dividend income should my portfolio generate next year?"
 - **Call:** `dividend_projection()`
@@ -333,7 +347,7 @@ Correlation of daily returns across tickers (or your holdings when empty) — a 
 - **Ask:** "What's my true tech exposure after looking through my ETFs?"
 - **Call:** `portfolio_lookthrough()`
 
-#### `factor_exposure(symbol="", days=365, five_factor=False)`
+#### `factor_exposure(symbol="", days=365, five_factor=False, as_of="")`
 Fama-French factor exposure for a ticker (or the whole portfolio when empty): market/size(SMB)/value(HML) loadings — plus RMW/CMA in 5-factor — with annualized alpha and R². Keyless (Ken French).
 - **Ask:** "What's my portfolio's value vs growth tilt — is my alpha real?"
 - **Call:** `factor_exposure(five_factor=True)` · one ticker: `factor_exposure(symbol="IWM")`

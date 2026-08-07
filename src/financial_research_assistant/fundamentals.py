@@ -310,7 +310,7 @@ def earnings_calendar(symbol: str) -> str:
     return "\n".join(lines)
 
 
-def dividend_projection(account: str = "") -> str:
+def dividend_projection(account: str = "", as_of: str = "") -> str:
     """Project forward 12-month dividend income across your imported portfolio.
     For each open position it multiplies the share count by the stock's forward
     annual dividend rate (Yahoo, keyless), reports per-holding income, yield-on-
@@ -318,7 +318,17 @@ def dividend_projection(account: str = "") -> str:
     holdings converted at market FX). Use for 'dividend income / projected
     dividends / passive income / yield on cost / which holdings pay dividends'
     questions. ``account`` scopes to one account (default: the newest import's).
-    Needs positions imported via `import_ibkr_statement` first."""
+    Needs positions imported via `import_ibkr_statement` first.
+
+    This is a FORWARD projection from today's holdings and today's declared rates.
+    For dividends actually received in a past period use `income_summary(year=…)`;
+    passing ``as_of`` here says so rather than dating a projection that has no past
+    version."""
+    from .pointintime import snapshot_guard
+
+    refusal = snapshot_guard("dividend_projection", as_of)
+    if refusal:
+        return refusal
     from . import statements
     from .tools import BASE_CURRENCY, _fx_rate
 

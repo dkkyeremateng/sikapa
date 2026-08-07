@@ -12,7 +12,7 @@ offline deterministic fake mode, and a generic eval harness.
 > A self-playing terminal walkthrough of seven features — company comparison, DCF
 > valuation, cited SEC-filing answers, the options explainer, document Q&A,
 > parallel subagents, and background work delivered to your phone — plus a map of
-> all 61 tools. Source: [`demo.html`](demo.html)
+> all 63 tools. Source: [`demo.html`](demo.html)
 > (open it locally in any browser). See also the full [`Tools.md`](Tools.md) reference.
 
 > **The broker is pluggable — two registry-driven seams.** A different broker's
