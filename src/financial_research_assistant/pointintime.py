@@ -87,19 +87,34 @@ def lookback_days(days: int, as_of: date | None) -> int:
 
 
 def as_of_series(
-    series: list[tuple[str, float]], as_of: date | None
+    series: list[tuple[str, float]], as_of: date | None, days: int | None = None
 ) -> list[tuple[str, float]]:
-    """``series`` cut to rows dated on or before ``as_of``.
+    """``series`` cut to the ``days`` calendar days ending at ``as_of``.
 
     ``on or before``, not ``on``: an ``as_of`` landing on a weekend, a holiday or
     a halt has no row of its own, and the honest answer is the last session that
     did trade — which the caller then reports, so the shift is visible rather
     than assumed.
+
+    ``days`` undoes the widening ``lookback_days`` applied to reach the cut point.
+    Without it, a caller that uses the series whole computes over however much
+    history the widened range bucket happened to contain — seen live as a 365-day
+    regression covering 976 days.
+
+    The trim is by DATE, not by row count, because ``days`` means calendar days
+    everywhere else here: with no ``as_of`` it picks a Yahoo range bucket, so
+    ``days=365`` yields the ~252 sessions in a year. Trimming to the last 365 ROWS
+    would instead yield 365 sessions — about 17 months — so the same argument would
+    quietly mean two different windows depending on whether a date was passed.
     """
     if as_of is None:
         return series
     cutoff = as_of.isoformat()
-    return [row for row in series if row[0] <= cutoff]
+    cut = [row for row in series if row[0] <= cutoff]
+    if not days or days <= 0:
+        return cut
+    start = (as_of - timedelta(days=days)).isoformat()
+    return [row for row in cut if row[0] > start]
 
 
 def window_note(as_of: date | None, last_date: str = "") -> str:
@@ -172,6 +187,13 @@ REDIRECTS = {
         "nothing keyless — the screen reads current fundamentals, so it cannot "
         "reconstruct which names would have passed on a past date. Say so; a "
         "screen run today is not a backtest"
+    ),
+    "dividend_projection": (
+        "`income_summary(year=…)` for the dividends actually RECEIVED in that "
+        "period, which is the historical question. This tool projects forward from "
+        "today's holdings and today's declared rates, so there is no past version "
+        "of it — a dated projection would be neither what you held then nor what "
+        "was declared then"
     ),
 }
 

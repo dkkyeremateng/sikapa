@@ -176,16 +176,25 @@ def _fetch_daily(
     fetch first so ``days`` sessions still remain after the cut — Yahoo's window
     always ends today, so asking for 180 days as of two years ago would otherwise
     return a window that ends 730 days past the point of interest and cut to
-    nothing. The CACHE still holds the full fetched range: two callers wanting
-    different as_of dates within one bucket share the fetch and slice it
-    separately."""
+    nothing.
+
+    That widening is then undone: the result is trimmed to the last ``days``
+    sessions. It has to be, because the widened request reaches for a bigger Yahoo
+    range bucket, and callers that use the returned series WHOLE (``risk_metrics``,
+    ``factors._ticker_returns``) would otherwise silently compute over a window
+    several times longer than they asked for — observed live as a 365-day
+    regression covering 976 days. Only the ``as_of`` path trims, so the
+    no-``as_of`` contract (return the bucket, caller slices) is unchanged.
+
+    The CACHE still holds the full fetched range, so two callers wanting different
+    as_of dates within one bucket share the fetch and slice it separately."""
     sym = symbol.strip().upper()
     rng = _yahoo_range(lookback_days(days, as_of))
     key = (sym, rng)
     ttl = _price_ttl()
     cached = _PRICE_CACHE.get(key)
     if cached is not None and ttl > 0 and (time.time() - cached[1]) < ttl:
-        return as_of_series(cached[0], as_of)
+        return as_of_series(cached[0], as_of, days)
     url = _YF_URL.format(sym=urllib.parse.quote(sym), rng=rng)
     req = urllib.request.Request(url, headers={"User-Agent": _YF_UA})
     last_exc: Exception | None = None
@@ -206,7 +215,7 @@ def _fetch_daily(
             continue
         if series and ttl > 0:
             _PRICE_CACHE[key] = (series, time.time())
-        return as_of_series(series, as_of)
+        return as_of_series(series, as_of, days)
     # Both attempts hit a transport/parse failure (not a clean 404). Signal it
     # distinctly for strict callers; stay backward-compatible (empty) otherwise.
     if strict:

@@ -19,6 +19,7 @@ import io
 import re
 import urllib.request
 import zipfile
+from datetime import date
 
 # Ken French daily factor archives (keyless). The 5-factor set is a superset with
 # RMW/CMA added; both carry Mkt-RF, SMB, HML, RF.
@@ -86,11 +87,13 @@ def _fetch_ff_factors(five_factor: bool = False) -> tuple[list[str], dict[str, d
     return parsed
 
 
-def _ticker_returns(symbol: str, days: int) -> list[tuple[str, float]]:
+def _ticker_returns(
+    symbol: str, days: int, as_of: date | None = None
+) -> list[tuple[str, float]]:
     """Daily ``(date, return)`` for one ticker (the return realized ON that date)."""
     from .tools import _fetch_daily
 
-    series = _fetch_daily(symbol, days)
+    series = _fetch_daily(symbol, days, as_of=as_of)
     out = []
     for i in range(1, len(series)):
         prev, (d, c) = series[i - 1][1], series[i]
@@ -99,9 +102,17 @@ def _ticker_returns(symbol: str, days: int) -> list[tuple[str, float]]:
     return out
 
 
-def _portfolio_returns(days: int, account: str | None = None) -> list[tuple[str, float]]:
+def _portfolio_returns(
+    days: int, account: str | None = None, as_of: date | None = None
+) -> list[tuple[str, float]]:
     """Value-weighted daily portfolio returns from current holdings: each holding's
-    daily return times its (base-currency value) weight, summed per day."""
+    daily return times its (base-currency value) weight, summed per day.
+
+    ``as_of`` cuts the RETURN series, not the holdings — the weights are whatever
+    is held now, because the statement store records positions as of its import,
+    not a position history to reconstruct. So a dated portfolio regression answers
+    "how would today's book have loaded on the factors back then", which is the
+    same approximation `portfolio_risk` makes and states."""
     from . import statements
     from .fundamentals import _num
     from .tools import BASE_CURRENCY, _aligned_closes, _fx_rate
@@ -118,7 +129,7 @@ def _portfolio_returns(days: int, account: str | None = None) -> list[tuple[str,
     if not weights or total <= 0:
         return []
     syms = list(weights)
-    dates, closes = _aligned_closes(syms, days)
+    dates, closes = _aligned_closes(syms, days, as_of=as_of)
     present = [s for s in syms if s in closes]
     if len(dates) < 2 or not present:
         return []
@@ -170,7 +181,8 @@ def _tilt(beta: float, hi: str, lo: str) -> str:
     return "neutral"
 
 
-def factor_exposure(symbol: str = "", days: int = 365, five_factor: bool = False) -> str:
+def factor_exposure(symbol: str = "", days: int = 365, five_factor: bool = False,
+                    as_of: str = "") -> str:
     """Fama-French factor exposure for a stock ``symbol`` (or your whole portfolio
     when ``symbol`` is empty), over the last ``days``. Regresses daily excess returns
     on the market, size (SMB), and value (HML) factors — plus profitability (RMW) and
@@ -179,15 +191,24 @@ def factor_exposure(symbol: str = "", days: int = 365, five_factor: bool = False
     explained). Reveals style tilts (small/large-cap, value/growth) that beta and
     sector weights don't. Use for 'factor exposure / style tilt / value or growth /
     is my alpha real / what drives my returns' questions. Data: Ken French Data
-    Library (keyless)."""
+    Library (keyless). ``as_of`` (YYYY-MM-DD) ends the regression window at that
+    date instead of today, for 'what was it loading on back then'."""
+    from .pointintime import AsOfError, parse_as_of, window_note
+
+    try:
+        stamp = parse_as_of(as_of)
+    except AsOfError as exc:
+        return str(exc)
     subject = symbol.strip().upper() if symbol.strip() else "PORTFOLIO"
     returns = (
-        _ticker_returns(subject, days) if symbol.strip()
-        else _portfolio_returns(days)
+        _ticker_returns(subject, days, as_of=stamp) if symbol.strip()
+        else _portfolio_returns(days, as_of=stamp)
     )
     if not returns:
         return (
-            f"Not enough return data for {subject}. "
+            f"Not enough return data for {subject}"
+            + (f" on or before {stamp.isoformat()}" if stamp else "")
+            + ". "
             + ("Check the ticker." if symbol.strip()
                else "Import a portfolio with holdings first.")
         )
@@ -202,7 +223,8 @@ def factor_exposure(symbol: str = "", days: int = 365, five_factor: bool = False
     alpha_annual = alpha_daily * 252 * 100.0
     model = "5-factor" if five_factor else "3-factor"
     lines = [
-        f"FAMA-FRENCH FACTOR EXPOSURE · {subject} · {model} · {n} days:",
+        f"FAMA-FRENCH FACTOR EXPOSURE · {subject} · {model} · {n} days"
+        f"{window_note(stamp, returns[-1][0])}:",
         f"  market (Mkt-RF)   {betas.get('Mkt-RF', 0.0):+.2f}",
         f"  size   (SMB)      {betas.get('SMB', 0.0):+.2f}  "
         f"({_tilt(betas.get('SMB', 0.0), 'small-cap tilt', 'large-cap tilt')})",
@@ -226,6 +248,15 @@ def factor_exposure(symbol: str = "", days: int = 365, five_factor: bool = False
         "(Regression estimate over the window — loadings and alpha are noisy and "
         "not significance-tested; delayed data, not investment advice.)"
     )
+    if stamp and not symbol.strip():
+        # The returns are point-in-time; the WEIGHTS are not, and only the portfolio
+        # branch has weights. Saying so is the difference between an approximation
+        # and a misreading.
+        lines.append(
+            "note: the returns are as of the date above, but the weights are your "
+            "CURRENT holdings — this is how today's book would have loaded back "
+            "then, not what you actually held."
+        )
     return "\n".join(lines)
 
 

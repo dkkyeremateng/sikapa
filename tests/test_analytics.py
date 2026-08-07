@@ -476,7 +476,7 @@ def test_factor_exposure_recovers_known_loadings(monkeypatch):
         returns.append((d, 1.5 * mkt + 0.5 * smb + rf)) # excess = 1.5mkt + 0.5smb
 
     monkeypatch.setattr(factors, "_fetch_ff_factors", lambda five_factor=False: (names, ff))
-    monkeypatch.setattr(factors, "_ticker_returns", lambda sym, days: returns)
+    monkeypatch.setattr(factors, "_ticker_returns", lambda sym, days, **_kw: returns)
 
     out = factors.factor_exposure("AAPL", days=90)
     assert re.search(r"market\s+\(Mkt-RF\)\s+\+1\.50", out)
