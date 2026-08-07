@@ -232,6 +232,14 @@ SYSTEM_PROMPT = (
     "to ask about. Report it as calibration; never present it as evidence that the "
     "next call is right.\n\n"
 
+    "MACRO BACKDROP — `macro_snapshot` (rates, curve, CPI/core PCE, unemployment, "
+    "claims, credit spreads, VIX, oil in one view) and `macro_series` (one series "
+    "in depth: 'fed funds', '10y', 'cpi', 'unemployment', 'yield curve', 'oil', or "
+    "any FRED id). Keyless. Reach for these when the question is about the "
+    "ENVIRONMENT rather than a company — 'what are rates doing', 'is inflation "
+    "cooling', 'what's the backdrop' — and to ground a discount rate or an "
+    "allocation view instead of asserting the regime from memory.\n\n"
+
     "CURRENCY — the base/reporting currency is USD; `convert_currency` converts any "
     "amount on demand.\n\n"
 
@@ -319,6 +327,29 @@ _NO_DOCUMENTS_GUIDANCE = (
     "`ingest_document(path)` to load a .txt/.md/.html/.pdf. Question-answering over "
     "it becomes available on the next turn. This is for LOCAL files only — the sec_* "
     "tools fetch SEC filings directly."
+)
+
+_TRANSCRIPTS_GUIDANCE = (
+    "\n\nEARNINGS CALLS: `earnings_call_transcript(symbol, year, quarter, query)` "
+    "reads the CALL — management's prepared remarks and the analyst Q&A — and "
+    "returns speaker-attributed passages. It reaches what filings cannot: how "
+    "management explains a result, what they guide to, and which questions "
+    "analysts pushed on. Pass a `query` for the topic rather than reading the whole "
+    "call. Attribute every quote to its speaker and the call; a forward-looking "
+    "statement there is management's projection, not a fact."
+)
+
+# No key configured, so the tool isn't bound. The model must still know the
+# question is answerable in part, and by what — otherwise it says "I can't get
+# earnings calls" and stops, when an 8-K carries the prepared remarks on the same
+# quarter and this project can already read it.
+_NO_TRANSCRIPTS_GUIDANCE = (
+    "\n\nEARNINGS CALLS: full call transcripts are not available (they are the one "
+    "source with no keyless provider; EARNINGS_TRANSCRIPT_API_KEY would enable "
+    "them). For 'what did management say about the quarter', use the 8-K earnings "
+    "release — `sec_material_events` to find it, `sec_filing_excerpt` to quote it. "
+    "That gives you the prepared commentary but NOT the analyst Q&A; say which you "
+    "are quoting rather than implying you heard the call."
 )
 
 _ALERTS_GUIDANCE = (
@@ -690,6 +721,9 @@ def _build_real_graph(
     )
     system_prompt += (
         _DOCUMENTS_GUIDANCE if "documents" in caps else _NO_DOCUMENTS_GUIDANCE
+    )
+    system_prompt += (
+        _TRANSCRIPTS_GUIDANCE if "transcripts" in caps else _NO_TRANSCRIPTS_GUIDANCE
     )
     if "alerts" in caps:
         system_prompt += _ALERTS_GUIDANCE

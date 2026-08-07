@@ -1,6 +1,6 @@
 # Tools Reference
 
-Every agent tool the assistant can call, grouped by area. **63 tools.**
+Every agent tool the assistant can call, grouped by area. **66 tools.**
 
 You don't call these directly — you ask the assistant in plain English and it
 picks the tool(s). Each entry below shows:
@@ -36,6 +36,8 @@ tools need a broker statement imported first.
 12. [Scheduled work](#12-scheduled-work)
 13. [Rendered reports](#13-rendered-reports)
 14. [Thesis journal](#14-thesis-journal)
+15. [Macro backdrop](#15-macro-backdrop)
+16. [Earnings calls](#16-earnings-calls)
 
 ---
 
@@ -527,6 +529,52 @@ answer for stays **open** for a later tick rather than being burned as a miss.
 **What it is not.** A handful of past calls on whatever you happened to ask about —
 far too small a sample, and not a random one, to say anything about the next call.
 Every surface reports it as calibration and says so.
+
+---
+
+## 15. Macro backdrop
+
+Rates, inflation, employment and credit — the context that decides whether a single
+company's numbers mean anything. **Keyless:** FRED's official API needs a key, but
+the graph CSV endpoint behind their charts doesn't, and takes the same series ids.
+
+#### `macro_snapshot(as_of="")`
+One screen: policy rate, 2y/10y and the curve spread, CPI and core PCE (year over
+year), breakeven inflation, unemployment, jobless claims, high-yield spreads, VIX
+and oil — each with its move over the past year and its own observation date.
+- **Ask:** "What's the macro backdrop right now?" / "Where are rates and inflation?"
+- **Call:** `macro_snapshot()`
+
+#### `macro_series(series, days=730, as_of="")`
+One series in depth, charted, with year-over-year for index series where the level
+alone is meaningless. Takes plain names — `fed funds`, `10y`, `cpi`, `core pce`,
+`unemployment`, `claims`, `yield curve`, `breakeven`, `high yield`, `vix`, `oil`,
+`gdp`, `mortgage` — or any raw FRED series id.
+- **Ask:** "Chart the 10-year over the past two years." / "Is inflation cooling?"
+- **Call:** `macro_series(series="10y", days=730)`
+
+**One caveat, stated in the output.** `as_of` bounds the **observation** date, not
+the data **vintage**. FRED revises — GDP and payrolls are restated for months — so
+a past period comes back as *currently restated*, not the figure that was on the
+screen then. True point-in-time vintages need ALFRED, a separate keyed service.
+
+---
+
+## 16. Earnings calls
+
+#### `earnings_call_transcript(symbol, year=0, quarter=0, query="", max_passages=6)`
+Management's prepared remarks **and the analyst Q&A** — the one thing the SEC suite
+can't reach. Returns speaker-attributed passages matching `query` rather than the
+whole 15,000-word call.
+- **Ask:** "What did management say about margins on the last call?" / "What did analysts push on?"
+- **Call:** `earnings_call_transcript(symbol="NVDA", query="China export restrictions")`
+
+**This is the only keyed tool here.** Everything else works on a fresh clone;
+transcripts have no free programmatic provider. Without
+`EARNINGS_TRANSCRIPT_API_KEY` the tool is unbound and the assistant is told to fall
+back to the **8-K earnings release** (`sec_material_events` + `sec_filing_excerpt`),
+which carries the prepared commentary on the same quarter — but not the Q&A, and it
+is told to say which it is quoting.
 
 ---
 
