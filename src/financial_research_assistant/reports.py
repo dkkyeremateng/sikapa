@@ -398,6 +398,40 @@ def build_html(
 # --- Chrome renderer -----------------------------------------------------------
 
 
+def _sandbox_disabled() -> bool:
+    """Whether to pass ``--no-sandbox``.
+
+    The page being rendered is written by the MODEL, and a report routinely
+    summarises `web_search` results and filing text — i.e. content this project
+    treats as untrusted everywhere else. Nothing here is known to be exploitable
+    (the markdown is rendered with ``html=False`` and every interpolated field goes
+    through ``html.escape``), so this is defence in depth, not a fix. But it is the
+    cheap kind: the sandbox costs nothing on a normal desktop render, and it is the
+    layer that still holds if one of those escapes is ever missed.
+
+    Two cases genuinely need it off, and only these:
+      - running as root, where Chrome refuses to start sandboxed at all (the usual
+        container case — detected rather than configured, so a Docker run still
+        renders without anyone having to know this flag exists);
+      - ``FINANCIAL_RESEARCH_CHROME_NO_SANDBOX=1``, for a confined environment where
+        the sandbox can't acquire the namespaces it needs.
+    """
+    if (os.environ.get("FINANCIAL_RESEARCH_CHROME_NO_SANDBOX") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return True
+    geteuid = getattr(os, "geteuid", None)  # absent on Windows
+    return geteuid is not None and geteuid() == 0
+
+
+def _chrome_flags(chrome: str) -> list[str]:
+    """The command prefix every headless run shares."""
+    flags = [chrome, "--headless", "--disable-gpu"]
+    if _sandbox_disabled():
+        flags.append("--no-sandbox")
+    return flags
+
+
 def _run_chrome(args: list[str]) -> subprocess.CompletedProcess[bytes] | None:
     try:
         return subprocess.run(
@@ -414,10 +448,9 @@ def _measure_height(chrome: str, url: str) -> int:
     scripts first — so the document stamps its own ``scrollHeight`` into the title
     and this reads it back. One extra headless run over a local file.
     """
-    proc = _run_chrome([
-        chrome, "--headless", "--disable-gpu", "--no-sandbox",
-        "--virtual-time-budget=3000", "--dump-dom", url,
-    ])
+    proc = _run_chrome(
+        _chrome_flags(chrome) + ["--virtual-time-budget=3000", "--dump-dom", url]
+    )
     if proc is None:
         return _FALLBACK_H
     found = re.search(rb"__FRA_H:(\d+)", proc.stdout or b"")
@@ -445,10 +478,10 @@ def _chrome_pdf(
         ),
         encoding="utf-8",
     )
-    _run_chrome([
-        chrome, "--headless", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
-        "--no-pdf-header-footer", f"--print-to-pdf={pdf}", url,
-    ])
+    _run_chrome(
+        _chrome_flags(chrome)
+        + ["--hide-scrollbars", "--no-pdf-header-footer", f"--print-to-pdf={pdf}", url]
+    )
     return pdf.exists()
 
 
