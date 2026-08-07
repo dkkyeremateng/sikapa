@@ -145,16 +145,22 @@ def _pearson(a: list[float], b: list[float]) -> float | None:
     return cov / (sa * sb)
 
 
-def correlation_matrix(symbols: str = "", days: int = 180) -> str:
+def correlation_matrix(symbols: str = "", days: int = 180, as_of: str = "") -> str:
     """Correlation matrix of daily returns across several tickers (or your imported
     holdings when ``symbols`` is empty), over the last ``days``. Values near +1 move
     together, near 0 are unrelated, near −1 move oppositely — a quick read on how
     diversified (vs. concentrated in one factor) the set is. ``symbols`` is
-    comma/space-separated (e.g. ``"AAPL, MSFT, SPY"``). Uses keyless Yahoo daily
-    closes aligned on common dates."""
+    comma/space-separated (e.g. ``"AAPL, MSFT, SPY"``); ``as_of`` (YYYY-MM-DD) ends
+    the window at that date instead of today, for 'how correlated were these during
+    <past period>'. Uses keyless Yahoo daily closes aligned on common dates."""
     from . import statements
+    from .pointintime import AsOfError, parse_as_of, window_note
     from .tools import _aligned_closes
 
+    try:
+        stamp = parse_as_of(as_of)
+    except AsOfError as exc:
+        return str(exc)
     syms = [s.strip().upper() for s in symbols.replace(",", " ").split() if s.strip()]
     if not syms:
         syms = [
@@ -168,7 +174,7 @@ def correlation_matrix(symbols: str = "", days: int = 180) -> str:
             "Give at least two tickers (e.g. correlation_matrix('AAPL, MSFT, SPY')), "
             "or import a portfolio with 2+ holdings first."
         )
-    dates, closes = _aligned_closes(syms, days)
+    dates, closes = _aligned_closes(syms, days, as_of=stamp)
     present = [s for s in syms if s in closes]
     if len(dates) < 3 or len(present) < 2:
         return (
@@ -180,7 +186,8 @@ def correlation_matrix(symbols: str = "", days: int = 180) -> str:
     w = max(6, max(len(s) for s in present))
     header = " " * (w + 1) + " ".join(f"{s:>6}" for s in present)
     lines = [
-        f"Return correlation · {dates[0]} → {dates[-1]} ({len(dates)} sessions):",
+        f"Return correlation · {dates[0]} → {dates[-1]} ({len(dates)} sessions)"
+        f"{window_note(stamp, dates[-1])}:",
         header,
     ]
     for s in present:

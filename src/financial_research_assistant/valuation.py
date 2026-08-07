@@ -309,7 +309,7 @@ def _render(sym: str, snap: dict[str, Any], history: list[dict[str, Any]],
 
 # --- The tool ----------------------------------------------------------------
 def dcf_valuation(symbol: str, growth_rate: float = 0.0, discount_rate: float = 0.0,
-                  terminal_growth: float = 0.0, years: int = 0) -> str:
+                  terminal_growth: float = 0.0, years: int = 0, as_of: str = "") -> str:
     """Estimate a stock's intrinsic value with a deterministic two-stage
     discounted-cash-flow (DCF) model. Free-cash-flow history is pulled AS-REPORTED
     from the company's SEC 10-K filings (XBRL: operating cash flow − capital
@@ -329,7 +329,16 @@ def dcf_valuation(symbol: str, growth_rate: float = 0.0, discount_rate: float = 
     undervalued / DCF / run a valuation'. It's a model, not a recommendation —
     present it with its assumptions and note it doesn't fit banks or pre-FCF
     companies. For as-reported line items alone use ``sec_financials``; for a
-    quick market-multiple snapshot use ``stock_fundamentals``."""
+    quick market-multiple snapshot use ``stock_fundamentals``.
+
+    The FCF history is as-reported and dated, but net debt, share count and price
+    come from a CURRENT snapshot — so pass ``as_of`` (YYYY-MM-DD) for a past date
+    and this tool declines rather than mixing two eras into one valuation."""
+    from .pointintime import snapshot_guard
+
+    refusal = snapshot_guard("dcf_valuation", as_of)
+    if refusal:
+        return refusal
     sym = symbol.strip().upper()
     from . import edgar
 

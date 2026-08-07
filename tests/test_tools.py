@@ -175,7 +175,7 @@ def test_price_history_chart_no_data_message(monkeypatch):
     """An empty history (unknown ticker) returns a helpful message, not a crash."""
     import financial_research_assistant.tools as tools
 
-    monkeypatch.setattr(tools, "_fetch_daily", lambda symbol, days, strict=False: [])
+    monkeypatch.setattr(tools, "_fetch_daily", lambda symbol, days, strict=False, **_kw: [])
     out = tools.price_history_chart("NOPE")
     assert "No historical data" in out and "NOPE" in out
 
@@ -186,7 +186,7 @@ def test_price_history_chart_renders_stats_and_window(monkeypatch):
     import financial_research_assistant.tools as tools
 
     series = [(f"2026-01-{i:02d}", float(100 + i)) for i in range(1, 21)]  # 20 sessions
-    monkeypatch.setattr(tools, "_fetch_daily", lambda symbol, days, strict=False: series)
+    monkeypatch.setattr(tools, "_fetch_daily", lambda symbol, days, strict=False, **_kw: series)
     out = tools.price_history_chart("AAPL", days=5)
     assert "AAPL" in out
     assert "change" in out
@@ -659,7 +659,7 @@ def test_compare_prices_drops_ticker_with_no_data(monkeypatch):
     note and the remaining tickers still chart."""
     import financial_research_assistant.tools as t
 
-    def fake(sym, days, strict=False):
+    def fake(sym, days, strict=False, **_kw):
         if sym.upper() == "NOPE":
             return []
         return [(f"2025-01-{i + 1:02d}", 100.0 + i) for i in range(20)]
@@ -687,7 +687,7 @@ def test_portfolio_vs_benchmark(monkeypatch, tmp_path):
     s.import_statement(_mini_statement("U1", "January 1, 2024 - December 31, 2024", "10%", 1000))
     s.import_statement(_mini_statement("U1", "January 1, 2025 - December 31, 2025", "20%", 1300))
 
-    def fake(sym, days, strict=False):
+    def fake(sym, days, strict=False, **_kw):
         return [("2024-01-01", 100.0), ("2024-07-01", 110.0), ("2025-12-31", 120.0)]
 
     monkeypatch.setattr(t, "_fetch_daily", fake)
@@ -809,7 +809,7 @@ def test_fetch_many_dedups_and_flags_unreachable(monkeypatch):
     and (in strict mode) flags when any symbol hit a transport outage."""
     import financial_research_assistant.tools as t
 
-    def fake(sym, days, strict=False):
+    def fake(sym, days, strict=False, **_kw):
         if sym == "DOWN":
             if strict:
                 raise t.PriceDataUnavailable("outage")
@@ -830,7 +830,7 @@ def test_aligned_closes_strict_raises_on_full_outage(monkeypatch):
 
     import financial_research_assistant.tools as t
 
-    def down(sym, days, strict=False):
+    def down(sym, days, strict=False, **_kw):
         if strict:
             raise t.PriceDataUnavailable("outage")
         return []
@@ -845,7 +845,7 @@ def test_price_history_chart_reports_outage_not_bad_ticker(monkeypatch):
     — the trust fix so a Yahoo blip doesn't tell users their symbol is wrong."""
     import financial_research_assistant.tools as t
 
-    def boom(symbol, days, strict=False):
+    def boom(symbol, days, strict=False, **_kw):
         if strict:
             raise t.PriceDataUnavailable("down")
         return []
@@ -893,7 +893,7 @@ def test_fx_window_sizes_from_date_and_reports_actual_rate_date(monkeypatch):
     assert t._fx_series_days(None) == 7            # latest → short window
     assert t._fx_series_days("2020-01-01") > 700   # old date → window reaching it
 
-    def fake(sym, days, strict=False):
+    def fake(sym, days, strict=False, **_kw):
         return [("2025-06-12", 1.20), ("2025-06-13", 1.25)]
 
     monkeypatch.setattr(t, "_fetch_daily", fake)

@@ -29,13 +29,22 @@ def fake_ibkr_tools_session(*tool_names):
 
 
 def install_fake_price_fetch(monkeypatch):
-    import financial_research_assistant.tools as t
+    """Stub the Yahoo daily-close fetch with a deterministic series.
 
-    def fake(sym, days, strict=False):
+    It applies the real ``as_of`` cut rather than ignoring the argument: a stub
+    that accepted ``as_of`` and returned the full series anyway would let a
+    point-in-time test pass while the tool leaked future data, which is the one
+    bug these tests exist to catch.
+    """
+    import financial_research_assistant.tools as t
+    from financial_research_assistant.pointintime import as_of_series
+
+    def fake(sym, days, strict=False, as_of=None, **_kw):
         base = {"AAPL": 100.0, "MSFT": 50.0, "SPY": 400.0}.get(sym.upper(), 100.0)
         # a gently varying series so vol/drawdown/beta are well-defined
-        return [(f"2025-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
-                 base * (1 + 0.02 * ((i % 7) - 3) / 100 + 0.0005 * i)) for i in range(60)]
+        series = [(f"2025-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+                   base * (1 + 0.02 * ((i % 7) - 3) / 100 + 0.0005 * i)) for i in range(60)]
+        return as_of_series(series, as_of)
 
     monkeypatch.setattr(t, "_fetch_daily", fake)
 
@@ -44,7 +53,7 @@ def install_stub_fx(monkeypatch, rates):
     """Stub the Yahoo FX fetch: rates maps currency -> USD-per-unit."""
     import financial_research_assistant.tools as t
 
-    def fake(sym, days, strict=False):
+    def fake(sym, days, strict=False, **_kw):
         # sym like "EURUSD=X" -> currency EUR
         ccy = sym.replace("USD=X", "")
         r = rates.get(ccy)

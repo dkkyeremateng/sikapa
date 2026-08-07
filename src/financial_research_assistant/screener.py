@@ -367,6 +367,7 @@ def screen_stocks(
     min_earnings_beats: int = 0,
     sector: str = "",
     max_symbols: int = 40,
+    as_of: str = "",
 ) -> str:
     """Screen stocks against quantitative criteria and return the ones that pass,
     with the measured figures. Screens a CANDIDATE UNIVERSE, not the whole market.
@@ -408,7 +409,17 @@ def screen_stocks(
     criteria — forward-guidance beats, raised guidance, management commentary — are
     NOT screened here; the tool reminds you to confirm those per passing name with
     `web_search` / `earnings_calendar` / `research_report` before concluding.
+
+    A screen runs against TODAY's fundamentals and today's index membership, so it
+    cannot reconstruct which names would have passed on a past date. Pass ``as_of``
+    (YYYY-MM-DD) and it declines instead of presenting a current screen as a
+    historical one — a screen run today is not a backtest.
     """
+    from .pointintime import snapshot_guard
+
+    refusal = snapshot_guard("screen_stocks", as_of)
+    if refusal:
+        return refusal
     from concurrent.futures import ThreadPoolExecutor
 
     candidates, src, err = _select_universe(symbols, universe)

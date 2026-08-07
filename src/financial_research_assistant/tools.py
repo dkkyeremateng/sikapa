@@ -28,6 +28,15 @@ import urllib.request
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 
+from .pointintime import (
+    AS_OF_DOC,
+    AsOfError,
+    as_of_series,
+    lookback_days,
+    parse_as_of,
+    window_note,
+)
+
 
 # --- Local analytical tools ------------------------------------------------
 
@@ -151,7 +160,8 @@ def _price_ttl() -> float:
 
 
 def _fetch_daily(
-    symbol: str, days: int, timeout: float = 15.0, *, strict: bool = False
+    symbol: str, days: int, timeout: float = 15.0, *, strict: bool = False,
+    as_of: date | None = None,
 ) -> list[tuple[str, float]]:
     """Fetch daily ``(date, close)`` history for ``symbol`` from Yahoo Finance,
     with a same-process TTL cache and one retry on transient failure.
@@ -160,14 +170,22 @@ def _fetch_daily(
     unknown or delisted ticker — a definitive answer). On a transport/parse
     failure after both attempts: ``strict=True`` raises ``PriceDataUnavailable``
     so the caller can tell an outage apart from a bad ticker; ``strict=False``
-    (the default, used by the many best-effort callers) returns ``[]`` as before."""
+    (the default, used by the many best-effort callers) returns ``[]`` as before.
+
+    ``as_of`` cuts the series to sessions on or before that date, and widens the
+    fetch first so ``days`` sessions still remain after the cut — Yahoo's window
+    always ends today, so asking for 180 days as of two years ago would otherwise
+    return a window that ends 730 days past the point of interest and cut to
+    nothing. The CACHE still holds the full fetched range: two callers wanting
+    different as_of dates within one bucket share the fetch and slice it
+    separately."""
     sym = symbol.strip().upper()
-    rng = _yahoo_range(days)
+    rng = _yahoo_range(lookback_days(days, as_of))
     key = (sym, rng)
     ttl = _price_ttl()
     cached = _PRICE_CACHE.get(key)
     if cached is not None and ttl > 0 and (time.time() - cached[1]) < ttl:
-        return cached[0]
+        return as_of_series(cached[0], as_of)
     url = _YF_URL.format(sym=urllib.parse.quote(sym), rng=rng)
     req = urllib.request.Request(url, headers={"User-Agent": _YF_UA})
     last_exc: Exception | None = None
@@ -188,7 +206,7 @@ def _fetch_daily(
             continue
         if series and ttl > 0:
             _PRICE_CACHE[key] = (series, time.time())
-        return series
+        return as_of_series(series, as_of)
     # Both attempts hit a transport/parse failure (not a clean 404). Signal it
     # distinctly for strict callers; stay backward-compatible (empty) otherwise.
     if strict:
@@ -272,16 +290,22 @@ def _render_price_chart(symbol: str, dates: list[str], closes: list[float]) -> s
     return _ANSI_RE.sub("", plt.build())
 
 
-def price_history_chart(symbol: str, days: int = 90) -> str:
+def price_history_chart(symbol: str, days: int = 90, as_of: str = "") -> str:
     """Get historical daily closing prices for a stock ``symbol`` over roughly
     the last ``days`` sessions and render them as a terminal line chart with
     summary stats (first / last / high / low close and % change). Data source:
     Yahoo Finance (free, no API key) — NOT IBKR, which here provides only
     real-time quotes. Use US tickers like AAPL or MSFT (Yahoo suffixes like
     ``VOD.L`` or ``SAP.DE`` for non-US). Use this to visualize a price trend.
+    ``as_of`` (YYYY-MM-DD) ends the window at that date instead of today — use it
+    for 'what was X doing in <past period>' so nothing after it leaks in.
     """
     try:
-        series = _fetch_daily(symbol, days, strict=True)
+        stamp = parse_as_of(as_of)
+    except AsOfError as exc:
+        return str(exc)
+    try:
+        series = _fetch_daily(symbol, days, strict=True, as_of=stamp)
     except PriceDataUnavailable:
         return (
             f"The price data source (Yahoo Finance) is temporarily unreachable — "
@@ -290,8 +314,10 @@ def price_history_chart(symbol: str, days: int = 90) -> str:
         )
     if not series:
         return (
-            f"No historical data found for {symbol!r}. Check the ticker — use "
-            f"forms like AAPL, MSFT (US) or VOD.L, SAP.DE (non-US)."
+            f"No historical data found for {symbol!r}"
+            + (f" on or before {stamp.isoformat()}" if stamp else "")
+            + ". Check the ticker — use forms like AAPL, MSFT (US) or VOD.L, "
+            "SAP.DE (non-US)."
         )
     n = max(2, min(len(series), days))
     series = series[-n:]  # Yahoo is oldest→newest; take the most recent window.
@@ -300,7 +326,8 @@ def price_history_chart(symbol: str, days: int = 90) -> str:
     first, last = closes[0], closes[-1]
     chg = (last - first) / first * 100.0 if first else 0.0
     stats = (
-        f"{symbol.upper()} · {dates[0]} → {dates[-1]} ({len(closes)} sessions)\n"
+        f"{symbol.upper()} · {dates[0]} → {dates[-1]} ({len(closes)} sessions)"
+        f"{window_note(stamp, dates[-1])}\n"
         f"first {first:.2f} · last {last:.2f} · high {max(closes):.2f} · "
         f"low {min(closes):.2f} · change {chg:+.2f}%\n\n"
     )
@@ -983,7 +1010,7 @@ _FETCH_WORKERS = 8
 
 
 def _fetch_many(
-    symbols: list[str], days: int, *, strict: bool = False
+    symbols: list[str], days: int, *, strict: bool = False, as_of: date | None = None
 ) -> tuple[dict[str, list[tuple[str, float]]], bool]:
     """Fetch daily series for several symbols concurrently. Returns
     ``({symbol: series}, unreachable)`` — a failed symbol maps to ``[]``, and
@@ -999,7 +1026,7 @@ def _fetch_many(
 
     def _one(s: str):
         try:
-            return s, _fetch_daily(s, days, strict=strict), False
+            return s, _fetch_daily(s, days, strict=strict, as_of=as_of), False
         except PriceDataUnavailable:
             return s, [], True
 
@@ -1016,7 +1043,7 @@ def _fetch_many(
 
 
 def _aligned_closes(
-    symbols: list[str], days: int, *, strict: bool = False
+    symbols: list[str], days: int, *, strict: bool = False, as_of: date | None = None
 ) -> tuple[list[str], dict[str, list[float]]]:
     """Fetch daily closes for each symbol (concurrently) and align them on their
     common dates. Symbols with no data are dropped (absent from the returned dict)
@@ -1026,8 +1053,12 @@ def _aligned_closes(
     ``strict=True`` propagates ``PriceDataUnavailable`` when the source was
     unreachable AND nothing usable came back — so a full outage surfaces as an
     outage rather than as a set of 'bad tickers'. Partial data (some symbols
-    fetched) is still returned; best-effort callers leave ``strict=False``."""
-    fetched_raw, unreachable = _fetch_many(symbols, days, strict=strict)
+    fetched) is still returned; best-effort callers leave ``strict=False``.
+
+    ``as_of`` cuts every series to that date before aligning, so the common-date
+    intersection is computed over the point-in-time window rather than being
+    trimmed after the fact."""
+    fetched_raw, unreachable = _fetch_many(symbols, days, strict=strict, as_of=as_of)
     fetched = {s: dict(series) for s, series in fetched_raw.items()}
     have = {s: d for s, d in fetched.items() if d}
     common = set.intersection(*[set(d) for d in have.values()]) if have else set()
@@ -1039,18 +1070,23 @@ def _aligned_closes(
     return dates, {s: [have[s][d] for d in dates] for s in have}
 
 
-def compare_prices(symbols: str, days: int = 180) -> str:
+def compare_prices(symbols: str, days: int = 180, as_of: str = "") -> str:
     """Compare several stocks' price performance on ONE normalized chart (each
     rebased to 100 at the start), so lines are comparable regardless of share
     price. Use for 'compare X vs Y', 'X vs the S&P (SPY)', 'which did better'.
     ``symbols`` is comma/space-separated tickers (e.g. ``"AAPL, MSFT, SPY"``);
-    ``days`` is the lookback. Returns each ticker's total return over the window
-    plus the overlaid chart."""
+    ``days`` is the lookback. ``as_of`` (YYYY-MM-DD) ends the window at that date
+    instead of today, for 'who was winning as of <past date>'. Returns each
+    ticker's total return over the window plus the overlaid chart."""
     syms = [s.strip().upper() for s in symbols.replace(",", " ").split() if s.strip()][:6]
     if len(syms) < 1:
         return "Give one or more tickers, e.g. compare_prices('AAPL, MSFT, SPY')."
     try:
-        dates, closes = _aligned_closes(syms, days, strict=True)
+        stamp = parse_as_of(as_of)
+    except AsOfError as exc:
+        return str(exc)
+    try:
+        dates, closes = _aligned_closes(syms, days, strict=True, as_of=stamp)
     except PriceDataUnavailable:
         return (
             f"The price data source (Yahoo Finance) is temporarily unreachable — "
@@ -1076,7 +1112,8 @@ def compare_prices(symbols: str, days: int = 180) -> str:
         f"compared the rest.\n" if missing else ""
     )
     head = (f"Normalized price comparison · {dates[0]} → {dates[-1]} "
-            f"({len(dates)} sessions)\n" + " · ".join(stats) + "\n" + note + "\n")
+            f"({len(dates)} sessions){window_note(stamp, dates[-1])}\n"
+            + " · ".join(stats) + "\n" + note + "\n")
     return ChartText(head, _render_multi_series("Price (rebased to 100)", series))
 
 
@@ -1125,17 +1162,24 @@ def portfolio_vs_benchmark(benchmark: str = "SPY", account: str = "") -> str:
     )
 
 
-def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY") -> str:
+def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY",
+                 as_of: str = "") -> str:
     """Risk/return metrics for a stock from daily returns: annualized volatility,
     max drawdown, Sharpe ratio (risk-free 0), and beta vs a benchmark. Use for
     'how risky / volatility / drawdown / Sharpe / beta' questions about a ticker.
-    ``days`` is the lookback; ``benchmark`` the beta reference (default SPY).
+    ``days`` is the lookback; ``benchmark`` the beta reference (default SPY);
+    ``as_of`` (YYYY-MM-DD) ends the window at that date instead of today, for 'how
+    risky did this look back then' — nothing after it is used.
     This is PER-TICKER; for the whole portfolio's risk use `portfolio_risk`, which
     value-weights your current holdings into one synthetic return series."""
     import statistics as _stats
 
     try:
-        series = _fetch_daily(symbol, days, strict=True)
+        stamp = parse_as_of(as_of)
+    except AsOfError as exc:
+        return str(exc)
+    try:
+        series = _fetch_daily(symbol, days, strict=True, as_of=stamp)
     except PriceDataUnavailable:
         return (
             f"The price data source (Yahoo Finance) is temporarily unreachable — "
@@ -1159,7 +1203,9 @@ def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY") -> str:
         max_dd = min(max_dd, (c - peak) / peak)
     # Beta vs benchmark over common dates.
     beta_txt = ""
-    dates_b, aligned = _aligned_closes([symbol.upper(), benchmark.upper()], days)
+    dates_b, aligned = _aligned_closes(
+        [symbol.upper(), benchmark.upper()], days, as_of=stamp
+    )
     # _aligned_closes drops a symbol with no data; beta needs both series.
     if dates_b and symbol.upper() in aligned and benchmark.upper() in aligned:
         sc, bc = aligned[symbol.upper()], aligned[benchmark.upper()]
@@ -1173,7 +1219,7 @@ def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY") -> str:
             beta_txt = f"\n  beta vs {benchmark.upper()}   {beta:.2f}"
     return (
         f"Risk metrics · {symbol.upper()} · {series[0][0]} → {series[-1][0]} "
-        f"({len(closes)} sessions):\n"
+        f"({len(closes)} sessions){window_note(stamp, series[-1][0])}:\n"
         f"  annualized volatility  {vol:.1f}%\n"
         f"  max drawdown           {max_dd * 100.0:.1f}%\n"
         f"  Sharpe (rf=0)          {sharpe:.2f}{beta_txt}"
