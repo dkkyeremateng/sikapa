@@ -405,6 +405,47 @@ def test_realized_gains_fifo_short_long_split(monkeypatch, tmp_path):
     assert r["unmatched_proceeds"] == 0.0
 
 
+def test_the_long_term_boundary_is_more_than_a_year_not_exactly_one():
+    """The holding period starts the DAY AFTER acquisition, so a position bought on
+    1 Jan and sold the following 1 Jan is SHORT term. The boundary was `>= 365`
+    days, which called that trade long-term and understated the tax owed — an error
+    in the direction that costs the taxpayer, not the IRS."""
+    from financial_research_assistant import statements as s
+
+    assert not s.is_long_term("2025-01-01", "2026-01-01"), "one year exactly"
+    assert s.is_long_term("2025-01-01", "2026-01-02"), "a year and a day"
+
+
+def test_a_leap_day_in_the_span_does_not_shorten_the_year():
+    """Why this can't be a day count: 2023-06-01 → 2024-06-01 crosses 29 February,
+    so it is 366 days — but it is still exactly one calendar year, and still short
+    term. Any `> N days` rule gets one of these two cases wrong."""
+    from financial_research_assistant import statements as s
+
+    assert s._days_between("2023-06-01", "2024-06-01") == 366
+    assert not s.is_long_term("2023-06-01", "2024-06-01")
+    assert s.is_long_term("2023-06-01", "2024-06-02")
+
+
+def test_a_leap_day_purchase_has_a_holding_period():
+    """29 February has no anniversary in a common year. The holding period begins
+    1 March, so a sale on 1 March 2026 is exactly one year (short) and 2 March is
+    long — rather than raising, or silently bucketing as short forever."""
+    from financial_research_assistant import statements as s
+
+    assert not s.is_long_term("2024-02-29", "2025-03-01")
+    assert s.is_long_term("2024-02-29", "2025-03-02")
+
+
+def test_an_unreadable_date_buckets_short_rather_than_raising():
+    """A malformed lot date must not sink the whole realized-gains run; short term
+    is the conservative bucket (it never understates the tax)."""
+    from financial_research_assistant import statements as s
+
+    assert not s.is_long_term("not-a-date", "2026-01-02")
+    assert not s.is_long_term("2020-01-01", "")
+
+
 def test_realized_gains_reports_unmatched_sell(monkeypatch, tmp_path):
     """A sell with no imported opening lot surfaces as unmatched proceeds, not a
     silently wrong gain."""

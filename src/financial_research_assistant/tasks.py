@@ -43,10 +43,11 @@ from typing import Any
 import json
 import os
 import re
-import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from .storage import write_private
 
 #: How a finished task picks its next due time. "once" retires it.
 REPEATS = ("once", "hourly", "daily", "weekdays", "weekly")
@@ -129,27 +130,10 @@ def load_tasks() -> list[dict[str, Any]]:
 
 
 def save_tasks(items: list[dict[str, Any]]) -> None:
-    """Write the store ``0600``, atomically.
-
-    ``mkstemp`` in the destination directory gives a 0600 file from the start, so
-    a prompt naming holdings is never briefly world-readable; ``os.replace`` swaps
-    it in without a torn-write window (a tick reading a half-written file would
-    see "no tasks" and skip everything due).
-    """
-    path = tasks_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tasks-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(items, fh, indent=2)
-            fh.write("\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Write the store ``0600``, atomically — a prompt naming holdings is never
+    briefly world-readable, and a tick reading a half-written file would see "no
+    tasks" and skip everything due. See ``storage.write_private``."""
+    write_private(tasks_file(), json.dumps(items, indent=2) + "\n", prefix=".tasks-")
 
 
 # --- runner heartbeat ----------------------------------------------------------
@@ -234,6 +218,14 @@ def _next_id(items: list[dict[str, Any]]) -> str:
 # --- time ---------------------------------------------------------------------
 
 
+#: Hour a bare day ("friday", "2026-08-14", "tomorrow") resolves to. Not midnight:
+#: "monitor X on Friday" means during the day, and a 00:00 run would report on a
+#: market that has been shut for hours.
+_DEFAULT_HOUR = 9
+#: Hour "tonight" resolves to when no clock time follows it.
+_EVENING_HOUR = 20
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -254,11 +246,16 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
 
     Accepts what a person actually types at a chat prompt or a shell:
     ``2026-08-14T13:30``, ``2026-08-14 09:00``, ``2026-08-14`` (09:00 local),
-    ``tomorrow 9am``, ``today 16:00``, ``monday 8:30``, ``+2h``, ``+30m``, ``+3d``.
+    ``tomorrow 9am``, ``today 16:00``, ``tonight``, ``monday 8:30``, ``+2h``,
+    ``+30m``, ``+3d``.
 
     Bare dates default to 09:00 local rather than midnight: "monitor X on Friday"
     means during the day, and a midnight run would report on a market that has been
-    shut for hours.
+    shut for hours. ``tonight`` defaults to 20:00 for the same reason in reverse.
+
+    The result is never in the past. That is not cosmetic: a task dated earlier
+    than now is immediately due, so it fires on the very next tick — which for
+    "tonight" used to mean the run happened the moment it was scheduled.
     """
     now = now or now_utc()
     local_now = now.astimezone()
@@ -278,12 +275,20 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
             return now + timedelta(days=n)
         return now + timedelta(weeks=n)
 
-    # Optional leading day word, with the rest treated as a time-of-day.
+    # Optional leading day word, with the rest treated as a time-of-day. Each word
+    # carries its own default hour, because the default is what the user gets when
+    # they name a day and no clock time — and "tonight" resolving to 09:00 is a
+    # time that is neither tonight nor, past mid-morning, even in the future.
     day_offset: int | None = None
+    default_hour = _DEFAULT_HOUR
     rest = raw
-    for word, offset in (("today", 0), ("tomorrow", 1), ("tonight", 0)):
+    for word, offset, hour in (
+        ("today", 0, _DEFAULT_HOUR),
+        ("tomorrow", 1, _DEFAULT_HOUR),
+        ("tonight", 0, _EVENING_HOUR),
+    ):
         if raw == word or raw.startswith(word + " "):
-            day_offset, rest = offset, raw[len(word):].strip()
+            day_offset, default_hour, rest = offset, hour, raw[len(word):].strip()
             break
     weekdays = ("monday", "tuesday", "wednesday", "thursday",
                 "friday", "saturday", "sunday")
@@ -296,10 +301,22 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
                 break
 
     if day_offset is not None:
-        hour, minute = _parse_clock(rest) if rest else (9, 0)
+        hour, minute = _parse_clock(rest) if rest else (default_hour, 0)
         target = (local_now + timedelta(days=day_offset)).replace(
             hour=hour, minute=minute, second=0, microsecond=0
         )
+        # Only "today"/"tonight" can land in the past, and the two ways they get
+        # there want opposite answers.
+        #
+        # No clock time given: the user said TODAY and the default hour has simply
+        # gone by. "Now" honours the word they used — the task runs on the next
+        # tick, which is still today. Rolling to tomorrow would contradict it.
+        #
+        # An explicit past time ("today 16:00" at 17:00) is a mistake about the
+        # clock, and the next occurrence of that time is the reading the bare-time
+        # branch below already uses for "16:00" — so it stays consistent with it.
+        if target <= local_now:
+            target = local_now if not rest else target + timedelta(days=1)
         return _to_utc(target)
 
     # Absolute: ISO-ish date, optionally with a time.
@@ -311,7 +328,7 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
         except ValueError:
             continue
         if fmt == "%Y-%m-%d":
-            dt = dt.replace(hour=9)
+            dt = dt.replace(hour=_DEFAULT_HOUR)
         return _to_utc(dt)
 
     # A bare time of day: the next occurrence of it.

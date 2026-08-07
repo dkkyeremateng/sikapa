@@ -29,6 +29,8 @@ import os
 import re
 from pathlib import Path
 
+from .storage import write_private
+
 
 class DocumentSupportError(RuntimeError):
     """A required optional parser (pypdf) isn't installed."""
@@ -150,11 +152,20 @@ def _load_index() -> list[dict[str, Any]]:
 
 
 def _write_index(records: list[dict[str, Any]]) -> None:
-    path = _index_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        for r in records:
-            fh.write(json.dumps(r) + "\n")
+    """Rewrite the whole index ``0600``, atomically.
+
+    Both properties are load-bearing here. The index holds the extracted TEXT of
+    whatever was ingested — routinely a brokerage statement or a private research
+    PDF — so it belongs at the same permissions as the task and credential stores.
+    And every write is a full rewrite (re-ingest, forget, embedding backfill), so
+    a crash partway through would truncate every ingested document, not one; a
+    half-written JSONL file reads as "nothing has been ingested".
+    """
+    write_private(
+        _index_path(),
+        "".join(json.dumps(r) + "\n" for r in records),
+        prefix=".index-",
+    )
 
 
 def _store_chunks(doc: str, rows: list[dict[str, Any]]) -> None:

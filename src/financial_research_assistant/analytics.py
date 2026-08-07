@@ -33,11 +33,11 @@ def tax_loss_harvest(
     worth less than their cost basis, whose sale would realize a deductible loss.
 
     For each still-held FIFO lot it compares current price to cost basis, groups
-    the losers per symbol into short-term (held < 1 year) and long-term, estimates
-    the tax benefit at the given rates, and flags **wash-sale risk** when you
-    bought the same symbol within the last 30 days (repurchasing within 30 days of
-    the sale disallows the loss). ``min_loss`` hides symbols whose total loss is
-    smaller. ``account`` scopes it. Read-only analysis, not tax advice — a loss is
+    the losers per symbol into short-term (held one year or less) and long-term
+    (held MORE than a year), estimates the tax benefit at the given rates, and
+    flags **wash-sale risk** when you bought the same symbol within the last 30
+    days (repurchasing within 30 days of the sale disallows the loss).
+    ``min_loss`` hides symbols whose total loss is smaller. ``account`` scopes it. Read-only analysis, not tax advice — a loss is
     only realized if you actually sell."""
     from . import statements
 
@@ -75,7 +75,7 @@ def tax_loss_harvest(
             if opened_ord >= cutoff:
                 recent_buy = True
             if gain < 0:
-                if statements._days_between(opened, today.isoformat()) >= 365:
+                if statements.is_long_term(opened, today.isoformat()):
                     lt_loss += gain
                 else:
                     st_loss += gain

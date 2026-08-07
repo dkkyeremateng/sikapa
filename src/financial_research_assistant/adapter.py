@@ -472,6 +472,32 @@ def _chunk_text(chunk: BaseMessage) -> str:
     )
 
 
+def _final_answer(messages: list[BaseMessage]) -> str:
+    """The turn's answer, read back from checkpointed state.
+
+    Only reached when the run produced no streamed token chunks, which is exactly
+    where two shapes the streaming path never sees turn up:
+
+    * A provider that doesn't stream reports its reply as content BLOCKS (a list
+      of dicts), not a string. Taking ``.content`` raw handed a list to everything
+      downstream — ``settle_schedule_claim`` raised ``TypeError`` on it and the
+      outer handler reported a COMPLETED turn as an error. ``_chunk_text`` already
+      flattens both shapes, so it does the reading here too.
+    * A run stopped at the recursion limit ends on a ``ToolMessage``, whose
+      content is a tool result rather than an answer.
+
+    So this walks back to the last AI message with text, mirroring how
+    ``subagents._final_text`` reads a subagent's reply, and returns "" when there
+    is genuinely no answer instead of passing off some other message as one.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            text = _chunk_text(msg).strip()
+            if text:
+                return text
+    return ""
+
+
 def _snippet(value: Any, limit: int) -> str:
     if not isinstance(value, str):
         try:
@@ -716,17 +742,28 @@ async def _stream_events(graph: Any, inputs: dict[str, Any], config: RunnableCon
                     yield ev
 
 
-# First-person claims that a task was created. Deliberately narrow: "you have 3
-# scheduled tasks" (a `list_scheduled_tasks` answer) must not match, so every
-# pattern needs the model asserting it did the thing.
+# First-person claims that a task ALREADY EXISTS. Every branch has to be the model
+# asserting it did the thing, because a match doesn't just print a warning — it
+# sends the turn to `_repair_schedule_claim`, which CREATES a real task (and, if
+# the answer says "daily", recurring model spend). So the two failure modes are not
+# symmetric: missing a claim costs a warning the user never sees, while matching
+# something that wasn't a claim schedules work they never agreed to.
+#
+# Two phrasings are therefore deliberately NOT matched:
+#   - "I'll schedule …" and friends. A future-tense OFFER ("if you'd like, I'll
+#     schedule a check for Friday — just say the word") is a question, not a
+#     confirmation; auto-creating the task answers it on the user's behalf.
+#   - "Scheduled tasks:" — the literal first line `list_scheduled_tasks` returns.
+#     The `_TASK_TOOLS` guard covers the turn that actually called it, but a later
+#     turn paraphrasing that listing from history calls no tool, and creating a
+#     DUPLICATE of a task the user is being shown is the worst possible reading.
 _SCHEDULE_CLAIM = re.compile(
     # No object required after the verb. The first version demanded one of
     # "a/the/this/it" and a live run slipped straight past it with "I've scheduled
     # AN earnings analysis" — the determiner is exactly the wrong thing to hinge on.
     r"(?:\bi(?:'ve| have| ’ve)?\s+(?:now\s+|just\s+)?(?:scheduled|queued|set\s+up)\b"
-    r"|\bi'?ll\s+schedule\b"
     r"|\b(?:task|analysis|it)\s+(?:is|has been)\s+(?:now\s+)?(?:scheduled|queued)\b"
-    r"|^\s*(?:✓|✅)?\s*\**scheduled\b)",
+    r"|^\s*(?:✓|✅)?\s*\**scheduled\b(?!\s*\**\s*tasks?\b))",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -820,26 +857,6 @@ async def settle_schedule_claim(
         return answer
     repaired = await _repair_schedule_claim(user_msg, answer)
     return answer + (repaired if repaired is not None else _UNBACKED_SCHEDULE_NOTE)
-
-
-def verify_schedule_claim(answer: str, called_tools: set[str]) -> str:
-    """Append a correction when the answer claims a schedule that never happened.
-
-    Live testing found ``claude-haiku-4-5`` calling ``schedule_task`` on only one of
-    three identical requests — and on the other two it *said* "✓ Scheduled" anyway.
-    That is worse than the promise-to-check-back this feature replaced: the user
-    walks away believing work is queued when nothing is.
-
-    A prompt rule cannot fix it (the rule is what produces the confident phrasing),
-    so the claim is checked against what the turn actually did. Conservative by
-    construction: it fires only on a first-person creation claim with no task tool
-    called at all, so an answer *listing* existing tasks, or one that genuinely
-    scheduled, is untouched. A false positive prints a correction the user can
-    disprove with ``--tasks``; a false negative is a lie they cannot.
-    """
-    if not answer or _TASK_TOOLS & called_tools:
-        return answer
-    return answer + _UNBACKED_SCHEDULE_NOTE if _SCHEDULE_CLAIM.search(answer) else answer
 
 
 def _recall_and_frame(user_msg: str) -> tuple[str, str | None]:
@@ -968,7 +985,7 @@ async def run_turn(
                     # non-streaming endpoint); the run still executed and
                     # checkpointed, so read the answer back from graph state.
                     state = await graph.aget_state(config)
-                    answer = state.values["messages"][-1].content
+                    answer = _final_answer(list(state.values.get("messages") or []))
                 tokens_in, tokens_out, tokens_cache, tokens_write = _sum_usage(
                     getattr(cb, "usage_metadata", None)
                 )

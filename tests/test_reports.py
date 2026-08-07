@@ -4,6 +4,7 @@ Offline — Chrome is never invoked (the one test that would is skipped without 
 binary), and no channel sends anything real.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -201,6 +202,55 @@ def test_the_measured_height_is_clamped(monkeypatch):
 
     monkeypatch.setattr(reports, "_run_chrome", lambda args: P())
     assert reports._measure_height("c", "u") == reports._MAX_H
+
+
+# --- the renderer's sandbox ------------------------------------------------------
+#
+# The page Chrome renders is written by the MODEL, and a report routinely
+# summarises web-search results and filing text — content this project treats as
+# untrusted everywhere else. The escaping is what actually prevents injection; the
+# sandbox is the layer that still holds if that escaping is ever missed.
+
+
+def test_the_sandbox_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("FINANCIAL_RESEARCH_CHROME_NO_SANDBOX", raising=False)
+    monkeypatch.setattr(os, "geteuid", lambda: 501, raising=False)
+    assert "--no-sandbox" not in reports._chrome_flags("chrome")
+
+
+def test_running_as_root_disables_it_without_configuration(monkeypatch):
+    """Chrome refuses to start sandboxed as root — the usual container case. It is
+    DETECTED rather than configured so a Docker run still renders without anyone
+    having to discover the flag."""
+    monkeypatch.delenv("FINANCIAL_RESEARCH_CHROME_NO_SANDBOX", raising=False)
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    assert "--no-sandbox" in reports._chrome_flags("chrome")
+
+
+def test_it_can_be_turned_off_explicitly(monkeypatch):
+    """For a confined environment where the sandbox can't get its namespaces."""
+    monkeypatch.setattr(os, "geteuid", lambda: 501, raising=False)
+    for value in ("1", "true", "on", "YES"):
+        monkeypatch.setenv("FINANCIAL_RESEARCH_CHROME_NO_SANDBOX", value)
+        assert "--no-sandbox" in reports._chrome_flags("chrome"), value
+    monkeypatch.setenv("FINANCIAL_RESEARCH_CHROME_NO_SANDBOX", "0")
+    assert "--no-sandbox" not in reports._chrome_flags("chrome")
+
+
+def test_both_chrome_passes_share_the_flags(monkeypatch, tmp_path):
+    """The measuring pass and the print pass load the same page, so a sandbox
+    setting that applied to only one of them would be no setting at all."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(reports, "_run_chrome", lambda args: seen.append(args))
+    monkeypatch.setattr(reports, "_chrome_flags", lambda c: [c, "--sentinel"])
+
+    html = tmp_path / "sheet.html"
+    html.write_text("<html><head><style>@page{size:1080px 1500px}</style></head></html>")
+    reports._measure_height("chrome", html.as_uri())
+    reports._chrome_pdf("chrome", html, tmp_path / "sheet.pdf")
+
+    assert len(seen) == 3, "one measuring pass each, plus the print"
+    assert all("--sentinel" in args for args in seen), seen
 
 
 def test_the_sheet_is_sent_uncompressed(monkeypatch, tmp_path):
