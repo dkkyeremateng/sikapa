@@ -8,7 +8,9 @@ every message produced inside the graph. Tool calls announced on streamed
 ``AIMessageChunk.tool_call_chunks`` (or complete ``AIMessage.tool_calls``
 from non-streaming nodes) become ``tool_start`` events; the ``ToolMessage``
 the tool node produces on completion becomes the paired ``tool_end`` with
-wall-clock duration and a result snippet. The fake graph has no tools, so
+wall-clock duration and a result snippet. Only the agent's own calls are
+announced (see ``_from_own_node``) — a model running inside a tool streams into
+the same channel, but its results never do. The fake graph has no tools, so
 fake runs emit no tool events.
 
 Reasoning events: any streamed chunk carrying
@@ -38,7 +40,7 @@ except Exception:  # pragma: no cover - older langchain-core
     get_usage_metadata_callback = None
 
 from .events import AgentEvent, format_duration
-from .graph import build_graph, real_graph_session, summarize_messages
+from .graph import build_graph, message_text, real_graph_session, summarize_messages
 from .graph import _build_real_graph  # no-MCP graph for state read/rewrite
 from .pricing import context_cap
 from .memory import get_memory, inject, recall_facts
@@ -101,6 +103,28 @@ def _checkpointer_for(session_id: str, model: str | None, think: bool):
     if key not in _checkpointers:
         _checkpointers[key] = MemorySaver()
     return _checkpointers[key]
+
+
+def _memory_reset_note(session_id: str, model: str | None, think: bool) -> str | None:
+    """A status line when this turn is about to start a FRESH conversation for a
+    session that already has one, or None when it continues the existing thread.
+
+    In-memory checkpoints are keyed by ``(session, model, think)``, so switching
+    model — or toggling reasoning — mid-session hands the model an empty thread: it
+    answers as if the conversation had never happened, and nothing on screen says
+    why. The user can't fix what they can't see, so say it. Durable mode keys state
+    by thread id alone and carries the history across the switch, so it is exempt.
+    """
+    if durable_checkpoints_enabled():
+        return None
+    key = (session_id, model, think)
+    if key in _checkpointers or not any(k[0] == session_id for k in _checkpointers):
+        return None
+    return (
+        "model or reasoning setting changed — this turn starts a fresh "
+        "conversation, so earlier messages in this session are not in the model's "
+        "context (switch back to continue where you left off)"
+    )
 
 
 _CHECKPOINT_KEYWORDS = {"1", "true", "yes", "on", "default"}
@@ -228,8 +252,9 @@ def reset_session(session_id: str) -> None:
     _delete_durable_thread(session_id)
 
 
-# Auto-compaction (interface-agnostic): the last turn's input-token count per
-# session, used to decide whether to compact *before* the next turn. This makes
+# Auto-compaction (interface-agnostic): per session, the size of the context the
+# last turn ran in — its FINAL model call's input tokens, not the sum over the
+# turn's calls — used to decide whether to compact *before* the next turn. This makes
 # /compact's benefit available to every run_turn caller — headless services, the
 # eval harness, bots, REPLs — not just the TUI command.
 _last_input: dict[str, int] = {}
@@ -463,13 +488,10 @@ def _usage_delta(usage_metadata: dict[str, Any] | None) -> tuple[int, int, int, 
 
 
 def _chunk_text(chunk: BaseMessage) -> str:
-    content = chunk.content
-    if isinstance(content, str):
-        return content
-    # Content-block format: a list of dicts carrying "text" entries.
-    return "".join(
-        block.get("text", "") for block in content if isinstance(block, dict)
-    )
+    """The text of a streamed chunk or a whole message — a string as sent, or the
+    text blocks of a content-block list joined (``graph.message_text``, shared with
+    the summarizer and the subagents so all three read a provider the same way)."""
+    return message_text(chunk)
 
 
 def _final_answer(messages: list[BaseMessage]) -> str:
@@ -624,11 +646,20 @@ def _from_own_node(meta: dict[str, Any] | None) -> bool:
     return root == node
 
 
-async def _stream_events(graph: Any, inputs: dict[str, Any], config: RunnableConfig):
+async def _stream_events(
+    graph: Any,
+    inputs: dict[str, Any],
+    config: RunnableConfig,
+    stats: dict[str, Any] | None = None,
+):
     """Translate ``stream_mode="messages"`` output into AgentEvents.
 
     Yields "reasoning" for streamed model thinking, "token" for streamed
     answer text, plus paired "tool_start"/"tool_end" for every tool call.
+
+    ``stats``, when given, is filled with figures that are not events but that the
+    caller needs: ``last_input`` — the input-token count of the agent's LAST model
+    call, i.e. how full the context actually got (see the usage block below).
 
     **Fragility note:** The tool-call chunk pairing below relies on
     ``AIMessageChunk.tool_call_chunks`` matching LangGraph's streaming
@@ -638,7 +669,12 @@ async def _stream_events(graph: Any, inputs: dict[str, Any], config: RunnableCon
     orphaned tool_start or mismatched tool names.
     """
     calls: dict[str, dict[str, Any]] = {}   # call_id -> {name, args, started, announced}
-    by_index: dict[int, str] = {}  # streaming chunk index -> call_id
+    # (task namespace, chunk index) -> call_id. A provider numbers the tool calls
+    # of one message from 0 and then sends continuation fragments carrying only
+    # that index, so the index alone does not identify a call: two models
+    # streaming at once (parallel tasks of the same node) both open at index 0,
+    # and keying on the bare index splices one call's arguments onto the other's.
+    by_index: dict[tuple[str, int], str] = {}
 
     def register(cid: str | None, name: str, args: str) -> tuple[str, dict[str, Any]]:
         cid = cid or f"call_{next(_call_ids)}"
@@ -672,6 +708,16 @@ async def _stream_events(graph: Any, inputs: dict[str, Any], config: RunnableCon
         # count toward the turn's cost even though its text isn't shown.
         din, dout, dcache, dwrite = _usage_delta(getattr(chunk, "usage_metadata", None))
         if din or dout or dcache or dwrite:
+            if own and din and stats is not None:
+                # How full the context is = the input of the LAST model call, not
+                # the sum of the turn's calls. A ReAct turn re-sends the growing
+                # history on every step, so the sum counts the same context over
+                # and over: ten steps at ~20k read as 200k, which shows a ctx%
+                # gauge past 100% and trips auto-compaction on a context that
+                # never came close to the window. A subagent's calls are excluded
+                # for the same reason — they run in their own context, not this
+                # thread's.
+                stats["last_input"] = din
             yield AgentEvent(
                 "usage", "", tokens_in=din, tokens_out=dout,
                 tokens_cache=dcache, tokens_cache_write=dwrite,
@@ -695,39 +741,49 @@ async def _stream_events(graph: Any, inputs: dict[str, Any], config: RunnableCon
                 for ev in _fired_alerts():
                     yield ev
         elif isinstance(chunk, AIMessageChunk):
-            for tc in chunk.tool_call_chunks:
-                idx, cid = tc.get("index"), tc.get("id")
-                if cid and cid in calls:  # provider repeats ids every chunk
-                    entry = calls[cid]
-                elif cid:  # first chunk of a new call
-                    cid, entry = register(cid, tc.get("name") or "", "")
-                    if idx is not None:
-                        by_index[idx] = cid
-                else:  # continuation chunks carry only the index
-                    cid = by_index.get(idx) if idx is not None else None
-                    if cid is None:
-                        cid, entry = register(None, tc.get("name") or "", "")
-                        if idx is not None:
-                            by_index[idx] = cid
-                    else:
+            # Only the agent's OWN calls become panels. A model running inside a
+            # tool (a subagent, report synthesis) announces its tool calls on this
+            # same stream, but it runs its own tool node in its own graph — so the
+            # matching ToolMessage never reaches this stream and the panel would
+            # spin "running" for the rest of the session, with no result to close
+            # it. That work is reported in the result of the tool that spawned it.
+            if own:
+                ns = (meta or {}).get("checkpoint_ns") or ""
+                for tc in chunk.tool_call_chunks:
+                    idx, cid = tc.get("index"), tc.get("id")
+                    slot = (ns, idx) if idx is not None else None
+                    if cid and cid in calls:  # provider repeats ids every chunk
                         entry = calls[cid]
-                name = tc.get("name")
-                if name and not entry["announced"] and name != entry["name"]:
-                    entry["name"] += name  # fragmented names concatenate
-                entry["args"] += tc.get("args") or ""
-                if (
-                    not entry["announced"]
-                    and entry["name"]
-                    and _args_complete(entry["args"])
-                ):
-                    ev = _announce(cid, entry)  # None for the think tool (deferred)
-                    if ev is not None:
-                        yield ev
+                    elif cid:  # first chunk of a new call
+                        cid, entry = register(cid, tc.get("name") or "", "")
+                        if slot is not None:
+                            by_index[slot] = cid
+                    else:  # continuation chunks carry only the index
+                        cid = by_index.get(slot) if slot is not None else None
+                        if cid is None:
+                            cid, entry = register(None, tc.get("name") or "", "")
+                            if slot is not None:
+                                by_index[slot] = cid
+                        else:
+                            entry = calls[cid]
+                    name = tc.get("name")
+                    if name and not entry["announced"] and name != entry["name"]:
+                        entry["name"] += name  # fragmented names concatenate
+                    entry["args"] += tc.get("args") or ""
+                    if (
+                        not entry["announced"]
+                        and entry["name"]
+                        and _args_complete(entry["args"])
+                    ):
+                        ev = _announce(cid, entry)  # None for the think tool (deferred)
+                        if ev is not None:
+                            yield ev
             text = _chunk_text(chunk)
             if text and own:
                 yield AgentEvent("token", text)
-        elif isinstance(chunk, AIMessage):
-            # Complete message from a non-streaming node: whole tool calls.
+        elif isinstance(chunk, AIMessage) and own:
+            # Complete message from a non-streaming node: whole tool calls. Gated
+            # on ownership for the same reason as the streamed chunks above.
             for tc in chunk.tool_calls:
                 cid = tc.get("id")
                 if cid and cid in calls:
@@ -897,13 +953,24 @@ async def run_turn(
     events (and the fake graph's reasoning), so no 💭 trace is produced.
     """
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
-    # Long-term memory (opt-in via MEMORY_BACKEND): recall relevant durable facts
-    # AND few-shot guidance from earlier feedback (👍/👎 on similar questions),
-    # inject both into the prompt; remember the exchange after the answer.
-    mem = get_memory()
-    content, recall_status = _recall_and_frame(user_msg)
-    inputs = {"messages": [{"role": "user", "content": content}]}
     try:
+        # Long-term memory (opt-in via MEMORY_BACKEND): recall relevant durable
+        # facts AND few-shot guidance from earlier feedback (👍/👎 on similar
+        # questions), inject both into the prompt; remember the exchange after the
+        # answer. Guarded, and inside the try: the backend is a file store or a
+        # network service that can be down, and the user asked a QUESTION — losing
+        # the recalled context degrades the answer, losing the turn cancels it.
+        try:
+            mem = get_memory()
+            content, recall_status = _recall_and_frame(user_msg)
+        except Exception as e:  # noqa: BLE001 - any backend, any failure
+            mem, content, recall_status = None, user_msg, None
+            yield AgentEvent(
+                "status",
+                "long-term memory unavailable — answering without recalled facts: "
+                + describe_error(e),
+            )
+        inputs = {"messages": [{"role": "user", "content": content}]}
         if recall_status:
             yield AgentEvent("status", recall_status)
         # Auto-compaction: if the previous turn's input reached the configured
@@ -915,9 +982,23 @@ async def run_turn(
             prev = _last_input.get(session_id, 0)
             cap = context_cap(_resolved_model(model))
             if prev and prev >= cap * frac:
-                res = await compact_session(
-                    session_id, fake=fake, model=model, think=think
-                )
+                try:
+                    res = await compact_session(
+                        session_id, fake=fake, model=model, think=think
+                    )
+                except Exception as e:  # noqa: BLE001 - summarizer or checkpoint store
+                    # Clearing the trigger is the point of catching this. Left set,
+                    # the same failing compaction would run before EVERY later turn
+                    # on this session — one summarizer outage would brick the thread
+                    # for good, and the user would see an error instead of the
+                    # answer their (uncompacted, still valid) context can produce.
+                    _last_input[session_id] = 0
+                    res = {}
+                    yield AgentEvent(
+                        "status",
+                        "auto-compaction failed — continuing with the full context: "
+                        + describe_error(e),
+                    )
                 if res.get("removed"):
                     _last_input[session_id] = 0
                     yield AgentEvent(
@@ -928,6 +1009,9 @@ async def run_turn(
                         # before this (compacted) turn even runs.
                         context_tokens=0,
                     )
+        switched = _memory_reset_note(session_id, model, think)
+        if switched:
+            yield AgentEvent("status", switched)
         # Built inside the try: real mode raises here when no model is
         # configured, and that must surface as an "error" event too.
         # Enter the per-turn graph context: for real mode this opens the IBKR MCP
@@ -959,13 +1043,14 @@ async def run_turn(
             parts: list[str] = []
             called_tools: set[str] = set()  # for the unbacked-claim check below
             emitted_in = emitted_out = emitted_cache = emitted_write = 0  # live usage already yielded
+            stats: dict[str, Any] = {}  # out-of-band figures from the stream
             cb_ctx = (
                 get_usage_metadata_callback()
                 if get_usage_metadata_callback is not None
                 else contextlib.nullcontext()
             )
             with cb_ctx as cb:
-                async for ev in _stream_events(graph, inputs, config):
+                async for ev in _stream_events(graph, inputs, config, stats):
                     if ev.kind == "reasoning" and not think:
                         continue  # thinking disabled: drop the reasoning trace
                     if ev.kind == "tool_end":
@@ -990,10 +1075,24 @@ async def run_turn(
                     getattr(cb, "usage_metadata", None)
                 )
             if mem:
-                mem.remember(user_msg, answer)  # persist the exchange for future turns
-            # Remember this turn's input size so the next turn can decide whether to
-            # auto-compact (see the pre-turn check above).
-            _last_input[session_id] = tokens_in
+                try:
+                    mem.remember(user_msg, answer)  # persist for future turns
+                except Exception as e:  # noqa: BLE001 - the answer is already paid for
+                    # The turn is DONE and billed; the answer is in hand. Turning
+                    # that into an error event would throw it away over a failed
+                    # write to an optional store.
+                    yield AgentEvent(
+                        "status",
+                        "could not save this exchange to long-term memory: "
+                        + describe_error(e),
+                    )
+            # The context this turn actually ran in: the last model call's input
+            # (see _stream_events), not the sum over its calls. Falls back to the
+            # callback total when the provider streams no per-call usage — a turn
+            # that reports usage only once is one call, so the two agree. Also what
+            # the next turn's auto-compaction check reads.
+            context_in = stats.get("last_input") or tokens_in
+            _last_input[session_id] = context_in
             # Reconcile: emit only the remainder beyond what streamed live, so the
             # per-call deltas plus this event sum to the authoritative callback
             # total. A provider that never streams per-call usage emits nothing
@@ -1009,7 +1108,7 @@ async def run_turn(
                 # Authoritative context size for this turn (same figure the
                 # auto-compaction threshold uses), so the footer's ctx% reflects
                 # how full the window is now — not the cumulative session input.
-                context_tokens=tokens_in,
+                context_tokens=context_in,
             )
             yield AgentEvent(
                 "final",

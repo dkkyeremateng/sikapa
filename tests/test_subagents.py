@@ -34,6 +34,22 @@ def test_final_text_prefers_last_ai_message():
     assert subagents._final_text({"messages": []}) == ""
 
 
+def test_findings_come_back_as_prose_from_a_block_provider():
+    """These findings go straight into the primary agent's context as a tool
+    result. From an Anthropic-style provider the reply is a LIST of typed blocks,
+    and `str()` on it returned a Python repr — the findings buried in dict syntax
+    alongside the subagent's raw chain-of-thought, which the primary agent then
+    quotes back as research."""
+    result = {"messages": [
+        HumanMessage(content="research NVDA"),
+        AIMessage(content=[
+            {"type": "thinking", "thinking": "I should check the last 10-Q first"},
+            {"type": "text", "text": "NVDA revenue was $35.1B (Q3 FY25, 10-Q)."},
+        ]),
+    ]}
+    assert subagents._final_text(result) == "NVDA revenue was $35.1B (Q3 FY25, 10-Q)."
+
+
 def test_subagent_toolset_excludes_dispatch_tools():
     """Recursion guard: a subagent must not receive the dispatch tools, so it can
     never spawn further subagents."""
@@ -42,6 +58,39 @@ def test_subagent_toolset_excludes_dispatch_tools():
     assert not (names & {"dispatch_subagent", "dispatch_subagents"})
     # …but it does get the ordinary research tools.
     assert "stock_fundamentals" in names and "price_history_chart" in names
+
+
+def test_a_subagent_is_never_given_a_tool_that_acts_on_the_user(monkeypatch):
+    """The pool a subagent draws from is the primary agent's whole catalog, which
+    includes the tools that act: `schedule_task` books recurring model spend,
+    `render_report` pushes a file to the user's phone, `add_alert` starts sending
+    notifications. A subagent is handed a task by the MODEL, and the no-match
+    fallback used to hand it everything — so an unanticipated phrasing was all it
+    took for delegated grunt-work to commit the user to something."""
+    def names(task=""):
+        return {catalog.tool_name(t) for t in subagents._subagent_tools(task)}
+
+    forbidden = {
+        "schedule_task", "cancel_scheduled_task", "add_alert", "remove_alert",
+        "record_thesis", "render_report", "import_ibkr_statement",
+        "ingest_document", "forget_document",
+    }
+    # The bootstrap tools among these are bound unconditionally (that is how their
+    # store gets its first row), so they really are in the pool to be withheld —
+    # without this the assertions below could pass on tools that aren't there.
+    catalog_names = {catalog.tool_name(t) for t in catalog.TOOLS}
+    assert {"schedule_task", "add_alert", "record_thesis", "render_report",
+            "import_ibkr_statement", "ingest_document"} <= catalog_names
+    # The no-match fallback ("give it everything") — the case that put them there.
+    fallback = names("xyzzy plugh")
+    assert not (fallback & forbidden)
+    assert "stock_fundamentals" in fallback  # still a full research toolset
+    # …and the routed paths that name those very groups.
+    assert not (names("set an alert if NVDA drops and import my statement") & forbidden)
+    assert not (names("read the attached document and schedule a review") & forbidden)
+    # …and the escape hatch, which is about keyword routing, not about consent.
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SUBAGENT_ALL_TOOLS", "1")
+    assert not (names() & forbidden)
 
 
 def test_subagent_prompt_guards_untrusted_content_and_file_paths():

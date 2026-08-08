@@ -1,9 +1,12 @@
 import asyncio
-from typing import cast
+from typing import Any, cast
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.types import Send
 
 
 def scripted_tool_graph():
@@ -137,6 +140,176 @@ def nested_model_graph():
     )
     g.add_edge("tools", "model")
     return g.compile()
+
+
+class ScriptedChunkModel(BaseChatModel):
+    """A chat model that streams a fixed list of ``AIMessageChunk``s.
+
+    The real providers announce a tool call INCREMENTALLY — a first chunk with the
+    id and the opening of the arguments, then continuation chunks carrying only an
+    index and more argument text, with the name itself sometimes split across
+    them. No fake model in langchain-core emits that shape, so the adapter's
+    chunk-pairing path (``by_index`` routing, fragmented names, the
+    ``_args_complete`` gate) had no offline coverage. This scripts it.
+    """
+
+    chunks: list[Any] = []
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-chunks"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))])
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        for chunk in self.chunks:
+            yield ChatGenerationChunk(message=chunk)
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        for chunk in self.chunks:
+            await asyncio.sleep(0)  # yield the loop so concurrent models interleave
+            yield ChatGenerationChunk(message=chunk)
+
+
+def tool_call_chunk(index: int, name: str | None, args: str, call_id: str | None = None):
+    """One streamed tool-call fragment, in the shape a provider sends it."""
+    return AIMessageChunk(content="", tool_call_chunks=[{
+        "index": index, "id": call_id, "name": name, "args": args,
+        "type": "tool_call_chunk",
+    }])
+
+
+def interleaved_chunk_graph():
+    """Two models streaming a tool call AT THE SAME TIME, in separate tasks of the
+    same node — the shape a fan-out produces. Both number their call index 0 and
+    send id-less continuation fragments, so the index alone cannot say which call a
+    fragment belongs to, and the two argument streams are distinguishable
+    (``NVDA`` vs ``AAPL``) precisely so a mix-up is visible."""
+
+    scripts = {
+        "price": [
+            tool_call_chunk(0, "price_", '{"symbol": '),
+            tool_call_chunk(0, "history", '"NVDA"}'),  # the name arrives in pieces too
+        ],
+        "news": [
+            tool_call_chunk(0, "news_", '{"query": '),
+            tool_call_chunk(0, "search", '"AAPL"}'),
+        ],
+    }
+
+    async def model(state: MessagesState):
+        which = str(state["messages"][-1].content)
+        llm = ScriptedChunkModel(chunks=scripts[which])
+        async for _ in llm.astream([HumanMessage(content="go")]):
+            pass
+        return {"messages": [AIMessage(content=f"done {which}")]}
+
+    g = StateGraph(MessagesState)
+    g.add_node("model", model)
+    g.add_conditional_edges(
+        START,
+        lambda _s: [
+            Send("model", {"messages": [HumanMessage(content=w)]}) for w in scripts
+        ],
+        ["model"],
+    )
+    g.add_edge("model", END)
+    return g.compile()
+
+
+def subagent_chunk_graph():
+    """The agent calls a tool, and a model running INSIDE that tool announces a
+    tool call of its own — what a subagent (or report synthesis) does, streaming
+    into the parent's callbacks. Its own tool node is in another graph, so no
+    matching result ever reaches this stream."""
+
+    async def tools(state: MessagesState):
+        llm = ScriptedChunkModel(chunks=[
+            tool_call_chunk(0, "schedule_task", '{"when": "daily"}', call_id="sub1"),
+        ])
+        async for _ in llm.astream([HumanMessage(content="delegated")]):
+            pass
+        last = cast(AIMessage, state["messages"][-1])
+        return {
+            "messages": [
+                ToolMessage(content="findings", tool_call_id=tc["id"], name=tc["name"])
+                for tc in last.tool_calls
+            ]
+        }
+
+    def model(state: MessagesState):
+        if any(isinstance(m, ToolMessage) for m in state["messages"]):
+            return {"messages": [AIMessage(content="done")]}
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "dispatch_subagent", "args": {"task": "x"},
+                                 "id": "d1"}],
+                )
+            ]
+        }
+
+    g = StateGraph(MessagesState)
+    g.add_node("model", model)
+    g.add_node("tools", tools)
+    g.add_edge(START, "model")
+    g.add_conditional_edges(
+        "model",
+        lambda s: "tools" if cast(AIMessage, s["messages"][-1]).tool_calls else END,
+    )
+    g.add_edge("tools", "model")
+    return g.compile()
+
+
+def usage_reporting_graph(checkpointer=None):
+    """A two-step ReAct turn that reports token usage the way a provider does: one
+    figure per MODEL CALL, each re-sending the conversation so far, plus a model
+    inside the tool reporting its own (separate, much larger) context. Compiled
+    with a checkpointer because a turn that streams no token chunks reads its
+    answer back from state."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    def usage(tokens_in: int, tokens_out: int) -> dict[str, int]:
+        return {"input_tokens": tokens_in, "output_tokens": tokens_out,
+                "total_tokens": tokens_in + tokens_out}
+
+    async def tools(state: MessagesState):
+        llm = ScriptedChunkModel(chunks=[
+            AIMessageChunk(content="sub", usage_metadata=usage(90_000, 500)),
+        ])
+        async for _ in llm.astream([HumanMessage(content="delegated")]):
+            pass
+        last = cast(AIMessage, state["messages"][-1])
+        return {
+            "messages": [
+                ToolMessage(content="findings", tool_call_id=tc["id"], name=tc["name"])
+                for tc in last.tool_calls
+            ]
+        }
+
+    def model(state: MessagesState):
+        if any(isinstance(m, ToolMessage) for m in state["messages"]):
+            return {"messages": [
+                AIMessage(content="the answer", usage_metadata=usage(30_000, 200))
+            ]}
+        return {"messages": [AIMessage(
+            content="",
+            tool_calls=[{"name": "dispatch_subagent", "args": {"task": "x"}, "id": "d1"}],
+            usage_metadata=usage(20_000, 100),
+        )]}
+
+    g = StateGraph(MessagesState)
+    g.add_node("model", model)
+    g.add_node("tools", tools)
+    g.add_edge(START, "model")
+    g.add_conditional_edges(
+        "model",
+        lambda s: "tools" if cast(AIMessage, s["messages"][-1]).tool_calls else END,
+    )
+    g.add_edge("tools", "model")
+    return g.compile(checkpointer=checkpointer or MemorySaver())
 
 
 def scripted_think_graph():
