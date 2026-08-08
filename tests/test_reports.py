@@ -5,6 +5,8 @@ binary), and no channel sends anything real.
 """
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -115,7 +117,7 @@ def test_a_throwing_file_channel_is_recorded_not_raised(file_channels):
 
 
 def test_the_tool_reports_where_the_file_went(monkeypatch, tmp_path):
-    monkeypatch.setattr(reports, "render", lambda html, name, content=None: {
+    monkeypatch.setattr(reports, "render", lambda html, name, content=None, theme="", output="": {
         "html": str(tmp_path / "r.html"), "png": str(tmp_path / "r.png"),
     })
     monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="", full_quality=False: (["telegram"], []))
@@ -124,7 +126,7 @@ def test_the_tool_reports_where_the_file_went(monkeypatch, tmp_path):
 
 
 def test_the_tool_says_so_when_nothing_can_receive_a_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(reports, "render", lambda html, name, content=None: {"png": str(tmp_path / "r.png")})
+    monkeypatch.setattr(reports, "render", lambda html, name, content=None, theme="", output="": {"png": str(tmp_path / "r.png")})
     monkeypatch.setattr(channels, "deliver_file", lambda p, caption="", prefer="", full_quality=False: ([], []))
     assert "No channel accepted a file" in reports.render_report("t", "b", allow_prose=True)
 
@@ -139,7 +141,7 @@ def test_with_no_renderer_at_all_the_html_still_survives(monkeypatch, tmp_path):
     )
     assert set(paths) == {"html"}
 
-    monkeypatch.setattr(reports, "render", lambda html, name, content=None: paths)
+    monkeypatch.setattr(reports, "render", lambda html, name, content=None, theme="", output="": paths)
     out = reports.render_report("t", "b", deliver=False, allow_prose=True)
     assert "Could not produce a PDF" in out
 
@@ -257,7 +259,7 @@ def test_the_sheet_is_sent_uncompressed(monkeypatch, tmp_path):
     """sendPhoto re-encodes to JPEG and downscales, which turns dense body text to
     mush regardless of the render resolution. The sheet must go as a document."""
     seen: list[bool] = []
-    monkeypatch.setattr(reports, "render", lambda html, name, content=None: {"png": str(tmp_path / "r.png")})
+    monkeypatch.setattr(reports, "render", lambda html, name, content=None, theme="", output="": {"png": str(tmp_path / "r.png")})
     monkeypatch.setattr(
         channels, "deliver_file",
         lambda p, caption="", prefer="", full_quality=False: (
@@ -1071,12 +1073,80 @@ def test_an_image_only_render_drops_the_attachment_line(monkeypatch, tmp_path, r
     assert "Summary of a" in text, "the page count is still worth stating"
 
 
-def test_a_per_report_theme_overrides_the_default_and_is_restored(monkeypatch, tmp_path):
+def test_a_per_report_theme_reaches_the_render_as_an_argument(monkeypatch, tmp_path):
+    """One report's theme travels down the call, not through the environment: the
+    configured default is never written, so it cannot be read back."""
     monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "light")
-    seen: list[str] = []
-    monkeypatch.setattr(reports, "render",
-                        lambda *a, **k: seen.append(reports.cover_theme()) or {})
+    seen: list[dict] = []
+    monkeypatch.setattr(reports, "render", lambda *a, **k: seen.append(k) or {})
     reports.render_report("t", "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n",
                           deliver=False, theme="dark")
-    assert seen == ["dark"]
-    assert reports.cover_theme() == "light", "the environment must be left as found"
+    assert seen[0]["theme"] == "dark"
+    assert reports.cover_theme("dark") == "dark"      # the override wins where used
+    assert reports.cover_theme() == "light"           # the default is untouched
+
+
+def test_one_reports_theme_cannot_bleed_into_a_concurrent_one(monkeypatch, tmp_path):
+    """The adapter runs tools in threads, so two render_report calls overlap. The
+    dark one used to publish its theme process-wide, and the light one drew its
+    cover in dark — the bug this argument-passing exists to prevent."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORT_THEME", "light")
+    md = "## S\n\n- **A:** 10%\n- **B:** 20%\n- **C:** 30%\n"
+    seen: list[tuple[str, str]] = []
+    barrier = threading.Barrier(2)
+
+    def fake_pdf(pdf, *a, **k):
+        # Rendezvous #1: neither call resolves its cover theme until BOTH are
+        # inside a render, so a theme announced process-wide is guaranteed to be
+        # in force while the other call reads it.
+        barrier.wait(timeout=5)
+        Path(pdf).write_bytes(b"%PDF-1.4")
+        return True
+
+    def fake_build_cover(out_dir, stem, content, pages, chrome, attached=True):
+        # Rendezvous #2: neither call may finish (and undo a process-wide theme)
+        # until both have resolved theirs.
+        barrier.wait(timeout=5)
+        seen.append((content["title"], reports.report_theme()))
+        return None
+
+    monkeypatch.setattr(reports, "_build_cover", fake_build_cover)
+    monkeypatch.setattr(reports, "_chrome_pdf", lambda *a, **k: False)
+    monkeypatch.setattr(reports, "_fpdf_pdf", fake_pdf)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(reports.render_report, "dark one", md, deliver=False, theme="dark"),
+            pool.submit(reports.render_report, "light one", md, deliver=False, theme=""),
+        ]
+        for f in futures:
+            f.result()
+    assert dict(seen) == {"dark one": "dark", "light one": "light"}
+
+
+def test_a_render_without_pypdfium2_does_not_claim_zero_pages(monkeypatch, tmp_path):
+    """`page_count` needs an optional dependency. Reporting "Rendered 0 page(s)"
+    for a PDF that is on disk and about to be delivered reads as a failure."""
+    monkeypatch.setattr(reports, "render", lambda *a, **k: {
+        "pdf": str(tmp_path / "r.pdf"), "renderer": "fpdf2",
+    })
+    monkeypatch.setattr(reports, "page_count", lambda p: 0)  # no pypdfium2
+    out = reports.render_report("t", "Just prose.", deliver=False, allow_prose=True)
+    assert "0 page(s)" not in out
+    assert out.startswith("Rendered a PDF with fpdf2")
+
+
+def test_two_reports_rendered_in_the_same_second_do_not_overwrite(monkeypatch, tmp_path):
+    """The stem is title + timestamp to the second, so a batch that renders two
+    reports on one subject used to write both over the same files — the first
+    report's PDF replaced by the second's while the caller was told it was saved."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_REPORTS_DIR", str(tmp_path))
+    monkeypatch.setattr(reports, "chrome_path", lambda: "")
+    monkeypatch.setattr(reports, "_fpdf_pdf",
+                        lambda pdf, *a, **k: bool(Path(pdf).write_bytes(b"%PDF-1.4")) or True)
+    payload = {"title": "NVDA", "markdown": "## S\n\n- **A:** 10%\n"}
+    first = reports.render(reports.build_html(**payload), "NVDA", content=payload)
+    second = reports.render(reports.build_html(**payload), "NVDA", content=payload)
+    assert first["html"] != second["html"]
+    assert first["pdf"] != second["pdf"]
+    assert Path(first["pdf"]).exists() and Path(second["pdf"]).exists()

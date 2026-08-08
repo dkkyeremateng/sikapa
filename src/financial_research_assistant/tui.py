@@ -966,6 +966,18 @@ class AgentApp(App[Any]):
             self._processing.stop()
             self._processing = None
 
+    def _render_error(self, text: str) -> None:
+        """Show a failed turn where the reader is already looking — on the spinner
+        that was waiting on it, or as a log line when nothing is spinning — and
+        mark the run non-zero. Shared by the adapter's `error` event and by an
+        exception the adapter never classified, so both read identically."""
+        if self._processing is not None:
+            self._processing.mark_error(text)
+            self._processing = None
+        else:
+            self._line(f"error  {text}", "bold red")
+        self._exit_code = 1
+
     def _set_thinking(self, on: bool) -> None:
         """Enable/disable reasoning: gates the 💭 trace and (in real mode) whether
         the agent gets the `think` tool. Applies to the next query."""
@@ -1038,6 +1050,17 @@ class AgentApp(App[Any]):
                 palette.display = True
                 return
         palette.display = False
+
+    def _close_palette(self) -> bool:
+        """Hide the slash-command palette, reporting whether it was open."""
+        try:
+            palette = self.query_one("#command-list", OptionList)
+        except Exception:  # palette not on the active screen (modal / teardown)
+            return False
+        if not palette.display:
+            return False
+        palette.display = False
+        return True
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         # Modal inputs (ModelScreen) handle their own submit.
@@ -1163,6 +1186,13 @@ class AgentApp(App[Any]):
         self._reset_tokens()
         self._follow = True
         self._logview().remove_children()
+        # /copy, /good and /bad act on "the last exchange". That exchange belongs
+        # to the conversation just closed and is no longer on screen, so leaving
+        # the handles pointing at it would file the PREVIOUS thread's Q/A as an
+        # exemplar memory. /resume repoints them at what it replays; here there is
+        # nothing yet, so they say so instead.
+        self._last_user = ""
+        self._last_answer = ""
         self._line(f"new conversation: {self.session_id}", "dim")
         self._line(_READY, "dim")
 
@@ -1662,6 +1692,12 @@ class AgentApp(App[Any]):
     # -- actions ------------------------------------------------------------
 
     def action_cancel_turn(self) -> None:
+        # Esc is bound app-wide, so it is also the only key that dismisses the
+        # slash palette — and the palette can be open while a turn streams
+        # underneath it. Closing it wins: "get this list off my screen" must
+        # never be the gesture that throws away a turn's tool calls and tokens.
+        if self._close_palette():
+            return
         if not self._busy:
             return
         if self._compacting:
@@ -1891,12 +1927,7 @@ class AgentApp(App[Any]):
                     self._follow_end(log)
                 elif ev.kind == "error":
                     turn_errored = True
-                    if self._processing is not None:
-                        self._processing.mark_error(ev.text)
-                        self._processing = None
-                    else:
-                        self._line(f"error  {ev.text}", "bold red")
-                    self._exit_code = 1
+                    self._render_error(ev.text)
             # Per-turn verdict: a clean turn resets a sticky error exit code, so
             # /quit after later successes exits 0 (and --once keeps its signal).
             self._exit_code = 1 if turn_errored else 0
@@ -1906,6 +1937,20 @@ class AgentApp(App[Any]):
                 except OSError as e:  # disk full/permissions must not kill the app
                     self._line(f"could not save the turn to the transcript: {e}", "dim red")
             if self.once:
+                self.exit(return_code=self._exit_code)
+        except Exception as exc:  # noqa: BLE001 - the worker must not take the app down
+            # `@work` defaults to exit_on_error=True, so anything the adapter did
+            # not already turn into an `error` event would tear the whole app down
+            # with a traceback — taking the visible transcript, the queued
+            # messages and every other conversation with it. A failure the adapter
+            # didn't classify is still just a failed turn: render it like one and
+            # keep the session alive.
+            from .adapter import describe_error
+
+            self._render_error(describe_error(exc))
+            if self.once:
+                # --once exits on the turn's verdict; without this the harness
+                # would sit at a prompt nobody is watching.
                 self.exit(return_code=self._exit_code)
         finally:
             self._stop_processing()

@@ -27,6 +27,7 @@ from typing import Any
 import json
 import os
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
 from .storage import write_private
@@ -136,6 +137,38 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "doc"
 
 
+@contextmanager
+def _locked():
+    """Serialize read-modify-write on the index across processes.
+
+    Every write is a full rewrite, and the read that precedes it is a separate
+    syscall with an arbitrary amount of work in between — an embedding backfill
+    holds its copy across a network round-trip. So an ingest that finishes inside
+    that window is silently erased when the older copy is written back: the unit of
+    loss is a whole document, not a chunk. The adapter runs tools in threads and a
+    scheduled run is a second process, so both racers are real. POSIX-only; without
+    ``fcntl`` this degrades to no locking rather than failing, the same trade
+    ``tasks.py`` makes for its store.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        yield
+        return
+    path = _index_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".lock")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _load_index() -> list[dict[str, Any]]:
     path = _index_path()
     if not path.exists():
@@ -170,8 +203,9 @@ def _write_index(records: list[dict[str, Any]]) -> None:
 
 def _store_chunks(doc: str, rows: list[dict[str, Any]]) -> None:
     """Replace any existing chunks for ``doc`` with ``rows`` (re-ingest overwrites)."""
-    kept = [r for r in _load_index() if r.get("doc") != doc]
-    _write_index(kept + rows)
+    with _locked():
+        kept = [r for r in _load_index() if r.get("doc") != doc]
+        _write_index(kept + rows)
 
 
 # --- Embedding ---------------------------------------------------------------
@@ -188,10 +222,15 @@ def _embed_chunks(texts: list[str]) -> list[list[Any] | None]:
     return list(vecs)
 
 
-def _maybe_backfill_embeddings(records: list[dict[str, Any]], all_records: list[dict[str, Any]]) -> None:
+def _chunk_key(r: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """Identity of a chunk across a re-read of the index (it carries no id)."""
+    return (r.get("doc"), r.get("page"), r.get("text"))
+
+
+def _maybe_backfill_embeddings(records: list[dict[str, Any]]) -> None:
     """Embed any chunks in ``records`` that still lack a vector — IF an embeddings
-    endpoint is now available — and persist the whole index. So a document ingested
-    in keyword-only mode (no endpoint at ingest time) upgrades to semantic search on
+    endpoint is now available — and persist them. So a document ingested in
+    keyword-only mode (no endpoint at ingest time) upgrades to semantic search on
     a later ask, instead of staying keyword-only forever; the write makes it a
     one-time cost. A cheap no-op (``embed_texts`` returns None without a network
     call) when embeddings are unavailable, so keyword-only setups pay nothing."""
@@ -205,13 +244,26 @@ def _maybe_backfill_embeddings(records: list[dict[str, Any]], all_records: list[
     vecs = embed_texts([r["text"] for r in missing])
     if not vecs or len(vecs) != len(missing):
         return  # no endpoint / failure → stay keyword
-    changed = False
+    fresh = {}
     for r, v in zip(missing, vecs):
-        if v:  # records are shared objects in all_records, so this updates both
-            r["vec"] = v
-            changed = True
-    if changed:
-        _write_index(all_records)
+        if v:
+            r["vec"] = v  # the caller ranks with it on this call regardless
+            fresh[_chunk_key(r)] = v
+    if not fresh:
+        return
+    # Re-read the index under the lock rather than writing back the copy loaded
+    # before the embedding call: that call is a network round-trip, and anything
+    # ingested while it was in flight would be erased by the stale copy.
+    with _locked():
+        stored = _load_index()
+        changed = False
+        for r in stored:
+            v = fresh.get(_chunk_key(r))
+            if v and not r.get("vec"):
+                r["vec"] = v
+                changed = True
+        if changed:
+            _write_index(stored)
 
 
 # --- Retrieval ---------------------------------------------------------------
@@ -225,19 +277,33 @@ def _keyword_score(query: str, text: str) -> tuple[int, int]:
     return (matched, occ)
 
 
-def _rank(query: str, records: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
-    """Rank chunks for a query: cosine over embedded chunks when the query can be
-    embedded, else keyword overlap. Keyword is always the fallback so retrieval
-    works with no embeddings endpoint."""
-    vecs = [r for r in records if r.get("vec")]
-    if vecs:
-        ranked = _semantic_rank(query, vecs, k)
-        if ranked is not None:
-            return ranked
+def _keyword_rank(query: str, records: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
+    """The best ``k`` chunks by term overlap, dropping the ones that match nothing."""
     scored = [(_keyword_score(query, r["text"]), r) for r in records]
     scored = [(s, r) for s, r in scored if s[0] > 0]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [r for _, r in scored[:k]]
+
+
+def _rank(query: str, records: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
+    """Rank chunks for a query: cosine over embedded chunks when the query can be
+    embedded, else keyword overlap. Keyword is always the fallback so retrieval
+    works with no embeddings endpoint.
+
+    Any remaining slot is filled by keyword from the chunks that carry no usable
+    vector, mirroring ``SemanticMemory.rank``'s top-up. Ranking the embedded ones
+    alone made a document ingested during an embeddings outage invisible to every
+    later search — the store says it is there, `list_documents` lists it, and no
+    query can ever reach it."""
+    embedded = [r for r in records if r.get("vec")]
+    plain = [r for r in records if not r.get("vec")]
+    if embedded:
+        ranked = _semantic_rank(query, embedded, k)
+        if ranked is not None:
+            if len(ranked) >= k or not plain:
+                return ranked
+            return (ranked + _keyword_rank(query, plain, k - len(ranked)))[:k]
+    return _keyword_rank(query, records, k)
 
 
 def _semantic_rank(query: str, records: list[dict[str, Any]], k: int) -> list[dict[str, Any]] | None:
@@ -331,7 +397,7 @@ def ask_document(query: str, doc: str = "", max_passages: int = 4) -> str:
 
     # Upgrade keyword-only chunks to semantic if an embeddings endpoint is now
     # available (persisted, so it's a one-time cost); no-op otherwise.
-    _maybe_backfill_embeddings(records, all_records)
+    _maybe_backfill_embeddings(records)
 
     k = max(1, min(int(max_passages or 4), 10))
     hits = _rank(query.strip(), records, k)
@@ -388,12 +454,13 @@ def forget_document(doc: str) -> str:
     is no longer searched by ``ask_document``. Use for 'forget / delete / remove the
     document X'."""
     doc = (doc or "").strip().lower()
-    records = _load_index()
-    kept = [r for r in records if r.get("doc") != doc]
-    if len(kept) == len(records):
-        have = ", ".join(sorted({r["doc"] for r in records})) or "(none)"
-        return f"No ingested document named '{doc}'. Available: {have}."
-    _write_index(kept)
+    with _locked():
+        records = _load_index()
+        kept = [r for r in records if r.get("doc") != doc]
+        if len(kept) == len(records):
+            have = ", ".join(sorted({r["doc"] for r in records})) or "(none)"
+            return f"No ingested document named '{doc}'. Available: {have}."
+        _write_index(kept)
     return f"Removed '{doc}' ({len(records) - len(kept)} chunks) from the document store."
 
 

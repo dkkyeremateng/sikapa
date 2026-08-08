@@ -857,3 +857,36 @@ def test_set_preserves_other_scopes():
     auth.set_credential("default", {"type": "api_key", "key": "c"})
     assert auth.resolve_key("default") == "c"
     assert auth.resolve_key("quick") == "b"
+
+
+def test_v1_tiers_sharing_a_provider_keep_their_own_keys():
+    """v1 gave each TIER its own credential, so two tiers could hold different keys
+    for one provider — a personal key on `default`, a work key on `quick`. Keying
+    the migration purely by provider name merged them last-wins, and the losing
+    tier silently started billing the other tier's key."""
+    auth.auth_file().parent.mkdir(parents=True, exist_ok=True)
+    auth.auth_file().write_text(json.dumps({"version": 1, "credentials": {
+        "default": {"provider": "openai", "type": "api_key", "key": "personal"},
+        "quick": {"provider": "openai", "type": "api_key", "key": "work"},
+    }}), encoding="utf-8")
+
+    assert auth.resolve_key("default") == "personal"
+    assert auth.resolve_key("quick") == "work"
+    assert len(auth.credentials()) == 2, "both credentials survived the migration"
+    # Each tier still points at its own, and both are selectable by name.
+    assert auth.active("default") != auth.active("quick")
+    assert auth.activate(auth.active("quick"), "subagent") is True
+    assert auth.resolve_key("subagent") == "work"
+
+
+def test_v1_tiers_sharing_one_credential_are_not_duplicated():
+    """The same credential on two tiers is one credential — deduplicating it is the
+    whole point of the v2 layout, and must survive the collision handling."""
+    cred = {"provider": "openai", "type": "api_key", "key": "same"}
+    auth.auth_file().parent.mkdir(parents=True, exist_ok=True)
+    auth.auth_file().write_text(
+        json.dumps({"version": 1, "credentials": {"default": cred, "quick": cred}}),
+        encoding="utf-8",
+    )
+    assert auth.providers() == ["openai"]
+    assert auth.resolve_key("default") == auth.resolve_key("quick") == "same"

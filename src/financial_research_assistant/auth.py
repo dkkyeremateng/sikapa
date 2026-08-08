@@ -146,6 +146,15 @@ def _read() -> dict[str, Any]:
             if not isinstance(cred, dict):
                 continue
             key = cred.get("provider") or _anon_key(scope)
+            existing = out["providers"].get(key)
+            if existing is not None and existing != cred:
+                # v1 allowed each TIER its own credential, so two tiers could hold
+                # different keys for one provider — a personal key on `default` and
+                # a work key on `quick`. Keying purely by provider name migrated
+                # them last-wins: the losing tier kept pointing at the name and
+                # silently started billing the other tier's key. Qualify the later
+                # one by its scope so both survive and each tier keeps what it had.
+                key = f"{key}:{scope}"
             out["providers"][key] = cred
             out["active"][scope] = key
         return out
