@@ -75,6 +75,52 @@ def test_loopback_ports_do_not_collide():
         assert a != b
 
 
+def _hit(url: str) -> int:
+    """GET the callback the way a browser would, returning the status code."""
+    import urllib.error
+
+    try:
+        return urllib.request.urlopen(url, timeout=10).status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def test_loopback_ignores_a_callback_that_does_not_echo_the_state():
+    """Any process on this machine can GET a loopback port, and a vendor that pins
+    one (Codex: 1455) makes it guessable — so a callback that cannot echo the value
+    we sent is somebody else's, and must not be able to feed us a code."""
+    with oauth.loopback(timeout=0.5, state="the-expected-state") as (url, wait):
+        assert _hit(url + "?code=injected&state=guessed") == 400
+        # and it did not get to cancel the real sign-in either
+        assert wait() is None
+
+
+def test_loopback_accepts_the_callback_that_echoes_the_state():
+    with oauth.loopback(timeout=10, state="s-123") as (url, wait):
+        threading.Thread(
+            target=lambda: _hit(url + "?code=abc123&state=s-123"), daemon=True
+        ).start()
+        assert wait() == "abc123"
+
+
+def test_loopback_reports_a_refusal_rather_than_swallowing_it():
+    """A declined consent screen is a decision, not a missing code — reported as
+    "no callback" it becomes a prompt to paste something never issued."""
+    with oauth.loopback(timeout=10, state="s-1") as (url, wait):
+        threading.Thread(
+            target=lambda: _hit(url + "?error=access_denied&state=s-1"), daemon=True
+        ).start()
+        with pytest.raises(oauth.LoginError, match="declined in the browser"):
+            wait()
+
+
+def test_a_refusal_reason_cannot_repaint_the_terminal():
+    """error_description is attacker-reachable text on its way to a TTY."""
+    message = oauth._denial("access_denied", "user\x1b[2Jsaid no\nreally")
+    assert "\x1b" not in message and "\n" not in message
+    assert "said no" in message
+
+
 # --- registry -----------------------------------------------------------------
 
 
@@ -310,6 +356,61 @@ def test_anthropic_exchange_contract(monkeypatch):
     q = up.parse_qs(up.urlparse(url).query)
     assert q["code"] == ["true"]  # required by the authorize endpoint
     assert q["redirect_uri"] == ["https://console.anthropic.com/oauth/code/callback"]
+
+
+@pytest.mark.parametrize("name", ("google", "codex"))
+def test_state_is_not_the_pkce_verifier(name, monkeypatch):
+    """The verifier is the one secret PKCE has. state is public — it rides in the
+    authorize URL, the redirect and the vendor's logs — so sending the verifier as
+    state publishes it and leaves a bare code flow wearing PKCE's clothes."""
+    import urllib.parse as up
+
+    _cred, posted, url = _login_via_paste(
+        oauth.get(name), monkeypatch, {"access_token": "a"}
+    )
+    verifier = posted["payload"]["code_verifier"]
+    state = up.parse_qs(up.urlparse(url).query)["state"][0]
+    assert state != verifier
+    assert verifier not in url
+    assert len(state) >= 32  # still unguessable enough to be worth comparing
+
+
+def test_anthropic_state_is_the_verifier_because_its_protocol_says_so(monkeypatch):
+    """The one vendor whose token endpoint checks state against the verifier. Its
+    flow breaks if the two differ, so the general rule above does not apply."""
+    import urllib.parse as up
+
+    _cred, posted, url = _login_via_paste(
+        oauth.get("anthropic"), monkeypatch, {"access_token": "a"}
+    )
+    verifier = posted["payload"]["code_verifier"]
+    assert up.parse_qs(up.urlparse(url).query)["state"] == [verifier]
+    assert posted["payload"]["state"] == verifier
+
+
+def test_a_denied_login_says_so_instead_of_asking_for_a_paste(monkeypatch):
+    """The whole point of reading the callback's error: no code is ever coming, so
+    prompting for one asks the user to produce something that does not exist."""
+    import urllib.parse as up
+
+    asked = []
+
+    def open_browser(url):
+        query = up.parse_qs(up.urlparse(url).query)
+        callback = query["redirect_uri"][0]
+        threading.Thread(
+            target=lambda: _hit(
+                f"{callback}?error=access_denied&state={query['state'][0]}"
+            ),
+            daemon=True,
+        ).start()
+
+    cb = oauth.LoginCallbacks(
+        on_auth=open_browser, on_prompt=lambda q: asked.append(q) or ""
+    )
+    with pytest.raises(oauth.LoginError, match="declined in the browser"):
+        oauth.get("google").login(cb)
+    assert not any("authorization code" in q for q in asked)
 
 
 def test_anthropic_skips_the_loopback_entirely(monkeypatch):
@@ -836,6 +937,37 @@ def test_failed_refresh_keeps_the_old_credential(monkeypatch):
     oauth.ensure_fresh()
     assert auth.get("default")["access"] == "old"
     assert auth.get("default")["refresh"] == "rt"
+
+
+def test_concurrent_ensure_fresh_refreshes_exactly_once(monkeypatch):
+    """A refresh token is single-use: the vendor invalidates it as it issues the
+    next one. Two callers that both POST leave the loser holding a spent token, so
+    the second must wait, re-read, and find the first's fresh credential."""
+    import time
+
+    class _SlowRefresh(_RefreshableProvider):
+        def refresh(self, cred):
+            time.sleep(0.2)  # long enough that the other caller is at the lock
+            return super().refresh(cred)
+
+    provider = _SlowRefresh()
+    monkeypatch.setitem(oauth._REGISTRY, provider.name, provider)
+    auth.set_credential("default", _expiring(-1))
+
+    ready = threading.Barrier(2)
+
+    def racer():
+        ready.wait()
+        oauth.ensure_fresh()
+
+    threads = [threading.Thread(target=racer) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert provider.calls == 1
+    assert auth.get("default")["access"] == "new"
 
 
 def test_ensure_fresh_tolerates_unknown_provider():

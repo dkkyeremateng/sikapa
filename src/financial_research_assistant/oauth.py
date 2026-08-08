@@ -83,12 +83,51 @@ class OAuthProvider(Protocol):
 # --- loopback callback server -------------------------------------------------
 
 
+def _state_matches(expected: str, returned: str | None) -> bool:
+    """Constant-time comparison of the returned ``state`` against the sent one."""
+    return bool(returned) and secrets.compare_digest(returned, expected)
+
+
+def _readable(text: str, limit: int = 200) -> str:
+    """A vendor-supplied string made safe to print in a terminal.
+
+    ``error_description`` arrives over a URL that anything on this machine can
+    construct, so it is untrusted input on its way to a TTY: control characters
+    there can rewrite the line, hide text, or repaint the screen. Keep the
+    printable part and cap the length.
+    """
+    return "".join(c for c in text if c.isprintable())[:limit].strip()
+
+
+def _denial(error: str, description: str = "") -> str:
+    """Why the provider refused, phrased for the person who refused it.
+
+    A declined consent screen is a decision, not a malfunction. Left as a bare
+    "no code received" it becomes the paste-the-code prompt, which asks the user
+    to produce something that was never issued.
+    """
+    known = {
+        "access_denied": "the sign-in was declined in the browser",
+        "consent_required": "the provider needs consent that was not granted",
+        "invalid_scope": "the provider rejected the permissions this app asked for",
+        "server_error": "the provider hit an error of its own during sign-in",
+    }
+    lead = known.get(error, f"the provider refused the sign-in ({_readable(error, 60)})")
+    detail = _readable(description)
+    return f"{lead}: {detail}" if detail else lead
+
+
 @contextmanager
-def loopback(path: str = "/callback", timeout: float | None = None, port: int | None = None):
+def loopback(
+    path: str = "/callback",
+    timeout: float | None = None,
+    port: int | None = None,
+    state: str | None = None,
+):
     """Serve one OAuth redirect on an ephemeral localhost port.
 
     Yields ``(callback_url, wait)``; ``wait()`` blocks until the browser hits the
-    redirect and returns the ``code`` query parameter, or None on timeout/error.
+    redirect and returns the ``code`` query parameter, or None on timeout.
     ``timeout`` resolves from ``LOGIN_TIMEOUT`` at call time, not as a default
     argument — bound at definition time it would ignore the module attribute.
 
@@ -96,6 +135,17 @@ def loopback(path: str = "/callback", timeout: float | None = None, port: int | 
     explicit port only for a vendor that validates ``redirect_uri`` against an
     exact registered value (OpenAI requires 1455) — then a second simultaneous
     login does collide, and gets a clear error rather than a confusing timeout.
+
+    ``state`` is the value the authorize URL carried; a callback that does not
+    echo it back is not this sign-in and is ignored. Every process and every page
+    on this machine can GET a loopback port, and the fixed one above is guessable
+    by construction, so without the comparison any local caller could hand the
+    flow an authorization code of its own choosing and have it redeemed and
+    stored. Ignored rather than fatal: a stray request must not be able to cancel
+    a login either, so the server keeps waiting for the real redirect.
+
+    ``wait()`` raises ``LoginError`` when the provider itself refused — a declined
+    consent screen has a reason worth repeating, and no code will ever arrive.
     """
     timeout = LOGIN_TIMEOUT if timeout is None else timeout
     received: dict[str, str | None] = {}
@@ -109,20 +159,42 @@ def loopback(path: str = "/callback", timeout: float | None = None, port: int | 
                 self.end_headers()
                 return
             query = urllib.parse.parse_qs(parsed.query)
-            received["code"] = (query.get("code") or [None])[0]
-            received["error"] = (query.get("error") or [None])[0]
+            if state is not None and not _state_matches(state, (query.get("state") or [None])[0]):
+                self._page(
+                    400,
+                    "Not this sign-in.",
+                    "This callback did not carry the value the sign-in sent, so it "
+                    "was ignored. Nothing was stored.",
+                )
+                return
+            error = (query.get("error") or [None])[0]
+            if error:
+                received["error"] = _denial(
+                    error, (query.get("error_description") or [""])[0]
+                )
+                self._page(400, "Sign-in refused.", received["error"])
+            else:
+                received["code"] = (query.get("code") or [None])[0]
+                self._page(
+                    200,
+                    "Signed in.",
+                    "You can close this tab and return to the terminal.",
+                )
+            done.set()
+
+        def _page(self, code: int, heading: str, message: str) -> None:
+            from html import escape
+
             body = (
-                b"<!doctype html><meta charset=utf-8>"
-                b"<body style='font:16px system-ui;padding:3rem'>"
-                b"<h2>Signed in.</h2><p>You can close this tab and return to the "
-                b"terminal.</p></body>"
-            )
-            self.send_response(200)
+                "<!doctype html><meta charset=utf-8>"
+                "<body style='font:16px system-ui;padding:3rem'>"
+                f"<h2>{escape(heading)}</h2><p>{escape(message)}</p></body>"
+            ).encode("utf-8")
+            self.send_response(code)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-            done.set()
 
         @override
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -141,6 +213,9 @@ def loopback(path: str = "/callback", timeout: float | None = None, port: int | 
     def wait() -> str | None:
         if not done.wait(timeout):
             return None
+        refusal = received.get("error")
+        if refusal:
+            raise LoginError(refusal)
         return received.get("code")
 
     try:
@@ -263,6 +338,11 @@ class OpenRouterProvider:
         )
         models = apply_window(models, window)
         verifier, challenge = pkce_pair()
+        # No state to compare: this authorize endpoint takes `callback_url` and the
+        # challenge, and nothing else — a parameter it does not know is a parameter
+        # it will not echo back. The port is ephemeral rather than fixed, so the
+        # window is narrower than the vendors that pin one, and the code is still
+        # worthless without the verifier.
         with loopback() as (callback_url, wait):
             params = {
                 "callback_url": callback_url,
@@ -371,7 +451,9 @@ class _SubscriptionProvider:
         }
         return f"{self.AUTH_URL}?{urllib.parse.urlencode(params)}"
 
-    def _exchange_payload(self, code: str, verifier: str, redirect_uri: str) -> dict[str, Any]:
+    def _exchange_payload(
+        self, code: str, verifier: str, redirect_uri: str, state: str = ""
+    ) -> dict[str, Any]:
         payload = {
             "grant_type": "authorization_code",
             "code": code,
@@ -380,9 +462,10 @@ class _SubscriptionProvider:
             "code_verifier": verifier,
         }
         if self.SEND_STATE:
-            # state doubles as the verifier in this flow, so there is nothing extra
-            # to carry between the two legs.
-            payload["state"] = verifier
+            # This vendor's token endpoint checks state, and in its flow state
+            # doubles as the verifier — see `login` for why that pairing is theirs
+            # alone and not a default worth copying.
+            payload["state"] = state or verifier
         if self.CLIENT_SECRET:
             payload["client_secret"] = self.CLIENT_SECRET
         return payload
@@ -428,20 +511,31 @@ class _SubscriptionProvider:
         )
         models = apply_window(models, window)
         verifier, challenge = pkce_pair()
+        # `state` is public and the verifier is not. state rides in the authorize
+        # URL and comes back through the redirect, so it lands in browser history,
+        # the vendor's request logs, and anything watching the loopback — while the
+        # verifier is the single secret PKCE has, the proof that whoever redeems
+        # the code is whoever started the flow. Sending one as the other publishes
+        # it and leaves a plain code flow wearing PKCE's clothes. The exception is
+        # a vendor whose token endpoint checks state AGAINST the verifier
+        # (SEND_STATE), where the protocol defines them to be the same value.
+        state = verifier if self.SEND_STATE else secrets.token_urlsafe(32)
         if self.REDIRECT_URI:
             # Vendor-hosted callback: no loopback to run, the user copies the code
             # off the vendor's page. The redirect_uri sent here must be byte-equal
             # to the one authorized, or the exchange comes back a bare 400.
             redirect_uri = self.REDIRECT_URI
-            cb.on_auth(self._authorize_url(challenge, redirect_uri, verifier))
+            cb.on_auth(self._authorize_url(challenge, redirect_uri, state))
             cb.on_status("approve in the browser, then copy the code it shows")
             code = (cb.on_prompt("authorization code: ") or "").strip()
         else:
-            with loopback(path=self.REDIRECT_PATH, port=self.REDIRECT_PORT) as (
+            with loopback(
+                path=self.REDIRECT_PATH, port=self.REDIRECT_PORT, state=state
+            ) as (
                 redirect_uri,
                 wait,
             ):
-                cb.on_auth(self._authorize_url(challenge, redirect_uri, verifier))
+                cb.on_auth(self._authorize_url(challenge, redirect_uri, state))
                 cb.on_status("waiting for the browser to come back…")
                 code = wait()
             if not code:
@@ -452,7 +546,9 @@ class _SubscriptionProvider:
         # Some vendors hand back "code#state" when the code is copied by hand.
         code = code.split("#", 1)[0].split("&", 1)[0].strip()
         try:
-            token = self._exchange(self._exchange_payload(code, verifier, redirect_uri))
+            token = self._exchange(
+                self._exchange_payload(code, verifier, redirect_uri, state)
+            )
         except Exception as exc:
             raise LoginError(f"could not exchange the code: {exc}") from exc
         if not token.get("access_token"):
@@ -965,10 +1061,38 @@ def needs_refresh(cred: dict[str, Any], now_ms: float | None = None) -> bool:
     return expires - now_ms < REFRESH_SKEW_MS
 
 
+def _store_refreshed(target: str, cred: dict[str, Any]) -> None:
+    """Persist a renewed credential while ``auth._locked()`` is already held.
+
+    ``auth.set_credential`` takes that same lock through a second file descriptor,
+    and ``flock`` is per-descriptor rather than per-process — asking for it again
+    from inside the lock blocks the caller against itself forever instead of
+    serializing anything. So the store update is written out here, mirroring what
+    ``set_credential`` does under its own lock.
+    """
+    from . import auth
+
+    data = auth._read()
+    key = cred.get("provider") or auth._anon_key(target)
+    data["providers"][key] = cred
+    data["active"][target] = key
+    auth.save(data)
+
+
 def ensure_fresh(scope: str = "default") -> None:
     """Renew ``scope``'s credential if it's near expiry. Cheap and safe to call
     before every model build — it's a timestamp comparison unless a refresh is
     actually due.
+
+    Read, renew and write happen together under the credential-store lock, and the
+    expiry check is made twice: once cheaply outside it, then again after acquiring
+    it. A refresh token is single-use and rotates — the vendor invalidates it as it
+    issues the next one — so two callers that both read "expired" and both POST
+    leave the loser holding a token that has already been spent, and the login dies
+    at the refresh after this one. Re-checking inside the lock means the second
+    caller finds the first's fresh credential and simply uses it. Serializing only
+    the write, as locking around it alone would, prevents nothing: the damage is
+    done at the token endpoint, before either write.
 
     A failed refresh deliberately leaves the old credential in place rather than
     clearing it: a transient network blip would otherwise log the user out and
@@ -983,15 +1107,19 @@ def ensure_fresh(scope: str = "default") -> None:
     cred = auth.get(target)
     if cred is None or not needs_refresh(cred):
         return
-    provider = get(cred.get("provider", ""))
-    if provider is None:
-        return
-    try:
-        fresh = provider.refresh(cred)
-    except Exception:
-        return
-    if fresh and fresh != cred:
-        auth.set_credential(target, fresh)
+    with auth._locked():
+        cred = auth.get(target)
+        if cred is None or not needs_refresh(cred):
+            return  # somebody else renewed it while we were waiting for the lock
+        provider = get(cred.get("provider", ""))
+        if provider is None:
+            return
+        try:
+            fresh = provider.refresh(cred)
+        except Exception:
+            return
+        if fresh and fresh != cred:
+            _store_refreshed(target, fresh)
 
 
 def login(name: str, cb: LoginCallbacks, scope: str = "default") -> dict[str, Any]:

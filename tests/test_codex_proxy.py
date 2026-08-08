@@ -22,6 +22,71 @@ def _isolated_store(tmp_path, monkeypatch):
     monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
 
 
+@pytest.fixture
+def proxy():
+    """The running proxy as ``(base_url, token)``, stopped afterwards so the next
+    test gets a fresh server and a fresh token."""
+    base = codex_proxy.ensure_running()
+    try:
+        yield base, codex_proxy.local_token()
+    finally:
+        codex_proxy.shutdown()
+
+
+def _request(
+    base,
+    *,
+    token=None,
+    host=None,
+    content_type="application/json",
+    body=None,
+    path="/chat/completions",
+):
+    """One request, spoken over a raw socket, returning the whole raw response.
+
+    Raw rather than urllib because what is under test lives in the parts a
+    convenience client hides: the ``Host`` header it fills in for you, and how many
+    HTTP responses actually came back on the connection.
+    """
+    import socket
+    import urllib.parse as up
+
+    url = up.urlparse(base + path)
+    payload = json.dumps(
+        body if body is not None else {"model": "m", "messages": []}
+    ).encode()
+    head = [
+        f"POST {url.path} HTTP/1.1",
+        f"Host: {host or f'127.0.0.1:{url.port}'}",
+        f"Content-Length: {len(payload)}",
+        "Connection: close",
+    ]
+    if content_type:
+        head.append(f"Content-Type: {content_type}")
+    if token:
+        head.append(f"Authorization: Bearer {token}")
+    sock = socket.create_connection(("127.0.0.1", url.port), timeout=10)
+    try:
+        sock.sendall(("\r\n".join(head) + "\r\n\r\n").encode() + payload)
+        out = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            out += chunk
+    finally:
+        sock.close()
+    return out
+
+
+def _status(raw: bytes) -> int:
+    return int(raw.split(b" ", 2)[1])
+
+
+def _payload(raw: bytes) -> dict:
+    return json.loads(raw.partition(b"\r\n\r\n")[2])
+
+
 # --- request translation ------------------------------------------------------
 
 
@@ -259,7 +324,10 @@ def test_proxy_reports_a_missing_credential_rather_than_hanging():
         req = urllib.request.Request(
             base + "/chat/completions",
             data=json.dumps({"model": "m", "messages": []}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {codex_proxy.local_token()}",
+            },
         )
         with pytest.raises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(req, timeout=10)
@@ -299,7 +367,10 @@ def test_proxy_refreshes_the_tier_that_holds_the_credential(monkeypatch):
         req = urllib.request.Request(
             base + "/chat/completions",
             data=json.dumps({"model": "m", "messages": []}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {codex_proxy.local_token()}",
+            },
         )
         urllib.request.urlopen(req, timeout=10).read()
     finally:
@@ -322,6 +393,148 @@ def test_make_llm_routes_codex_through_the_proxy(monkeypatch):
     try:
         llm._make_llm("gpt-5.5-codex")
         assert seen["base_url"].startswith("http://127.0.0.1:")
-        assert seen["api_key"].get_secret_value() == "tok"
+        # the proxy's own token, not the spendable ChatGPT one — the proxy reads
+        # that from the store per request and the client has no use for it
+        assert seen["api_key"].get_secret_value() == codex_proxy.local_token()
+        assert seen["api_key"].get_secret_value() != "tok"
     finally:
         codex_proxy.shutdown()
+
+
+# --- who may talk to the proxy ------------------------------------------------
+
+
+def test_a_request_without_the_token_is_rejected(proxy):
+    """Loopback-only is not an access control: every process on the machine shares
+    127.0.0.1, and the credential behind this endpoint spends money."""
+    base, _token = proxy
+    raw = _request(base)
+    assert _status(raw) == 401
+    assert "token" in _payload(raw)["error"]["message"]
+
+
+def test_a_request_with_the_wrong_token_is_rejected(proxy):
+    base, _token = proxy
+    assert _status(_request(base, token="not-the-token")) == 401
+
+
+def test_the_token_is_required_before_any_credential_is_touched(proxy, monkeypatch):
+    """An unauthenticated caller must not be able to make the proxy read, refresh
+    or spend the stored credential — the 401 comes first."""
+    from financial_research_assistant import oauth
+
+    auth.set_credential("default", {"provider": "codex", "type": "oauth", "access": "t"})
+    touched = []
+    monkeypatch.setattr(oauth, "ensure_fresh", touched.append)
+    monkeypatch.setattr(
+        codex_proxy, "_upstream_events",
+        lambda payload, cred, timeout=300.0: touched.append("upstream") or iter(()),
+    )
+    base, _token = proxy
+    assert _status(_request(base)) == 401
+    assert touched == []
+
+
+def test_an_unexpected_host_header_is_rejected(proxy):
+    """A page whose domain resolves to 127.0.0.1 reaches this socket anyway; the
+    name it asks for is the only thing that gives it away."""
+    base, token = proxy
+    raw = _request(base, token=token, host="rebound.example")
+    assert _status(raw) == 403
+    assert "Host" in _payload(raw)["error"]["message"]
+
+
+def test_a_non_json_content_type_is_rejected(proxy):
+    """text/plain is the one a cross-origin fetch can send with no preflight, so
+    requiring JSON is what forces the browser to ask first — and be refused."""
+    base, token = proxy
+    assert _status(_request(base, token=token, content_type="text/plain")) == 415
+
+
+def test_each_process_mints_its_own_token():
+    """In memory, never stored: it identifies this process's client, and a value
+    that outlived the process would be a secret to leak for no benefit."""
+    assert codex_proxy.local_token() == ""
+    try:
+        codex_proxy.ensure_running()
+        first = codex_proxy.local_token()
+        assert len(first) >= 32
+        assert codex_proxy.ensure_running() and codex_proxy.local_token() == first
+    finally:
+        codex_proxy.shutdown()
+    assert codex_proxy.local_token() == ""
+    try:
+        codex_proxy.ensure_running()
+        assert codex_proxy.local_token() != first
+    finally:
+        codex_proxy.shutdown()
+
+
+# --- failing mid-stream --------------------------------------------------------
+
+
+def test_mid_stream_failure_is_reported_as_an_event_not_a_second_response(
+    proxy, monkeypatch
+):
+    """Once the 200 and the SSE headers are out, the response is committed: a
+    second status line lands inside the body the client is parsing as events, and
+    no [DONE] leaves the turn looking truncated rather than failed."""
+    base, token = proxy
+    auth.set_credential("default", {"provider": "codex", "type": "oauth", "access": "t"})
+
+    def fails_after_a_chunk(payload, cred, timeout=300.0):
+        yield {"type": "response.output_text.delta", "delta": "Hel"}
+        raise codex_proxy.UpstreamError("rate limited")
+
+    monkeypatch.setattr(codex_proxy, "_upstream_events", fails_after_a_chunk)
+    raw = _request(base, token=token, body={"model": "m", "messages": [], "stream": True})
+    head, _, body = raw.partition(b"\r\n\r\n")
+
+    assert _status(raw) == 200
+    assert b"text/event-stream" in head
+    assert raw.count(b"HTTP/1.") == 1  # one response on the connection, not two
+
+    lines = [line for line in body.split(b"\n\n") if line.startswith(b"data: ")]
+    assert lines[-1] == b"data: [DONE]"
+    events = [json.loads(line[6:]) for line in lines[:-1]]
+    assert events[0]["choices"][0]["delta"]["content"] == "Hel"
+    assert events[-1]["error"]["message"] == "rate limited"
+
+
+def test_an_unexpected_mid_stream_failure_is_reported_the_same_way(proxy, monkeypatch):
+    base, token = proxy
+    auth.set_credential("default", {"provider": "codex", "type": "oauth", "access": "t"})
+
+    def explodes(payload, cred, timeout=300.0):
+        raise OSError("connection reset by peer")
+        yield  # pragma: no cover - generator marker
+
+    monkeypatch.setattr(codex_proxy, "_upstream_events", explodes)
+    raw = _request(base, token=token, body={"model": "m", "messages": [], "stream": True})
+    body = raw.partition(b"\r\n\r\n")[2]
+    lines = [line for line in body.split(b"\n\n") if line.startswith(b"data: ")]
+    assert _status(raw) == 200 and raw.count(b"HTTP/1.") == 1
+    assert lines[-1] == b"data: [DONE]"
+    assert "connection reset" in json.loads(lines[-2][6:])["error"]["message"]
+
+
+def test_a_client_that_hangs_up_mid_stream_is_not_an_error():
+    """Nobody is left to receive the error, so there is nothing to report — and a
+    traceback per abandoned stream would bury the failures that do matter."""
+
+    class HungUp:
+        def write(self, _data):
+            raise BrokenPipeError(32, "broken pipe")
+
+        def flush(self):
+            pass
+
+    handler = codex_proxy._Handler.__new__(codex_proxy._Handler)
+    handler.wfile = HungUp()
+    handler.send_response = lambda *_a, **_k: None
+    handler.send_header = lambda *_a, **_k: None
+    handler.end_headers = lambda: None
+    handler._stream(
+        iter([{"type": "response.output_text.delta", "delta": "hi"}]),
+        ResponseStreamTranslator("m"),
+    )
