@@ -75,7 +75,13 @@ offline deterministic fake mode, and a generic eval harness.
 >   these statement-stitched charts.
 >
 > Import is keyed by (account, period), so re-importing the same statement
-> replaces rather than double-counts. In the TUI, `/import PATH` loads a
+> replaces rather than double-counts. Statements that *overlap* rather than match —
+> a full year plus the monthly statements inside it, which is exactly what the NAV
+> chart above asks you to import — are reconciled on read: each trade and corporate
+> action is counted once no matter how many statements report it, so the FIFO
+> figures (`realized_gains`, `tax_loss_harvest`, open lots) don't double and a
+> split reported twice doesn't rescale your cost basis by the square of the factor.
+> In the TUI, `/import PATH` loads a
 > statement directly (no model call — works in `--fake` too); or just ask the
 > agent in a normal message and it calls `import_ibkr_statement` for you.
 > Consolidated multi-account and multi-currency statements are handled
@@ -161,7 +167,11 @@ offline deterministic fake mode, and a generic eval harness.
 >   vs the current price, and a discount-rate × terminal-growth **sensitivity grid**.
 >   Assumption knobs (`growth_rate`, `discount_rate`, `terminal_growth`, `years`)
 >   default to sensible values — stage-1 growth is derived from the historical FCF
->   CAGR. It's a *model, not a price target*, presented with its assumptions, and it
+>   CAGR, measured over the fiscal years the history actually spans (a year the
+>   filer didn't tag stretches the period, it doesn't shorten it). Omit a knob to
+>   derive it; pass `0` to mean zero, which is a real assumption rather than a
+>   request for the default. It's a *model, not a price target*, presented with its
+>   assumptions, and it
 >   declines for banks/insurers (no meaningful capex) and pre-FCF companies.
 > - **`explain_option`** — turns an options contract into plain-language economics
 >   over the live (keyless) Yahoo option chain. Pass a ticker and optionally an
@@ -253,7 +263,12 @@ offline deterministic fake mode, and a generic eval harness.
 > Subagents get the same delayed/public-data research tools the primary agent has,
 > but **not** the dispatch tools themselves — that one-level cap is a hard recursion
 > guard, so a subagent can never spawn more subagents. They also can't trade, touch
-> the live IBKR account, or write long-term memory. Each run is time-bounded
+> the live IBKR account, or write long-term memory — nor take any other action that
+> outlives the investigation: no scheduling work, recording a thesis, setting an
+> alert, importing a statement, or pushing a report to your phone. A subagent is
+> given a question to answer, and the answer comes back to the primary agent to act
+> on; a vaguely-worded task must not be able to queue recurring model spend or
+> deliver a half-finished file. Each run is time-bounded
 > (`FINANCIAL_RESEARCH_SUBAGENT_TIMEOUT`, default 180s), a call fans out at most 6
 > tasks, and a failed or timed-out subagent comes back as a labeled note rather than
 > aborting the turn. Because a subagent sees only the task text it's given, the
@@ -311,7 +326,12 @@ offline deterministic fake mode, and a generic eval harness.
 >   `BASE_CURRENCY` if your IBKR base isn't USD.
 >
 > Historical prices and FX rates (Yahoo, keyless) are cached per run and retried
-> once on a transient failure.
+> once on a transient failure. The cache expires after 15 minutes
+> (`FINANCIAL_RESEARCH_PRICE_TTL`, seconds; `0` disables caching), and the same
+> clock governs the company snapshot behind `stock_fundamentals` / `compare_stocks`
+> / `dcf_valuation` / `explain_option` — it carries the spot price, so a session
+> left open across a trading day would otherwise quote an option's breakeven
+> against the morning's price while the chart beside it showed the afternoon close.
 
 > **Research-only.** The assistant loads only IBKR `get_*` / `search_*` tools
 > (balances, positions, quotes, price history, contract/company lookups). Order
@@ -703,6 +723,18 @@ a permanently-broken prompt stops billing model calls forever. A tick runs at mo
 10 tasks (`FINANCIAL_RESEARCH_TASK_BATCH`) and says how many it deferred, so a
 backlog drains over consecutive ticks instead of firing everything at once.
 
+A runner that is killed mid-task — SIGKILL, a laptop closing, an OOM — never gets
+to record the outcome, so the task would otherwise sit claimed forever: skipped by
+every later tick while `--tasks` still showed it as running. A claim older than 30
+minutes (`FINANCIAL_RESEARCH_TASK_CLAIM_TIMEOUT`) is therefore treated as
+abandoned and picked up again, counting as one of the three attempts so a prompt
+that reliably kills its runner still parks instead of looping.
+
+Recurrence follows the **wall clock**, not a fixed number of hours: a daily 09:00
+brief stays at 09:00 through a daylight-saving change rather than drifting to
+08:00 or 10:00. (`hourly` is the exception, and stays a real hour — there is no
+time-of-day to preserve, and a wall-clock hour would skip a run at fall-back.)
+
 ### Delivery channels
 
 Channels are a registry (`channels.py`) in the same shape as the
@@ -728,10 +760,19 @@ message whose Markdown doesn't parse.
 
 Delivery is best-effort: a channel that's down is reported, never fatal. Work that
 finished must not be re-run — and re-billed — because a notification API blipped.
-An answer that reached **no** channel is parked on its task and re-sent at the top
-of every later tick (before any new model call), for up to 8 attempts; `--tasks`
-shows it as *answer waiting to be delivered*. Redelivery costs one HTTP request,
-which is why it retries far more patiently than a failed *run* does.
+An answer that reached no channel **able to carry it** is parked on its task and
+re-sent at the top of every later tick (before any new model call), for up to 8
+attempts; `--tasks` shows it as *answer waiting to be delivered*. Redelivery costs
+one HTTP request, which is why it retries far more patiently than a failed *run*
+does.
+
+"Able to carry it" is a property each channel declares (`Channel.full_content`),
+because a desktop banner is a notification, not a delivery: it shows the first
+couple of hundred characters and is gone. Counting one as success meant that when
+Telegram blipped on a machine with banners enabled — the default — the analysis
+was silently reduced to its own first paragraph and never re-sent. A banner now
+tells you the answer is ready without settling the delivery, so the full text
+still arrives once a channel that can carry it comes back.
 
 A run only counts as done if it produced something that looks like an answer. A
 reply that opens with "I don't have a record of that" or "could you clarify", or
@@ -864,8 +905,11 @@ them can be green while it is consistently wrong.
 When it takes a side — a bull/bear verdict, a DCF concluding under- or overvalued,
 "this looks cheap" — it calls `record_thesis` with the reasoning and a horizon. The
 entry price is captured from market data at that moment, not typed by the model. On
-a later runner tick (`--run-due` / `--watch`) the call is scored: price then vs now,
-and the same window for the benchmark.
+a later runner tick (`--run-due` / `--watch`) the call is scored: entry price vs the
+price **at the horizon it named**, and the same window for the benchmark. The tick
+that happens to run the scoring doesn't set the window — a scheduler that was off
+for a month still scores a 90-day call over 90 days, so a call that was right at
+its horizon can't be recorded as wrong because nobody was watching.
 
 ```
 financial-research-assistant --theses          # every call, model-free
@@ -1050,7 +1094,18 @@ called), `llm_judge`, and `rubric`. The judge scores with the **same configured
 model as the agent** (via `graph._make_llm`), so it honors `OPENAI_API_BASE` (local
 servers) and `MODEL_PROVIDER` (Anthropic/Google/…) — no bare `OPENAI_API_KEY`
 required. Set `EVAL_JUDGE_MODEL` to override the judge model (e.g. a stronger
-cross-family one). Results append to `eval/results.jsonl`.
+cross-family one) — leaving it unset means the model is grading itself, which the
+harness now says out loud rather than letting it pass unnoticed. Results append to
+`eval/results.jsonl`.
+
+**Every item runs against its own empty memory store.** Long-term memory is on for
+the run — recall and write-back are part of what's being measured — but it starts
+blank and is thrown away afterwards. Sharing the developer's real store made the
+gate dishonest in both directions: a regression could score full marks by recalling
+the answer a previous run had stored, and each run quietly filed its eval questions
+as facts about you. The same isolation runs per **A/B arm** and per `--repeat`, so
+the candidate arm can't score well by remembering what the baseline just answered,
+and repeats stay independent samples instead of echoes of run 1.
 
 ### `rubric` — grading the derivation, not the answer
 
