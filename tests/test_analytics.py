@@ -512,6 +512,44 @@ def test_correlation_matrix(monkeypatch):
     assert "at least two" in a.correlation_matrix("AAPL")
 
 
+def test_aligned_returns_drop_a_bad_session_from_every_series():
+    """A zero close leaves one symbol's return for that day undefined. Dropping the
+    day from only that symbol's list shortens it, so every later value shifts one
+    slot earlier — and these lists are read by POSITION, so from there on each
+    symbol's return is paired with a different day's for the rest."""
+    import pytest
+
+    from financial_research_assistant import analytics as a
+
+    rets = a._aligned_returns({
+        "A": [10.0, 0.0, 12.0, 13.0, 14.0],
+        "B": [20.0, 21.0, 22.0, 23.0, 24.0],
+    })
+    assert len(rets["A"]) == len(rets["B"]) == 3, "sessions 1, 3 and 4; 2 is unusable"
+    # B's kept returns are for exactly those days — not its first three.
+    assert rets["B"] == pytest.approx([1 / 20, 1 / 22, 1 / 23])
+
+
+def test_correlation_pairs_the_same_days_for_every_ticker(monkeypatch):
+    """Two tickers moving identically in percentage terms must read +1.00. With one
+    of them dropping a session the others keep, the grid pairs each day against its
+    neighbour instead and returns a confident number for a relationship that was
+    never measured — here, the exact opposite of the real one."""
+    import financial_research_assistant.analytics as a
+    import financial_research_assistant.tools as tools
+
+    dates = [f"2026-01-{d:02d}" for d in range(1, 13)]
+    # AAPL's first close is unusable; after that the two move together exactly.
+    closes = {
+        "AAPL": [0.0] + [100.0, 90.0] * 5 + [100.0],
+        "MSFT": [50.0] + [50.0, 45.0] * 5 + [50.0],
+    }
+    monkeypatch.setattr(tools, "_aligned_closes", lambda syms, days, **_kw: (dates, closes))
+    out = a.correlation_matrix("AAPL, MSFT", days=90)
+    row = next(ln for ln in out.splitlines() if ln.startswith("AAPL"))
+    assert row.split()[1:] == ["1.00", "1.00"]
+
+
 def _risk_series(base: float, n: int = 30) -> list[float]:
     """A gently trending, oscillating close series so returns have non-zero
     variance and a real drawdown — deterministic, offline."""

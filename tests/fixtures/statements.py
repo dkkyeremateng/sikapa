@@ -70,6 +70,29 @@ BUYSELL_STATEMENT = (
 )
 
 
+# A consolidated multi-currency statement, which is where IBKR's aggregate rows
+# stop being a single "Total". Each currency gets its own subtotal and the
+# section then closes with a blended "Total in USD" (and, in the dividend
+# sections, "Total Dividends in USD") carrying a converted sum of everything
+# above it. All three sit in the Currency column of an otherwise ordinary Data
+# row, so a parser that skips only the bare word ingests the blended sums as if
+# they were dividends in a currency called "Total in USD".
+MULTI_CURRENCY_STATEMENT = (
+    "Statement,Data,Period,\"January 1, 2025 - December 31, 2025\"\n"
+    "Dividends,Header,Currency,Account,Date,Description,Amount\n"
+    "Dividends,Data,USD,U1,2025-04-01,AMZN(US1) Cash Dividend,12\n"
+    "Dividends,Data,Total,,,,12\n"
+    "Dividends,Data,EUR,U1,2025-04-02,SAP(DE1) Cash Dividend,8\n"
+    "Dividends,Data,Total,,,,8\n"
+    "Dividends,Data,Total in USD,,,,20.8\n"
+    "Dividends,Data,Total Dividends in USD,,,,20.8\n"
+    "Withholding Tax,Header,Currency,Account,Date,Description,Amount,Code\n"
+    "Withholding Tax,Data,USD,U1,2025-04-01,AMZN(US1) Cash Dividend - US Tax,-2,\n"
+    "Withholding Tax,Data,Total,,,,-2,\n"
+    "Withholding Tax,Data,Total in USD,,,,-2,\n"
+)
+
+
 # A minimal but complete OFX 2.x (XML) *investment* statement, for the
 # cross-broker OFX/QFX importer. Exercises the security master (SECLIST maps a
 # CUSIP to the AMZN ticker), a BUYSTOCK and a SELLSTOCK (sign normalization), an

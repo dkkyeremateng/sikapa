@@ -44,6 +44,56 @@ def test_parse_ofx_missing_dependency_raises_support_error(monkeypatch):
         statements.parse_ofx(_SAMPLE_OFX)
 
 
+def _recording_ofxtree(monkeypatch):
+    """Stub ofxtools and return the list its OFXTree.parse() records its argument
+    into, so the file-vs-inline decision is observable without the extra."""
+    import types
+
+    parsed: list[object] = []
+
+    class _Tree:
+        def parse(self, source):
+            parsed.append(source)
+
+        def convert(self):
+            return types.SimpleNamespace(
+                securities=[], statements=[], accounts=[],
+            )
+
+    parser = types.ModuleType("ofxtools.Parser")
+    parser.OFXTree = _Tree  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setitem(sys.modules, "ofxtools", types.ModuleType("ofxtools"))
+    monkeypatch.setitem(sys.modules, "ofxtools.Parser", parser)
+    return parsed
+
+
+def test_an_ofx_file_is_read_from_disk_whatever_it_is_named(monkeypatch, tmp_path):
+    """A download that carries OFX content routes by its header, so it arrives here
+    under any extension — or none. The parser has to be handed the path, not the
+    path's own text: keying the decision on '.ofx'/'.qfx' made a Vanguard export
+    saved as .txt parse its own filename as if that were the document."""
+    from financial_research_assistant import statements
+
+    for name in ("vanguard_download.txt", "statement_no_extension"):
+        f = tmp_path / name
+        f.write_text(_SAMPLE_OFX)
+        assert statements._detect_format(str(f)) == "ofx"
+
+        parsed = _recording_ofxtree(monkeypatch)
+        statements.parse_ofx(str(f))
+        assert parsed == [str(f)], f"{name} was not read from disk"
+
+
+def test_inline_ofx_text_is_still_parsed_as_the_document(monkeypatch, tmp_path):
+    """The other half of the same decision: a string that is the OFX document
+    itself has no path to open, so it must reach the parser as bytes."""
+    from financial_research_assistant import statements
+
+    parsed = _recording_ofxtree(monkeypatch)
+    statements.parse_ofx(_SAMPLE_OFX)
+    assert len(parsed) == 1 and not isinstance(parsed[0], str)
+
+
 def test_import_tool_reports_missing_dependency_friendly(monkeypatch, tmp_path):
     """The model-facing import tool returns the install-hint string (never raises)
     when a real .ofx file is given but ofxtools is absent."""

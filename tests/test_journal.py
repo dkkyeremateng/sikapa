@@ -11,12 +11,17 @@ from financial_research_assistant import journal
 
 
 def _prices(monkeypatch, table):
-    """Stub the daily-close fetch. ``table`` maps symbol -> [(date, close)]."""
+    """Stub the daily-close fetch. ``table`` maps symbol -> [(date, close)].
+
+    Honours BOTH the date arguments the real fetch does, because scoring is
+    entirely a question of which date a price is taken from: get the date wrong
+    and the arithmetic is still perfect, just about a different window.
+    """
     import financial_research_assistant.tools as t
     from financial_research_assistant.pointintime import as_of_series
 
     def fake(sym, days, strict=False, as_of=None, **_kw):
-        return as_of_series(table.get(sym.upper(), []), as_of)
+        return as_of_series(table.get(sym.upper(), []), as_of, days)
 
     monkeypatch.setattr(t, "_fetch_daily", fake)
 
@@ -28,6 +33,16 @@ _OPENED = (_TODAY - timedelta(days=200)).isoformat()
 def _series(start_price, end_price):
     """A two-point series: 200 days ago, and today."""
     return [(_OPENED, start_price), (_TODAY.isoformat(), end_price)]
+
+
+def _daily(start_price, per_day, days=400):
+    """A close for every one of the last ``days`` calendar days, drifting by
+    ``per_day``. A price PER DATE is what makes 'scored at the wrong date' show up
+    as a different number rather than as the same one."""
+    return [
+        ((_TODAY - timedelta(days=days - 1 - i)).isoformat(), start_price + per_day * i)
+        for i in range(days)
+    ]
 
 
 def _record_then_move(monkeypatch, entry_price, exit_price, bench=(100.0, 100.0),
@@ -142,6 +157,59 @@ def test_a_wrong_call_is_recorded_as_wrong(monkeypatch):
 def test_a_bearish_call_is_right_when_the_price_falls(monkeypatch):
     due = _record_then_move(monkeypatch, 100.0, 70.0, verdict="bearish")
     assert journal.score_due(now=due)[0]["hit"] is True
+
+
+def test_a_late_tick_scores_at_the_horizon_not_at_the_tick(monkeypatch):
+    """Scoring is a background job, so it runs late — a sleeping machine, a skipped
+    cron, a horizon over a long weekend. Pricing at the tick judges a 30-day call
+    over whatever span the delay produced, and here that is the difference between
+    RIGHT and WRONG. The verdict is then written into memory as a lesson stamped
+    "30d", so nothing downstream can tell that it was measured over 91."""
+    opened, due = date(2026, 3, 2), date(2026, 4, 1)
+    # Up 5% by the horizon, then a collapse the 30-day call made no claim about.
+    to_horizon = [(opened + timedelta(days=i), 100.0 + i / 6.0) for i in range(31)]
+    after = [(due + timedelta(days=i), 105.0 - 2.0 * i) for i in range(1, 91)]
+    _prices(monkeypatch, {
+        "NVDA": [(d.isoformat(), p) for d, p in to_horizon + after],
+        "SPY": [(d.isoformat(), 400.0) for d, _ in to_horizon + after],
+    })
+    entry = {
+        "id": "t1", "symbol": "NVDA", "verdict": "bullish", "thesis": "Because reasons.",
+        "entry_price": 100.0, "entry_date": opened.isoformat(), "horizon_days": 30,
+        "due": due.isoformat(), "benchmark": "SPY", "status": "open",
+    }
+    scored = journal.score_entry(entry, now=date(2026, 6, 1))
+    assert scored is not None
+    assert scored["exit_date"] == due.isoformat()
+    assert scored["change_pct"] == 5.0
+    assert scored["hit"] is True
+    # The window the lesson claims is the window it was measured over.
+    covered = date.fromisoformat(scored["exit_date"]) - date.fromisoformat(scored["entry_date"])
+    assert covered.days == scored["horizon_days"]
+    # And when the tick ran is still recorded — it just isn't what was judged.
+    assert scored["scored_on"] == "2026-06-01"
+
+
+def test_a_late_tick_benchmarks_over_the_same_window(monkeypatch):
+    """The alpha is a difference of two returns, so a benchmark measured to the
+    tick against a call measured to the horizon is a wrong number either way."""
+    opened, due = date(2026, 3, 2), date(2026, 4, 1)
+    days = [opened + timedelta(days=i) for i in range(91)]
+    _prices(monkeypatch, {
+        "NVDA": [(d.isoformat(), 100.0) for d in days],
+        # The index is flat to the horizon and then rallies hard.
+        "SPY": [(d.isoformat(), 400.0 if d <= due else 400.0 + 4.0 * (d - due).days)
+                for d in days],
+    })
+    entry = {
+        "id": "t1", "symbol": "NVDA", "verdict": "neutral", "thesis": "Range-bound.",
+        "entry_price": 100.0, "entry_date": opened.isoformat(), "horizon_days": 30,
+        "due": due.isoformat(), "benchmark": "SPY", "status": "open",
+    }
+    scored = journal.score_entry(entry, now=date(2026, 5, 31))
+    assert scored is not None
+    assert scored["benchmark_change_pct"] == 0.0
+    assert scored["alpha_pct"] == 0.0
 
 
 def test_a_call_not_yet_due_is_left_alone(monkeypatch):
@@ -264,9 +332,16 @@ async def test_a_scheduler_tick_scores_due_calls(monkeypatch):
     _record_then_move(monkeypatch, 100.0, 130.0)
     # The horizon is clamped to a minimum, so age the entry rather than recording
     # a negative one — `run_due` scores against the real clock, not a passed date.
+    horizon = (_TODAY - timedelta(days=1)).isoformat()
     items = journal.load_entries()
-    items[0]["due"] = (_TODAY - timedelta(days=1)).isoformat()
+    items[0]["due"] = horizon
     journal.save_entries(items)
+    # A tick that runs a day late must still price at the horizon, so today's close
+    # is deliberately absurd: if it reached the score, the number below would not.
+    _prices(monkeypatch, {
+        "NVDA": [(_OPENED, 100.0), (horizon, 130.0), (_TODAY.isoformat(), 999.0)],
+        "SPY": [(_OPENED, 100.0), (horizon, 100.0), (_TODAY.isoformat(), 100.0)],
+    })
 
     await scheduler.run_due(fake=True)
     scored = journal.load_entries()[0]

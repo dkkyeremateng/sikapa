@@ -170,13 +170,30 @@ def _spot(symbol: str):
 
 # --- Selection ---------------------------------------------------------------
 def _nearest_expiry(expiries: list[str], want: str) -> tuple[str, bool]:
-    """Return (chosen expiry, exact?). An exact match wins; else the soonest
-    expiry on/after the requested date; else the soonest available."""
+    """Return (chosen expiry, exact?). An exact match wins; else the expiry
+    genuinely closest to the requested date, before or after; else the soonest
+    available.
+
+    "First one on/after, otherwise the soonest of all" reads as nearest but isn't.
+    Ask for a Wednesday in a monthly-only chain and it skips the Friday two days
+    earlier for one nineteen days later; ask for a date past the last listed expiry
+    and it falls all the way back to the FRONT month — the furthest available date
+    from the one requested. Both substitute a different contract for the one asked
+    about while the caller is told only "not exact".
+
+    Ties go to the later expiry: between two equally distant dates the one with
+    more time on it is the more conservative stand-in."""
     if want and want in expiries:
         return want, True
     if want:
-        later = sorted(e for e in expiries if e >= want)
-        return (later[0] if later else min(expiries)), False
+        def distance(e: str) -> tuple[int, int]:
+            try:
+                gap = abs((date.fromisoformat(e) - date.fromisoformat(want)).days)
+            except ValueError:
+                return (10**6, 0)  # unparseable: only ever a last resort
+            return (gap, 0 if e > want else 1)
+
+        return min(expiries, key=distance), False
     return min(expiries), True
 
 

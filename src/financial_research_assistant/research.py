@@ -192,13 +192,24 @@ def reports_dir() -> Path:
 
 
 def save_report(symbol: str, report: str) -> Path:
-    """Write ``report`` markdown to a timestamped file under ``reports_dir()``."""
+    """Write ``report`` markdown to a timestamped file under ``reports_dir()``.
+
+    The stamp resolves to the second, which two reports can share — a portfolio
+    report names its holdings and sizes, so an overwritten one is both lost work
+    and the wrong thing to lose. A taken name gains a counter instead, and the
+    file is written ``0600`` like every other store here.
+    """
+    from . import storage
+
     d = reports_dir()
-    d.mkdir(parents=True, exist_ok=True)
     sym = "".join(c for c in symbol.upper() if c.isalnum()) or "report"
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     dest = d / f"research-{sym}-{stamp}.md"
-    dest.write_text(report, encoding="utf-8")
+    n = 2
+    while dest.exists():
+        dest = d / f"research-{sym}-{stamp}-{n}.md"
+        n += 1
+    storage.write_private(dest, report)
     return dest
 
 

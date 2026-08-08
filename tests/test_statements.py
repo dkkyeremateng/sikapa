@@ -1,7 +1,23 @@
 """Statement parser, persistence, and accounting behavior tests."""
 
-from .fixtures.statements import BUYSELL_STATEMENT as _BUYSELL_STATEMENT, SAMPLE_STATEMENT as _SAMPLE_STATEMENT, mini_statement as _mini_statement
+from .fixtures.statements import BUYSELL_STATEMENT as _BUYSELL_STATEMENT, MULTI_CURRENCY_STATEMENT as _MULTI_CURRENCY_STATEMENT, SAMPLE_STATEMENT as _SAMPLE_STATEMENT, mini_statement as _mini_statement
 from .helpers.fakes import install_stub_fx as _stub_fx
+
+
+def test_a_blended_total_row_is_not_a_currency():
+    """A consolidated statement closes each cash section with 'Total in USD' (and
+    'Total Dividends in USD'), which restate the rows above in one currency. They
+    are aggregates, not dividends: ingesting them invents a currency and counts
+    every figure twice."""
+    from financial_research_assistant import statements
+
+    parsed = statements.parse_statement(_MULTI_CURRENCY_STATEMENT)
+    currencies = {row["currency"] for row in parsed["cash"]}
+    assert currencies == {"USD", "EUR"}
+
+    dividends = [r for r in parsed["cash"] if r["kind"] == "dividend"]
+    assert [r["amount"] for r in dividends] == [12.0, 8.0]
+    assert sum(r["amount"] for r in parsed["cash"]) == 18.0  # 12 + 8 - 2
 
 
 def test_parse_statement_extracts_trades_and_cash_skipping_totals():
@@ -473,6 +489,118 @@ def test_open_lots_leftover_after_fifo(monkeypatch, tmp_path):
     lot = ol["AMZN"][0]
     assert lot["qty"] == 4.0 and lot["cost_per_share"] == 100.0
     assert lot["open_date"] == "2024-01-01"
+
+
+_TRADE_HEADER = (
+    "Trades,Header,DataDiscriminator,Asset Category,Currency,Account,Symbol,"
+    "Date/Time,Quantity,T. Price,C. Price,Proceeds,Comm/Fee,Basis,Realized P/L,"
+    "MTM P/L,Code\n"
+)
+
+
+def _trades_statement(period, *rows):
+    """A statement carrying just a period and some trade rows."""
+    return (
+        "Statement,Header,Field Name,Field Value\n"
+        f'Statement,Data,Period,"{period}"\n' + _TRADE_HEADER + "".join(rows)
+    )
+
+
+#: One buy and one sell of AMZN in March, as they appear in both the statement
+#: covering the whole year and the one covering just that month.
+_MARCH_BUY = 'Trades,Data,Order,Stocks,USD,U1,AMZN,"2025-03-03, 10:00:00",10,100,100,-1000,0,1000,0,0,\n'
+_MARCH_SELL = 'Trades,Data,Order,Stocks,USD,U1,AMZN,"2025-03-20, 10:00:00",-4,150,150,600,0,-400,200,0,\n'
+
+
+def test_overlapping_imports_count_each_trade_once(monkeypatch, tmp_path):
+    """Importing an annual statement and a monthly one inside it stores every trade
+    in the covered month twice. Walked as-is, the FIFO stream opens the buy lot
+    twice and matches the sell twice — doubling the open lots, the realized gain
+    and every tax figure derived from them, with nothing in the output to say so."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_trades_statement(
+        "January 1, 2025 - December 31, 2025", _MARCH_BUY, _MARCH_SELL))
+    s.import_statement(_trades_statement(
+        "March 1, 2025 - March 31, 2025", _MARCH_BUY, _MARCH_SELL))
+
+    assert round(s.realized_gains()["by_symbol"]["AMZN"]["realized"], 2) == 200.0
+    lots = s.open_lots()["AMZN"]
+    assert sum(lot["qty"] for lot in lots) == 6.0
+
+
+def test_a_genuinely_repeated_fill_is_kept(monkeypatch, tmp_path):
+    """Two identical fills within ONE statement are two fills, not a duplicate —
+    the same order can fill twice at the same price in the same second. Only
+    repetition ACROSS imports is an overlap."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_trades_statement(
+        "March 1, 2025 - March 31, 2025", _MARCH_BUY, _MARCH_BUY))
+    assert sum(lot["qty"] for lot in s.open_lots()["AMZN"]) == 20.0
+
+
+def test_an_overlapping_split_is_applied_once(monkeypatch, tmp_path):
+    """A corporate action in two overlapping statements would rescale every open
+    lot by the SQUARE of its factor — 9× the shares at a ninth of the cost."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    split = (
+        "Corporate Actions,Header,Asset Category,Currency,Account,Report Date,"
+        "Date/Time,Description,Quantity,Proceeds,Value,Realized P/L,Code\n"
+        'Corporate Actions,Data,Stocks,USD,U1,2025-06-11,"2025-06-10, 20:25:00",'
+        '"AMZN(US8) Split 3 for 1 (AMZN, ETF, US8)",20,0,0,0,\n'
+    )
+    body = _trades_statement("January 1, 2025 - December 31, 2025", _MARCH_BUY) + split
+    s.import_statement(body)
+    s.import_statement(
+        _trades_statement("June 1, 2025 - June 30, 2025") + split
+    )
+    lot = s.open_lots()["AMZN"][0]
+    assert lot["qty"] == 30.0
+    assert round(lot["cost_per_share"], 4) == round(100.0 / 3.0, 4)
+
+
+def test_lots_are_not_pooled_across_accounts(monkeypatch, tmp_path):
+    """A sell in one account cannot consume a lot opened in another: the shares are
+    still held, and the basis and holding period belong to a different book. Pooled,
+    the U2 sell matched U1's cheap lot and reported a gain against shares that were
+    never sold."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_trades_statement(
+        "January 1, 2025 - December 31, 2025",
+        'Trades,Data,Order,Stocks,USD,U1,AMZN,"2025-01-05, 10:00:00",10,50,50,-500,0,500,0,0,\n',
+    ))
+    s.import_statement(_trades_statement(
+        "January 1, 2026 - December 31, 2026",
+        'Trades,Data,Order,Stocks,USD,U2,AMZN,"2026-02-01, 10:00:00",-3,150,150,450,0,-450,0,0,\n',
+    ))
+    # U2 is the newest import's account, so it is the default scope.
+    newest = s.realized_gains()
+    assert newest["by_symbol"] == {}
+    assert newest["unmatched_proceeds"] == 450.0
+    # U1's lot is untouched and still open.
+    assert s.open_lots(account="U1")["AMZN"][0]["qty"] == 10.0
+    assert s.open_lots() == {}
+    # And the escape hatch still pools, for whoever explicitly asks.
+    assert round(s.realized_gains(account="all")["by_symbol"]["AMZN"]["realized"], 2) == 300.0
+
+
+def test_a_pooled_lot_view_says_that_is_what_it_is(monkeypatch, tmp_path):
+    """`account="all"` is a real view of nothing — it has to label itself, or the
+    figure reads as one account's."""
+    from financial_research_assistant import statements as s
+    from financial_research_assistant import tools as t
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_BUYSELL_STATEMENT)
+    assert "account U1" in t.realized_gains()
+    assert "ALL accounts pooled" in t.realized_gains(account="all")
 
 
 def test_income_summary_by_currency_and_symbol(monkeypatch, tmp_path):

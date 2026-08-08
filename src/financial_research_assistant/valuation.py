@@ -48,6 +48,13 @@ _DEFAULT_TERMINAL_GROWTH = 0.025  # ~long-run nominal GDP
 _DEFAULT_STAGE1_GROWTH = 0.06     # fallback when FCF history can't yield a CAGR
 _GROWTH_FLOOR, _GROWTH_CAP = -0.05, 0.20  # clamp a *derived* stage-1 growth
 
+#: The band a SUPPLIED stage-1 growth must sit in. A derived rate is clamped to
+#: the band above; a supplied one is honoured exactly as given, because overriding
+#: the caller's own assumption is the failure mode this module exists to avoid. So
+#: the only guard on it is a refusal — and refusing beats quietly modelling a
+#: company whose free cash flow triples every year for five years.
+_MIN_SUPPLIED_GROWTH, _MAX_SUPPLIED_GROWTH = -0.5, 1.0
+
 
 # --- Small formatting/parse helpers (self-contained, no network) -------------
 def _num(v: Any) -> float | None:
@@ -75,11 +82,26 @@ def _pct(v: Any) -> str:
     return f"{n * 100:.1f}%" if n is not None else "n/a"
 
 
-def _as_rate(v: Any) -> float:
-    """Interpret a rate knob leniently: 12 or 0.12 both mean 12%. A magnitude
-    above 1 is read as a percentage (the model often passes whole numbers)."""
-    n = _num(v) or 0.0
-    return n / 100.0 if abs(n) > 1.0 else n
+def _as_rate(v: Any) -> float | None:
+    """Interpret a rate knob leniently: 12 or 0.12 both mean 12%. An unset knob
+    (``None``) comes back as ``None``, which is why the return type is optional
+    rather than a float that quietly defaults to zero.
+
+    That distinction carries real weight. "Assume no growth" and "assume no
+    perpetual growth" are ordinary, conservative assumptions; folding them into
+    "not specified" substituted a 6% growth default and a 2.5% terminal one,
+    inflating the valuation while the assumptions block printed the substituted
+    figures as though they had been asked for.
+
+    A magnitude of 1 or more is read as a PERCENTAGE, because a whole number in a
+    rate field means percent to everyone who types one. The boundary is INCLUSIVE,
+    so ``growth_rate=1`` is 1% and not a doubling every year: read as a fraction it
+    would be a 20× valuation off one keystroke, where the percent reading is wrong
+    by at most a few points."""
+    n = _num(v)
+    if n is None:
+        return None
+    return n / 100.0 if abs(n) >= 1.0 else n
 
 
 # --- Pure DCF math (no network; exhaustively unit-tested) --------------------
@@ -199,17 +221,25 @@ def _snapshot(symbol: str) -> dict[str, Any]:
 
 # --- Assumption resolution ---------------------------------------------------
 def _resolve_growth(growth_rate: Any, history: list[dict[str, Any]]) -> tuple[float, str]:
-    """Stage-1 growth: an explicit knob wins; else derive a CAGR from the FCF
-    history (clamped to a sane band); else a conservative default."""
+    """Stage-1 growth: an explicit knob wins (including an explicit zero); else
+    derive a CAGR from the FCF history (clamped to a sane band); else a
+    conservative default."""
     g = _as_rate(growth_rate)
-    if g:
+    if g is not None:
         return g, "user-supplied"
     if len(history) >= 2:
         base, oldest = history[0]["fcf"], history[-1]["fcf"]
-        cagr = _cagr(oldest, base, len(history) - 1)
+        # The span is the DISTANCE between the fiscal years, not the number of rows.
+        # `_fcf_history` drops years whose operating cash flow is missing — normal
+        # in as-reported XBRL — so a history of FY2025/24/22 is three years of
+        # compounding held in two rows. Counting rows compressed it into two and
+        # overstated the annual growth, which then compounds through five projected
+        # years and the terminal value.
+        periods = history[0]["fy"] - history[-1]["fy"]
+        cagr = _cagr(oldest, base, periods)
         if cagr is not None:
             clamped = max(_GROWTH_FLOOR, min(cagr, _GROWTH_CAP))
-            note = f"derived from {len(history)}y FCF CAGR"
+            note = f"derived from {periods}y FCF CAGR"
             if clamped != cagr:
                 note += f" ({_pct(cagr)} clamped)"
             return clamped, note
@@ -308,8 +338,10 @@ def _render(sym: str, snap: dict[str, Any], history: list[dict[str, Any]],
 
 
 # --- The tool ----------------------------------------------------------------
-def dcf_valuation(symbol: str, growth_rate: float = 0.0, discount_rate: float = 0.0,
-                  terminal_growth: float = 0.0, years: int = 0, as_of: str = "") -> str:
+def dcf_valuation(symbol: str, growth_rate: float | None = None,
+                  discount_rate: float | None = None,
+                  terminal_growth: float | None = None,
+                  years: int = 0, as_of: str = "") -> str:
     """Estimate a stock's intrinsic value with a deterministic two-stage
     discounted-cash-flow (DCF) model. Free-cash-flow history is pulled AS-REPORTED
     from the company's SEC 10-K filings (XBRL: operating cash flow − capital
@@ -319,11 +351,13 @@ def dcf_valuation(symbol: str, growth_rate: float = 0.0, discount_rate: float = 
     intrinsic value per share, upside/(downside) vs the current price, and a
     sensitivity grid over discount rate × terminal growth.
 
-    Assumption knobs (pass 0 to use a sensible default / derived value; rates
-    accept either 0.10 or 10 for 10%): ``growth_rate`` stage-1 annual FCF growth
-    (default: derived from the historical FCF CAGR, clamped to −5%..20%);
-    ``discount_rate`` (default 9%); ``terminal_growth`` (default 2.5%, must be
-    below the discount rate); ``years`` projection horizon (default 5, 3–10).
+    Assumption knobs — OMIT one to use a sensible default / derived value; passing
+    0 means exactly zero, which is a real assumption and is honoured as one. Rates
+    accept either 0.10 or 10 for 10% (a magnitude of 1 or more reads as a percent,
+    so ``1`` is 1%). ``growth_rate`` stage-1 annual FCF growth (default: derived
+    from the historical FCF CAGR, clamped to −5%..20%); ``discount_rate``
+    (default 9%); ``terminal_growth`` (default 2.5%, must be below the discount
+    rate); ``years`` projection horizon (default 5, 3–10).
 
     Use for 'what's X worth / intrinsic value / fair value / is X over- or
     undervalued / DCF / run a valuation'. It's a model, not a recommendation —
@@ -360,9 +394,22 @@ def dcf_valuation(symbol: str, growth_rate: float = 0.0, discount_rate: float = 
                 f"anchored on negative FCF; use a multiples approach (stock_fundamentals) "
                 f"or a longer normalized-FCF view instead.")
 
+    supplied = _as_rate(growth_rate)
+    if supplied is not None and not (
+        _MIN_SUPPLIED_GROWTH <= supplied <= _MAX_SUPPLIED_GROWTH
+    ):
+        return (
+            f"A stage-1 FCF growth of {_pct(supplied)} a year isn't a modelling "
+            f"assumption. Rates of 1 or more are read as percentages, so "
+            f"`growth_rate=50` means 50% — pass something between "
+            f"{_pct(_MIN_SUPPLIED_GROWTH)} and {_pct(_MAX_SUPPLIED_GROWTH)}, or "
+            f"omit it to derive the rate from {sym}'s own FCF history."
+        )
     growth, growth_src = _resolve_growth(growth_rate, history)
-    discount = _as_rate(discount_rate) or _DEFAULT_DISCOUNT
-    tg = _as_rate(terminal_growth) or _DEFAULT_TERMINAL_GROWTH
+    discount = _as_rate(discount_rate)
+    discount = _DEFAULT_DISCOUNT if discount is None else discount
+    tg = _as_rate(terminal_growth)
+    tg = _DEFAULT_TERMINAL_GROWTH if tg is None else tg
     if discount <= tg:
         return (f"Discount rate ({_pct(discount)}) must exceed terminal growth "
                 f"({_pct(tg)}) for the DCF to converge. Raise the discount rate or "

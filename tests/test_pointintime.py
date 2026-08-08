@@ -25,6 +25,15 @@ def _sessions(out: str) -> int:
     return int(found.group(1))
 
 
+def _window_dates(out: str) -> tuple[str, str]:
+    """The ``first → last`` dates a tool prints in its header."""
+    import re
+
+    found = re.search(r"(\d{4}-\d{2}-\d{2}) → (\d{4}-\d{2}-\d{2})", out)
+    assert found, f"no window dates in: {out[:120]}"
+    return found.group(1), found.group(2)
+
+
 #: The regression needs ~30 overlapping days, and an as_of cut has to leave enough
 #: on BOTH sides to be visible — so the factor fixtures run over a long, dense,
 #: real-calendar window rather than the short shared price fake.
@@ -213,11 +222,24 @@ def test_the_trim_is_by_date_so_days_means_the_same_thing_either_way():
     assert 240 <= len(cut) <= 265, f"a year of weekdays, got {len(cut)} rows"
 
 
-def test_the_trim_never_touches_a_current_request():
-    """No as_of means no widening happened, so nothing may be trimmed — callers
-    without a date must behave exactly as before."""
+def test_a_current_request_is_trimmed_from_the_end_of_the_series():
+    """No as_of still means a window: the sources answer in coarse range buckets,
+    so 5 days can come back as a month. The anchor is the series' own last date,
+    not today, so a stale symbol still yields its last price."""
     series = [(f"2025-01-{i + 1:02d}", 100.0 + i) for i in range(28)]
-    assert pit.as_of_series(series, None, days=5) == series
+    cut = pit.as_of_series(series, None, days=5)
+    assert cut[-1] == series[-1]
+    assert cut[0][0] == "2025-01-24", "the window starts `days` calendar days back"
+    # Without `days` the whole bucket comes back — for callers that slice it themselves.
+    assert pit.as_of_series(series, None) == series
+
+
+def test_a_current_request_is_never_trimmed_to_nothing():
+    """Anchoring on today instead of the last row would empty a series whose most
+    recent print predates the window — a delisted or thinly traded symbol — turning
+    'here is the last price' into 'no such ticker'."""
+    stale = [("2020-01-02", 10.0), ("2020-01-03", 11.0)]
+    assert pit.as_of_series(stale, None, days=5) == stale
 
 
 def test_a_dated_fetch_returns_at_most_the_days_requested(monkeypatch):
@@ -345,6 +367,62 @@ def test_a_dated_portfolio_regression_says_the_weights_are_current(monkeypatch):
     assert "CURRENT holdings" not in dated_ticker
     # Nor does an undated portfolio one — the caveat is about MIXING eras.
     assert "CURRENT holdings" not in factors.factor_exposure("", days=_FF_DAYS)
+
+
+# --- the requested window binds with no date too --------------------------------
+
+#: A request the sources cannot answer exactly: it falls between the one-year and
+#: two-year buckets, so the reply is 730 days of history for a 400-day question.
+_OVERSHOOT_DAYS = 400
+
+
+def test_risk_metrics_computes_over_the_days_it_asked_for(monkeypatch):
+    """Volatility, drawdown, Sharpe and beta are all computed from the series as a
+    whole, so an over-long series is not a cosmetic problem — every figure in the
+    answer is measured over a window nobody asked for, under a header naming the
+    dates it silently used."""
+    import financial_research_assistant.tools as t
+
+    _fake_fetch(monkeypatch)
+    first, last = _window_dates(t.risk_metrics("AAPL", days=_OVERSHOOT_DAYS))
+    span = (date.fromisoformat(last) - date.fromisoformat(first)).days
+    assert span <= _OVERSHOOT_DAYS, f"a {_OVERSHOOT_DAYS}-day request covered {span} days"
+    assert span > _OVERSHOOT_DAYS - 10, "and it must not fall short of the window either"
+
+
+def test_a_price_chart_shows_the_days_it_asked_for(monkeypatch):
+    """The chart's own header names the window, so an untrimmed bucket puts a
+    two-year trend under a caption that says the user asked for 400 days."""
+    import financial_research_assistant.tools as t
+
+    _fake_fetch(monkeypatch)
+    first, last = _window_dates(t.price_history_chart("AAPL", days=_OVERSHOOT_DAYS))
+    assert (date.fromisoformat(last) - date.fromisoformat(first)).days <= _OVERSHOOT_DAYS
+
+
+def test_factor_exposure_regresses_over_the_days_it_asked_for(monkeypatch):
+    """The loadings are estimated from every return in the series, so a bucket
+    overshoot quietly triples the estimation window."""
+    from financial_research_assistant import factors
+    import financial_research_assistant.tools as t
+
+    # Two years of daily prices for a 200-day request — what the one-year request
+    # below actually receives from a range-bucketed source.
+    start = date(2024, 1, 1)
+    dates = [(start + timedelta(days=i)).isoformat() for i in range(730)]
+    series = [(d, 100.0 + i * 0.4 + (i % 7)) for i, d in enumerate(dates)]
+    monkeypatch.setattr(
+        t, "_fetch_daily",
+        lambda sym, days, strict=False, as_of=None, **_kw: pit.as_of_series(
+            series, as_of, days
+        ),
+    )
+    names = ["Mkt-RF", "SMB", "HML"]
+    ff = {d: {"Mkt-RF": 0.001 * ((i % 5) - 2), "SMB": 0.0005, "HML": 0.0, "RF": 0.0}
+          for i, d in enumerate(dates)}
+    monkeypatch.setattr(factors, "_fetch_ff_factors", lambda five_factor=False: (names, ff))
+
+    assert _days(factors.factor_exposure("AAPL", days=200)) <= 200
 
 
 def test_a_bad_as_of_is_reported_by_the_tool_not_raised(monkeypatch):

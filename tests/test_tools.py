@@ -679,21 +679,110 @@ def test_risk_metrics_reports_vol_drawdown_sharpe_beta(monkeypatch):
     assert "Sharpe" in out and "beta vs SPY" in out
 
 
-def test_portfolio_vs_benchmark(monkeypatch, tmp_path):
+def _yahoo_like_fetch(monkeypatch, *, history_days=10_000):
+    """Stub the price fetch the way the real source answers, in the one respect
+    that matters to a benchmark comparison: the window always ENDS TODAY and
+    reaches back only as far as it was asked to.
+
+    A fixed handful of hand-picked dates answers every request identically, so a
+    fetch that can't reach the portfolio's period looks exactly like one that can
+    — which is how a benchmark return measured over a different span reached the
+    output as a verdict. ``history_days`` caps how far back the source has any
+    data at all, for the case where the period predates its coverage.
+    """
+    from datetime import date, timedelta
+
     import financial_research_assistant.tools as t
+    from financial_research_assistant.pointintime import as_of_series
+
+    today = date.today()
+
+    def fake(sym, days, strict=False, as_of=None, **_kw):
+        span = min(int(days), history_days)
+        series = [
+            (d.isoformat(), 100.0 + i * 0.01)
+            for i in range(span)
+            if (d := today - timedelta(days=span - 1 - i)).weekday() < 5
+        ]
+        return as_of_series(series, as_of, days)
+
+    monkeypatch.setattr(t, "_fetch_daily", fake)
+
+
+def _two_year_portfolio(monkeypatch, tmp_path):
+    """Two chained statements covering 2024 and 2025 -> a TWRR series to benchmark."""
     from financial_research_assistant import statements as s
+
     monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
-    # two chained statements -> a portfolio TWRR series to benchmark
     s.import_statement(_mini_statement("U1", "January 1, 2024 - December 31, 2024", "10%", 1000))
     s.import_statement(_mini_statement("U1", "January 1, 2025 - December 31, 2025", "20%", 1300))
 
-    def fake(sym, days, strict=False, **_kw):
-        return [("2024-01-01", 100.0), ("2024-07-01", 110.0), ("2025-12-31", 120.0)]
 
-    monkeypatch.setattr(t, "_fetch_daily", fake)
+def test_risk_metrics_beta_pairs_the_same_sessions(monkeypatch):
+    """Beta pairs the stock's and the benchmark's returns by POSITION. Dropping an
+    unusable session from only the series that had it shortens that list alone, so
+    every later return lines up against the wrong day's market return — and the
+    covariance stays a perfectly ordinary-looking number while measuring nothing.
+    Here the two move identically, so anything but 1.00 is the misalignment."""
+    from datetime import date, timedelta
+
+    import financial_research_assistant.tools as t
+    from financial_research_assistant.pointintime import as_of_series
+
+    start = date(2026, 1, 1)
+    dates = [(start + timedelta(days=i)).isoformat() for i in range(31)]
+    # The benchmark's first close is unusable; after it the two move together
+    # exactly (−10%, +11.1%, …), so a like-for-like beta is 1.00.
+    closes = {
+        "AAPL": [110.0] + [100.0, 90.0] * 15,
+        "SPY": [0.0] + [400.0, 360.0] * 15,
+    }
+    monkeypatch.setattr(
+        t, "_fetch_daily",
+        lambda sym, days, strict=False, as_of=None, **_kw: as_of_series(
+            list(zip(dates, closes[sym.upper()])), as_of, days
+        ),
+    )
+    assert "beta vs SPY   1.00" in t.risk_metrics("AAPL", days=90)
+
+
+def test_portfolio_vs_benchmark(monkeypatch, tmp_path):
+    import financial_research_assistant.tools as t
+
+    _two_year_portfolio(monkeypatch, tmp_path)
+    _yahoo_like_fetch(monkeypatch)
     out = t.portfolio_vs_benchmark("SPY")
     assert "Portfolio vs SPY" in out
     assert "portfolio (TWRR)" in out and "%" in out
+
+
+def test_portfolio_vs_benchmark_reaches_back_to_the_period_start(monkeypatch, tmp_path):
+    """The portfolio's period closed well before today. Sizing the fetch by the
+    period's own LENGTH reaches only that far back from today, so the whole window
+    lands after the period and there is nothing left to compare."""
+    import financial_research_assistant.tools as t
+
+    _two_year_portfolio(monkeypatch, tmp_path)
+    _yahoo_like_fetch(monkeypatch)
+    out = t.portfolio_vs_benchmark("SPY")
+    assert "2024-01-01 → 2025-12-31" in out
+    assert "you outperformed" in out or "you underperformed" in out
+
+
+def test_portfolio_vs_benchmark_refuses_a_partly_covered_span(monkeypatch, tmp_path):
+    """A source with only a year of history covers the back half of a two-year
+    period. That yields plenty of rows and a plausible return — over the wrong
+    window — and the tool's entire output is the difference between that return
+    and the portfolio's, so the verdict would be an artifact of the mismatch."""
+    import financial_research_assistant.tools as t
+
+    _two_year_portfolio(monkeypatch, tmp_path)
+    _yahoo_like_fetch(monkeypatch, history_days=365)
+    out = t.portfolio_vs_benchmark("SPY")
+    assert "not enough to compare like for like" in out
+    assert "outperformed" not in out and "underperformed" not in out
+    # The portfolio's own figure is still reported — it needed no benchmark.
+    assert "Portfolio return over 2024-01-01 → 2025-12-31" in out
 
 
 def test_export_data_writes_csv(monkeypatch, tmp_path):
@@ -779,6 +868,47 @@ def test_convert_currency_tool(monkeypatch):
     assert "110.00 USD" in out and "1.1000" in out
     assert t.convert_currency(1, "USD").startswith("1.00 USD ≈ 1.00 USD")  # base is identity
     assert "Couldn't fetch" in t.convert_currency(5, "ZZZ")  # no rate
+
+
+def test_convert_currency_says_when_the_rate_is_from_after_the_date(monkeypatch):
+    """When the pair's history doesn't reach back to the requested day there is no
+    rate on or before it, and the closest one available comes from AFTER. Returning
+    it is right; describing it as "the closest date on/before" says the one thing
+    that isn't true of it."""
+    import financial_research_assistant.tools as t
+
+    monkeypatch.setattr(
+        t, "_fetch_daily",
+        lambda sym, days, strict=False, **_kw: [("2025-06-02", 1.1), ("2025-06-03", 1.1)],
+    )
+    out = t.convert_currency(100, "EUR", on_date="2019-01-15")
+    assert "2025-06-02" in out
+    assert "on/before" not in out
+    assert "EARLIEST rate available" in out
+    # A date the history does cover still reads as on/before.
+    covered = t.convert_currency(100, "EUR", on_date="2025-06-03")
+    assert "on/before" in covered or "rate on 2025-06-03" in covered
+
+
+def test_income_summary_converts_a_single_non_base_currency(monkeypatch, tmp_path):
+    """An account reporting entirely in one non-USD currency needs the USD total
+    MORE than a mixed one, not less: without it a USD-based user is handed a
+    dividend figure in a currency they don't think in, and nothing to compare it
+    to. Gating on "more than one currency" left exactly that case bare."""
+    import financial_research_assistant.tools as t
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(
+        "Statement,Header,Field Name,Field Value\n"
+        'Statement,Data,Period,"January 1, 2025 - December 31, 2025"\n'
+        "Dividends,Header,Currency,Account,Date,Description,Amount\n"
+        "Dividends,Data,EUR,U1,2025-03-01,SAP(DE000) Cash Dividend,20\n"
+    )
+    _stub_fx(monkeypatch, {"EUR": 1.5})
+    out = t.income_summary(year=2025)
+    assert "EUR:" in out
+    assert "30.00 USD net total" in out
 
 
 def test_fetch_daily_strict_distinguishes_outage_from_bad_ticker(monkeypatch):

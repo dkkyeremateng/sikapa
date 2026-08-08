@@ -37,9 +37,12 @@ def tax_loss_harvest(
     (held MORE than a year), estimates the tax benefit at the given rates, and
     flags **wash-sale risk** when you bought the same symbol within the last 30
     days (repurchasing within 30 days of the sale disallows the loss).
-    ``min_loss`` hides symbols whose total loss is smaller. ``account`` scopes it. Read-only analysis, not tax advice — a loss is
-    only realized if you actually sell."""
+    ``min_loss`` hides symbols whose total loss is smaller. ``account`` picks the
+    account (default: the newest import's — lots live in one account; pass
+    ``"all"`` to pool every account). Read-only analysis, not tax advice — a loss
+    is only realized if you actually sell."""
     from . import statements
+    from .tools import _account_scope_note
 
     lots_by_sym = statements.open_lots(account=account or None)
     if not lots_by_sym:
@@ -98,7 +101,10 @@ def tax_loss_harvest(
             )
         )
     results.sort(key=lambda r: r["loss"])  # biggest loss first (most negative)
-    lines = [f"TAX-LOSS HARVESTING CANDIDATES (as of {today.isoformat()}):"]
+    lines = [
+        f"TAX-LOSS HARVESTING CANDIDATES (as of {today.isoformat()}"
+        f"{_account_scope_note(account)}):"
+    ]
     for r in results:
         wash = "  ⚠ wash-sale risk (bought within 30d)" if r["wash"] else ""
         split = []
@@ -123,11 +129,30 @@ def tax_loss_harvest(
     return "\n".join(lines)
 
 
-def _returns(closes: list[float]) -> list[float]:
-    return [
-        (closes[i] - closes[i - 1]) / closes[i - 1]
-        for i in range(1, len(closes)) if closes[i - 1]
-    ]
+def _aligned_returns(closes: dict[str, list[float]]) -> dict[str, list[float]]:
+    """Daily returns for several already-date-aligned close series, dropping a
+    session from EVERY series whenever it can't be computed for one of them.
+
+    Per-series dropping is what the callers cannot use. It shortens only the list
+    that hit the unusable close, so every later value in that list shifts one slot
+    earlier — and the lists are then read by POSITION: the correlation grid pairs
+    slot *i* of two tickers, and the portfolio series sums slot *i* across every
+    holding. From the bad print onward, each symbol's return is combined with a
+    different day's return for the others, producing a full grid of
+    plausible-looking numbers that no longer describe the same days — worse than a
+    gap, because nothing about it looks wrong.
+
+    Dropping the session everywhere keeps "same position" and "same date" the same
+    statement, at the cost of one shared row."""
+    syms = list(closes)
+    if not syms:
+        return {}
+    n = min(len(closes[s]) for s in syms)
+    usable = [i for i in range(1, n) if all(closes[s][i - 1] for s in syms)]
+    return {
+        s: [(closes[s][i] - closes[s][i - 1]) / closes[s][i - 1] for i in usable]
+        for s in syms
+    }
 
 
 def _pearson(a: list[float], b: list[float]) -> float | None:
@@ -181,7 +206,7 @@ def correlation_matrix(symbols: str = "", days: int = 180, as_of: str = "") -> s
             f"Not enough overlapping price history for {', '.join(syms)}. Check the "
             f"tickers or widen the window."
         )
-    rets = {s: _returns(closes[s]) for s in present}
+    rets = _aligned_returns({s: closes[s] for s in present})
     # Build the matrix.
     w = max(6, max(len(s) for s in present))
     header = " " * (w + 1) + " ".join(f"{s:>6}" for s in present)
@@ -291,7 +316,11 @@ def portfolio_risk(account: str = "", days: int = 365, benchmark: str = "SPY") -
     # of the portfolio's value that covers so the answer states its own scope.
     covered_value = sum(value[s] for s in covered)
     w = {s: value[s] / covered_value for s in covered}
-    rets = {s: _returns(closes[s]) for s in covered}
+    # The benchmark rides along in the same alignment: beta pairs the portfolio and
+    # benchmark returns by position too, so it has to share their dropped sessions.
+    rets = _aligned_returns(
+        {s: closes[s] for s in covered + ([bench] if bench in closes else [])}
+    )
     n = min(len(rets[s]) for s in covered)
     port: list[float] = [
         float(sum(w[s] * rets[s][i] for s in covered)) for i in range(n)
@@ -303,7 +332,7 @@ def portfolio_risk(account: str = "", days: int = 365, benchmark: str = "SPY") -
     vol = sd * (252 ** 0.5) * 100.0
     sharpe = (st.fmean(port) / sd * (252 ** 0.5)) if sd else 0.0
     cum_ret, max_dd = _max_drawdown(port)
-    beta = _beta(port, _returns(closes[bench])) if bench in closes else None
+    beta = _beta(port, rets[bench]) if bench in rets else None
     beta_txt = f"\n  beta vs {bench}          {beta:.2f}" if beta is not None else ""
 
     coverage = covered_value / total_value * 100.0 if total_value else 0.0
