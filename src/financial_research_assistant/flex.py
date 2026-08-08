@@ -36,6 +36,8 @@ from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from .storage import write_private
+
 _SEND_URL = (
     "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest"
 )
@@ -149,13 +151,17 @@ def flex_dir() -> Path:
 
 
 def save_flex_xml(xml: str, query_id: str) -> Path:
-    """Write the statement XML to a timestamped file under ``flex_dir()``."""
-    d = flex_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    """Write the statement XML to a timestamped file under ``flex_dir()``.
+
+    Written ``0600`` through ``storage.write_private``: a Flex statement is the
+    most sensitive file this project keeps — every account number, position, and
+    trade — so it gets the same treatment as the credential store rather than
+    landing world-readable at the process umask.
+    """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     safe_qid = "".join(c for c in query_id if c.isalnum()) or "query"
-    dest = d / f"flex-{safe_qid}-{stamp}.xml"
-    dest.write_text(xml, encoding="utf-8")
+    dest = flex_dir() / f"flex-{safe_qid}-{stamp}.xml"
+    write_private(dest, xml, prefix=".flex-")
     return dest
 
 
