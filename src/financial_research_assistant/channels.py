@@ -52,6 +52,12 @@ class Channel:
     optional: a rendered PDF has nowhere to go on a desktop-banner channel, and a
     channel that cannot carry a file must be skipped visibly rather than silently
     dropping it or stringifying it into a message.
+
+    ``full_content`` is the same kind of declaration for text: a channel that
+    truncates to a headline has shown the user that something happened, not the
+    answer. Declared here rather than judged at the call site, so the scheduler can
+    ask "did the analysis actually reach anyone?" without knowing any channel's
+    name — the same reason ``send_file`` is a capability and not a lookup table.
     """
 
     key: str
@@ -60,6 +66,8 @@ class Channel:
     #: Shown when explaining where a task's answer will go.
     label: str = ""
     send_file: FileSender | None = None
+    #: False for banner-style channels that carry only an opening line.
+    full_content: bool = True
 
 
 CHANNEL_REGISTRY: dict[str, Channel] = {}
@@ -158,6 +166,24 @@ def deliver_file(
     return delivered, failed
 
 
+def carried_full_text(delivered: list[str]) -> bool:
+    """Whether any of these delivered-to channels carried the WHOLE message.
+
+    The distinction the scheduler needs before it decides an answer has arrived.
+    ``desktop`` is on by default and reports success as soon as the notifier is
+    spawned, so a run whose Telegram delivery failed still came back with one
+    "delivered" channel — and a full analysis was quietly reduced to a 200-character
+    banner, with nothing parked for redelivery. A key that is no longer in the
+    registry counts as full: truncation is a property a channel has to declare, and
+    treating everything unrecognised as a banner would park answers that did arrive.
+    """
+    return any(
+        CHANNEL_REGISTRY[k].full_content
+        for k in delivered
+        if k in CHANNEL_REGISTRY
+    ) or any(k not in CHANNEL_REGISTRY for k in delivered)
+
+
 def file_capable(prefer: str = "") -> list[str]:
     """Active channels that can carry a file — for telling the user where one can go."""
     return [c.key for c in active_channels(prefer) if c.send_file is not None]
@@ -186,7 +212,11 @@ def _telegram_send_file(path: str, caption: str, full_quality: bool = False) -> 
 
 def _desktop_send(text: str) -> bool:
     """An OS banner. Truncated hard — a notification centre shows a line or two, and
-    the full answer is in the task log and any other configured channel."""
+    the full answer is in the task log and any other configured channel.
+
+    Registered ``full_content=False`` for exactly that reason, and because the
+    return value is optimistic anyway: it says a notifier process was started, not
+    that anything appeared on screen."""
     from . import alerts
 
     head = (text or "").strip().splitlines()
@@ -213,6 +243,7 @@ register_channel(Channel(
 ))
 register_channel(Channel(
     "desktop", _desktop_configured, _desktop_send, "desktop notification",
+    full_content=False,
 ))
 # stdout is never implicitly active: it's for `NOTIFY_CHANNELS=stdout` in a cron
 # job that mails its own output. Left in the default set it would "deliver" every

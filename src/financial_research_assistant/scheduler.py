@@ -143,7 +143,12 @@ async def _answer(prompt: str, session_id: str, fake: bool = False) -> tuple[boo
             # A rule that fires inside a scheduled run still deserves a push — it
             # is exactly the "tell me when" the user asked for, and there is no
             # terminal here to show the toast.
-            channels.deliver(f"🔔 {ev.text}")
+            #
+            # Off the loop thread: `deliver` is urllib, and a blocking socket
+            # inside a coroutine stalls EVERYTHING sharing that loop — here, the
+            # event stream of the very turn that raised the alert, which stops
+            # mid-answer while a notification API takes its time.
+            await asyncio.to_thread(channels.deliver, f"🔔 {ev.text}")
     # Persist the turn like the headless CLI does. A background run is the case
     # where a transcript matters MOST — nobody watched it, so without this a task
     # that fails leaves only a one-line reason and there is no way to see what it
@@ -202,16 +207,26 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
 
     label = f"task {tid}" + ("" if ok else " (failed)")
     body = f"{_HEADER.format(label=label)}\n\n{answer}"
-    delivered, failed = channels.deliver(body, str(task.get("channel") or ""))
+    delivered, failed = await asyncio.to_thread(
+        channels.deliver, body, str(task.get("channel") or "")
+    )
     if failed:
         _log(f"  delivery failed on: {', '.join(failed)}")
-    if not delivered:
+    if not channels.carried_full_text(delivered):
         # The work is done and paid for, so the answer is parked and re-sent on
         # later ticks instead of being lost to a channel that was briefly down.
-        # stdout too, so a cron entry redirecting output still captures it.
+        #
+        # A banner channel does not settle the debt: the desktop notifier is on by
+        # default and shows the first 200 characters, so "Telegram was down but the
+        # toast went up" used to count as delivered and threw the analysis away.
         tasks.queue_delivery(tid, body)
-        print(body, flush=True)
-        _log("  nowhere to deliver — parked for redelivery (see --tasks)")
+        if delivered:
+            _log(f"  only {', '.join(delivered)} took it, and only as a banner — the "
+                 "full answer is parked for redelivery (see --tasks)")
+        else:
+            # stdout too, so a cron entry redirecting output still captures it.
+            print(body, flush=True)
+            _log("  nowhere to deliver — parked for redelivery (see --tasks)")
 
     tail = f"; next {record['due']}" if record and record.get("status") == "pending" else ""
     _log(f"  {'✓' if ok else '✗'} task {tid}"
@@ -234,12 +249,16 @@ async def retry_deliveries() -> list[str]:
                  f"{tasks.MAX_DELIVERY_ATTEMPTS} attempts; the answer is in the log")
             tasks.delivery_done(tid)
             continue
-        delivered, _failed = channels.deliver(body, str(task.get("channel") or ""))
-        if delivered:
+        delivered, _failed = await asyncio.to_thread(
+            channels.deliver, body, str(task.get("channel") or "")
+        )
+        if channels.carried_full_text(delivered):
             tasks.delivery_done(tid)
             out.append(tid)
             _log(f"  redelivered task {tid} → {', '.join(delivered)}")
         else:
+            # A banner is not the answer, so the parked text stays parked and waits
+            # for a channel that carries the whole thing.
             tasks.queue_delivery(tid, body)  # bumps the attempt counter
     return out
 
@@ -295,7 +314,34 @@ async def run_due(
             f"raise FINANCIAL_RESEARCH_TASK_BATCH to widen)" if deferred > 0 else ""))
     results = []
     for task in claimed:
-        results.append(await run_task(task, fake=fake))
+        try:
+            results.append(await run_task(task, fake=fake))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one task must not strand the batch
+            # `run_task` already absorbs a failing turn; what reaches here is its
+            # bookkeeping — a store write, a channel call — blowing up. Without
+            # this the whole rest of the CLAIMED batch is abandoned mid-loop, and
+            # every one of those tasks sits in "running" until its claim expires.
+            from .adapter import describe_error
+
+            tid = str(task.get("id"))
+            reason = describe_error(exc)
+            _log(f"  ✗ task {tid}: {reason}")
+            try:
+                # Only if the run never reached a verdict. `run_task` records
+                # BEFORE it delivers, so a failure on the delivery side is already
+                # written down, and recording it again would flip a finished task
+                # back to pending and pay for the same analysis a second time.
+                stored = tasks.get_task(tid)
+                if stored is not None and stored.get("status") == "running":
+                    tasks.record_result(tid, False, reason)
+            except Exception:  # noqa: BLE001 - the store itself may be what failed
+                _log(f"  could not record the failure for task {tid}; its claim "
+                     "will expire and the task will be retried")
+            results.append(
+                {"id": tid, "ok": False, "delivered": [], "failed": [], "answer": reason}
+            )
     return results
 
 
@@ -314,7 +360,11 @@ async def poll_inbox(fake: bool = False, timeout: int = 0) -> list[dict[str, Any
     if not telegram.inbound_enabled():
         return []
     try:
-        messages = telegram.get_updates(timeout=timeout)
+        # A long poll parks on a socket for up to POLL_TIMEOUT seconds. Run on the
+        # loop thread it would block every other coroutine on it — including the
+        # `--watch` tick and any in-flight turn — for the whole window, which is
+        # the entire point of long-polling in the first place.
+        messages = await asyncio.to_thread(telegram.get_updates, timeout=timeout)
     except RuntimeError as exc:
         _log(f"telegram poll failed: {exc}")
         return []
@@ -330,7 +380,7 @@ async def poll_inbox(fake: bool = False, timeout: int = 0) -> list[dict[str, Any
                 text, _CHAT_SESSION.format(chat_id=chat_id), fake=fake
             )
         try:
-            telegram.send_message(reply, chat_id=chat_id)
+            await asyncio.to_thread(telegram.send_message, reply, chat_id=chat_id)
         except RuntimeError as exc:
             _log(f"  reply failed: {exc}")
         out.append({"chat_id": chat_id, "ok": ok})

@@ -208,9 +208,16 @@ def build_digest(
             "using `import_ibkr_statement`, then run the digest again."
         )
 
-    symbols = [
-        (p.get("symbol") or "").upper() for p in positions if (p.get("symbol") or "").strip()
-    ]
+    # One entry per symbol, in first-seen order. The same holding appears once per
+    # account (and once per lot in some statements), and a duplicate costs more than
+    # a repeated line: the symbol is priced and its calendar fetched twice against
+    # rate-limited endpoints, it is listed twice as a mover, and every alert rule
+    # written against "*" fires twice for the one move.
+    symbols: list[str] = []
+    for p in positions:
+        sym = (p.get("symbol") or "").strip().upper()
+        if sym and sym not in symbols:
+            symbols.append(sym)
     movers, earnings, exdivs = _scan_holdings(
         symbols, lookback_days, move_threshold, earnings_within, today,
         _fetch_daily, _fetch_calendar,

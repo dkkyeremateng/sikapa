@@ -4,6 +4,7 @@ Offline — no model, no network. The autouse fixture in conftest.py points ever
 test at a throwaway tasks.json, so nothing here can queue work in the real store.
 """
 
+import os
 import stat
 from datetime import datetime, timedelta, timezone
 
@@ -188,6 +189,51 @@ def test_claim_is_bounded_so_a_backlog_drains_over_several_ticks():
     assert len(tasks.claim_due(limit=2)) == 2
 
 
+def test_a_killed_runner_does_not_strand_its_task_forever():
+    """`release` covers Ctrl-C; nothing covers a SIGKILL or a power cut between the
+    claim and the result. The task stayed "running" — skipped by every later tick,
+    while the listing went on showing it as waiting to run."""
+    tasks.add_task("due", "+0m")
+    assert len(tasks.claim_due()) == 1
+    assert tasks.claim_due() == [], "inside the timeout it may genuinely still be running"
+    later = tasks.now_utc() + timedelta(minutes=tasks.DEFAULT_CLAIM_TIMEOUT_MINUTES + 1)
+    reclaimed = tasks.claim_due(now=later)
+    assert [t["id"] for t in reclaimed] == ["s1"]
+    assert reclaimed[0]["attempts"] == 1, "an expired claim counts as an attempt"
+
+
+def test_the_claim_timeout_is_tunable(monkeypatch):
+    monkeypatch.setenv("FINANCIAL_RESEARCH_TASK_CLAIM_TIMEOUT", "5")
+    tasks.add_task("due", "+0m")
+    tasks.claim_due()
+    assert tasks.claim_due(now=tasks.now_utc() + timedelta(minutes=6)) != []
+
+
+def test_a_task_that_keeps_killing_its_runner_is_parked_like_any_other_failure(monkeypatch):
+    """Three strikes has to apply to interrupted runs too, or a prompt that OOMs the
+    machine every time is reclaimed and re-run for the rest of time."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_TASK_CLAIM_TIMEOUT", "1")
+    tasks.add_task("kills its runner", "+0m")
+    now = tasks.now_utc()
+    for attempt in range(tasks.MAX_ATTEMPTS):
+        assert tasks.claim_due(now=now) != [], f"attempt {attempt} should be reclaimed"
+        now += timedelta(minutes=2)
+    assert tasks.claim_due(now=now) == []
+    stored = tasks.load_tasks()[0]
+    assert stored["status"] == "error"
+    assert "interrupted" in stored["last_result"]
+
+
+def test_a_run_that_finishes_normally_is_never_reclaimed():
+    """The timeout must not resurrect a task that reported back: the claim is
+    cleared on the way out, so there is nothing left to expire."""
+    t = tasks.add_task("once only", "+0m")
+    tasks.claim_due()
+    tasks.record_result(t["id"], True, "the answer")
+    later = tasks.now_utc() + timedelta(days=1)
+    assert tasks.claim_due(now=later) == []
+
+
 # --- recurrence and bookkeeping ------------------------------------------------
 
 
@@ -218,6 +264,96 @@ def test_a_long_sleep_does_not_fire_a_burst_of_catch_up_runs():
     nxt = tasks.next_due(old, "daily")
     assert nxt > tasks.now_utc()
     assert nxt - tasks.now_utc() < timedelta(days=1)
+
+
+# --- recurrence across a daylight-saving transition ------------------------------
+#
+# Pinned to a real zone and two real transition dates. The module's promise is that
+# a task runs against the wall clock the user set it by, and that promise is only
+# testable somewhere the offset actually changes — a suite running in UTC (as CI
+# does) would assert nothing at all.
+
+
+@pytest.fixture
+def new_york():
+    """Run the test with the local zone set to America/New_York."""
+    import time
+
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    yield
+    if previous is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = previous
+    time.tzset()
+
+
+def _frozen(monkeypatch, moment):
+    """Pin ``now`` just after ``moment``, so next_due returns the very next
+    occurrence instead of rolling forward to the real current date."""
+    monkeypatch.setattr(
+        tasks, "now_utc", lambda: moment.astimezone(timezone.utc) + timedelta(minutes=1)
+    )
+
+
+def test_a_daily_task_keeps_its_wall_clock_hour_when_the_clocks_go_forward(
+    new_york, monkeypatch
+):
+    """2026-03-08: US clocks jump 02:00 EST → 03:00 EDT, so that day is 23 hours
+    long. Adding a flat 24 hours to the stored UTC instant moved a 09:00 daily to
+    10:00 — and left it there, because the day after is computed from the drifted
+    time."""
+    due = datetime(2026, 3, 7, 9, 0).astimezone()
+    _frozen(monkeypatch, due)
+    nxt = tasks.next_due(due.astimezone(timezone.utc), "daily").astimezone()
+    assert (nxt.year, nxt.month, nxt.day) == (2026, 3, 8)
+    assert (nxt.hour, nxt.minute) == (9, 0)
+    assert nxt - due == timedelta(hours=23)
+
+
+def test_a_daily_task_keeps_its_wall_clock_hour_when_the_clocks_go_back(
+    new_york, monkeypatch
+):
+    """2026-11-01: 02:00 EDT → 01:00 EST, a 25-hour day, and the drift goes the
+    other way — 09:00 became 08:00."""
+    due = datetime(2026, 10, 31, 9, 0).astimezone()
+    _frozen(monkeypatch, due)
+    nxt = tasks.next_due(due.astimezone(timezone.utc), "daily").astimezone()
+    assert (nxt.year, nxt.month, nxt.day) == (2026, 11, 1)
+    assert (nxt.hour, nxt.minute) == (9, 0)
+    assert nxt - due == timedelta(hours=25)
+
+
+def test_a_weekly_task_lands_on_the_same_local_time_a_week_later(new_york, monkeypatch):
+    """A week that contains a transition is not 168 hours, and 'weekly' means the
+    same time next week."""
+    due = datetime(2026, 3, 1, 9, 0).astimezone()
+    _frozen(monkeypatch, due)
+    nxt = tasks.next_due(due.astimezone(timezone.utc), "weekly").astimezone()
+    assert (nxt.month, nxt.day, nxt.hour) == (3, 8, 9)
+
+
+def test_hourly_stays_an_hour_of_real_time_across_the_boundary(new_york, monkeypatch):
+    """'hourly' names a duration, not a time of day. On the wall clock the hour of
+    the fall-back happens twice, so wall-clock arithmetic would skip a run of a task
+    whose only instruction was 'every hour'."""
+    due = datetime(2026, 11, 1, 0, 30).astimezone()  # 00:30 EDT, before the change
+    _frozen(monkeypatch, due)
+    nxt = tasks.next_due(due.astimezone(timezone.utc), "hourly")
+    assert nxt - due == timedelta(hours=1)
+
+
+def test_the_no_catch_up_rule_survives_the_wall_clock_arithmetic(new_york, monkeypatch):
+    """The other half of the contract: a machine asleep across the transition
+    resumes on the next occurrence, not with a burst of missed ones."""
+    due = datetime(2026, 3, 5, 9, 0).astimezone()
+    monkeypatch.setattr(
+        tasks, "now_utc", lambda: datetime(2026, 3, 10, 12, 0).astimezone(timezone.utc)
+    )
+    nxt = tasks.next_due(due.astimezone(timezone.utc), "daily").astimezone()
+    assert (nxt.month, nxt.day, nxt.hour) == (3, 11, 9)
 
 
 def test_weekdays_repeat_skips_the_weekend():
@@ -320,3 +456,39 @@ def test_a_stale_tick_counts_as_no_runner(monkeypatch):
 def test_the_listing_warns_too_when_tasks_are_waiting():
     tasks.add_task("queued", "+1h")
     assert "no task runner is active" in tasks.list_scheduled_tasks()
+
+
+def test_a_malformed_entry_survives_the_next_write():
+    """`load_tasks` filters records it cannot run, and every mutator writes the
+    filtered list back — so one hand-edit that dropped a "prompt" key used to
+    delete that task permanently on the next tick, silently and unrecoverably."""
+    import json
+
+    tasks.tasks_file().parent.mkdir(parents=True, exist_ok=True)
+    tasks.tasks_file().write_text(json.dumps([
+        {"id": "s1", "prompt": "analyse NVDA", "due": "2026-01-01T09:00:00+00:00",
+         "repeat": "once", "status": "pending"},
+        {"id": "s2", "promt": "analyse AMD", "status": "pending"},  # typo'd key
+        "not even a record",
+    ]), encoding="utf-8")
+
+    assert [t["id"] for t in tasks.load_tasks()] == ["s1"], "unrunnable, so not offered"
+    assert tasks.remove_task("s1") is True                  # any mutator rewrites
+
+    stored = json.loads(tasks.tasks_file().read_text(encoding="utf-8"))
+    assert {"id": "s2", "promt": "analyse AMD", "status": "pending"} in stored
+    assert "not even a record" in stored
+    assert tasks.load_tasks() == []          # still inert — nothing tries to run it
+
+
+def test_preserved_junk_does_not_reappear_as_a_task():
+    """Inert means inert: the ids stay out of id allocation and the listings."""
+    import json
+
+    tasks.tasks_file().parent.mkdir(parents=True, exist_ok=True)
+    tasks.tasks_file().write_text(json.dumps([{"id": "s9", "note": "half-typed"}]),
+                                  encoding="utf-8")
+    made = tasks.add_task("analyse NVDA", "+1h")
+    assert made["id"] == "s1", "the junk id is not counted"
+    assert [t["id"] for t in tasks.pending_tasks()] == ["s1"]
+    assert "half-typed" in tasks.tasks_file().read_text(encoding="utf-8")
