@@ -915,6 +915,77 @@ async def settle_schedule_claim(
     return answer + (repaired if repaired is not None else _UNBACKED_SCHEDULE_NOTE)
 
 
+# A turn that gathered eleven tools' worth of data, thought for 25 seconds, and
+# then answered "✅ Report sent to Telegram." without calling a render tool at all.
+# Nothing was drawn and nothing was sent; the tick was the model's own.
+#
+# The same shape as the scheduling claim above, and checkable the same way: the
+# answer asserts a side effect, and the turn's own tool calls say whether it
+# happened. No repair is attempted — rendering a review needs observations the
+# model never wrote, and inventing them to make the sentence true would be worse
+# than retracting it.
+_DELIVERY_CLAIM = re.compile(
+    r"(?:\b(?:report|sheet|summary|pdf|one[- ]pager|review)\b[^.\n]{0,40}"
+    r"\b(?:sent|delivered|pushed|shared)\b"
+    r"|\bi(?:'ve| have| ’ve)?\s+(?:now\s+|just\s+)?(?:sent|delivered|pushed)\b"
+    r"[^.\n]{0,40}\b(?:report|sheet|summary|pdf|telegram)\b"
+    r"|^\s*(?:✓|✅)\s*\**(?:report|sheet)\s+(?:sent|delivered)\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+#: Any of these having run means the answer's delivery talk is grounded in a real
+#: call — `render_report` and `render_review` both report where the file went, and
+#: `deliver_answer` sends the text itself.
+_DELIVERY_TOOLS = frozenset({"render_report", "render_review", "deliver_answer"})
+
+_UNBACKED_DELIVERY_NOTE = (
+    "\n\n---\n"
+    "⚠️ **Correction — no report was produced or sent.** The answer above says one "
+    "was, but no rendering tool was called in this turn, so nothing was drawn and "
+    "nothing reached your channels. Ask again — for a portfolio performance review, "
+    "`render_review` does the whole thing in one call."
+)
+
+
+async def settle_delivery_claim(
+    answer: str, called_tools: set[str], fake: bool = False
+) -> str:
+    """Retract an answer's delivery claim when no rendering tool ran.
+
+    A claim about a file the user was supposed to receive is worse than a wrong
+    figure: they stop looking for it. And it is trivially checkable — either a
+    render tool ran this turn or the sentence is false.
+    """
+    if fake or not answer or _DELIVERY_TOOLS & called_tools:
+        return answer
+    found = _DELIVERY_CLAIM.search(answer)
+    if not found or _is_an_offer(answer, found.start()):
+        return answer
+    return answer + _UNBACKED_DELIVERY_NOTE
+
+
+def _is_an_offer(answer: str, at: int) -> bool:
+    """Whether the matched sentence ASKS rather than asserts.
+
+    "Would you like the report sent to Telegram?" contains the same words as
+    "The report was sent to Telegram" and promises nothing — retracting an offer
+    would contradict a sentence that was already honest.
+    """
+    start = max(answer.rfind(".", 0, at), answer.rfind("\n", 0, at)) + 1
+    # Ends at the next terminator, not the next newline: taking the whole LINE let
+    # a trailing question mark excuse an assertion beside it — "Report sent to
+    # Telegram. Would you like a monthly one too?" read as an offer.
+    ends = [i for i in (answer.find(".", at), answer.find("?", at),
+                        answer.find("\n", at)) if i != -1]
+    sentence = answer[start:(min(ends) + 1) if ends else len(answer)]
+    if "?" in sentence:
+        return True
+    return bool(re.match(
+        r"\s*(?:would|shall|should|do|can|could|want|let me know|tell me)\b",
+        sentence, re.IGNORECASE,
+    ))
+
+
 def _recall_and_frame(user_msg: str) -> tuple[str, str | None]:
     """Build a turn's injected user content — durable-fact memory plus a few-shot
     preamble from earlier feedback — and an optional "recalled …" status line.
@@ -1110,9 +1181,12 @@ async def run_turn(
                 # how full the window is now — not the cumulative session input.
                 context_tokens=context_in,
             )
+            settled = await settle_schedule_claim(
+                user_msg, answer, called_tools, fake
+            )
             yield AgentEvent(
                 "final",
-                await settle_schedule_claim(user_msg, answer, called_tools, fake),
+                await settle_delivery_claim(settled, called_tools, fake),
             )
     except Exception as e:  # surface as an event, never raise into the UI
         yield AgentEvent("error", describe_error(e))
