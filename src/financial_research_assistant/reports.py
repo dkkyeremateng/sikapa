@@ -1733,9 +1733,24 @@ def _bars_html(series: dict[str, Any]) -> str:
             + "".join(rows) + legend + "</div>")
 
 
+#: Bullets shorter than this are labels, not observations.
+_MIN_NOTE = 24
+#: Past this a "bullet" is a paragraph, and the cover is a summary sheet.
+_MAX_NOTE = 420
+#: How much of one reaches the cover; the rest is in the document.
+_NOTE_DISPLAY = 190
+
+
 def extract_notes(markdown: str, used_titles: set[str]) -> list[str]:
-    """Short bullets from sections the charts did not consume — the observations
-    that are prose rather than numbers."""
+    """Bullets from sections the charts did not consume — the observations that
+    are prose rather than numbers.
+
+    Long ones are CLIPPED rather than dropped. A hard 150-character ceiling
+    excluded every real observation the agent writes: "April carried the year: a
+    +17.87% month against seven others near flat or negative…" runs to 218, and
+    the analysis reached the PDF while the cover — the thing actually read on a
+    phone — carried none of it.
+    """
     picks: list[str] = []
     heading = ""
     for raw in (markdown or "").splitlines():
@@ -1747,8 +1762,8 @@ def extract_notes(markdown: str, used_titles: set[str]) -> list[str]:
         if not item or heading in used_titles:
             continue
         text = re.sub(r"\*\*|__|`", "", item.group(1)).strip()
-        if 24 <= len(text) <= 150 and not _PCT_RE.match(text):
-            picks.append(text)
+        if _MIN_NOTE <= len(text) <= _MAX_NOTE and not _PCT_RE.match(text):
+            picks.append(_clip(text, _NOTE_DISPLAY))
     return picks[:5]
 
 
