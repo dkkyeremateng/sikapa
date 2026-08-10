@@ -615,6 +615,54 @@ def test_income_summary_by_currency_and_symbol(monkeypatch, tmp_path):
     assert inc["dividends_by_symbol"]["AMZN"] == 12.0
 
 
+def test_income_is_not_doubled_by_overlapping_statements(monkeypatch, tmp_path):
+    """Re-importing an overlapping period must not double the income.
+
+    Only trades were reconciled across imports; cash never was. A trailing-twelve-
+    month Flex pull alongside a year-to-date CSV of the same months reported every
+    dividend, tax and fee twice, and `income_summary` returned exactly double.
+    Nothing looked wrong — a doubled dividend is still a plausible dividend —
+    which is why it surfaced only against the broker's own XML.
+    """
+    from financial_research_assistant import statements as s
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_BUYSELL_STATEMENT)
+    once = s.income_summary(year=2025)
+    assert once["by_currency"]["USD"]["gross_dividends"] == 12.0
+
+    # A DIFFERENT period covering the same months — the real shape: a trailing
+    # window pulled from Flex over a year-to-date CSV. Re-importing the identical
+    # period would not reproduce it, since the store is keyed (account, period)
+    # and simply replaces.
+    s.import_statement(
+        'Statement,Data,Period,"April 1, 2025 - April 30, 2025"\n'
+        "Dividends,Header,Currency,Account,Date,Description,Amount\n"
+        "Dividends,Data,USD,U1,2025-04-01,AMZN(US1) Cash Dividend,12\n"
+        "Withholding Tax,Header,Currency,Account,Date,Description,Amount,Code\n"
+        "Withholding Tax,Data,USD,U1,2025-04-01,AMZN(US1) Cash Dividend - US Tax,-2,\n"
+    )
+    assert s.income_summary(year=2025) == once
+
+
+def test_two_holdings_paying_the_same_amount_are_both_counted():
+    """The guard against over-correcting: identity includes the description, so
+    two securities paying the same amount on the same day stay two dividends —
+    even when they arrive in separate imports, where a description-blind key
+    would collapse them into one and UNDER-count."""
+    from financial_research_assistant import statements as s
+
+    def row(import_id, desc):
+        return {"import_id": import_id, "account": "U1", "date": "2025-03-01",
+                "kind": "dividend", "currency": "USD", "description": desc,
+                "amount": 5.0}
+
+    kept = s._dedupe_across_imports(
+        [row(1, "AMZN cash dividend"), row(2, "MSFT cash dividend")],
+        key=s._cash_key,
+    )
+    assert [r["description"] for r in kept] == ["AMZN cash dividend", "MSFT cash dividend"]
+
+
 def test_allocation_weights_and_concentration(monkeypatch, tmp_path):
     from financial_research_assistant import statements as s
     monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
