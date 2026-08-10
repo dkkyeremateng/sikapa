@@ -969,6 +969,56 @@ def portfolio_period_return(start: str = "", end: str = "") -> str:
     return "\n".join(lines)
 
 
+def portfolio_review_brief(period: str = "", account: str = "") -> str:
+    """EVERY figure a portfolio performance review needs, already computed and
+    formatted for `render_report`.
+
+    USE THIS FIRST for any 'performance review / portfolio review / how did I do'
+    request — year-to-date, last month, a quarter, a year. It resolves the period,
+    pulls the time-weighted return, deposits, investment gain, drawdown, monthly
+    path, holdings, income, realised gains and concentration in one call, and
+    returns a ready `highlights` block and markdown body.
+
+    PASS THEM THROUGH VERBATIM. Copy the HIGHLIGHTS block into `render_report`'s
+    ``highlights`` and the MARKDOWN block into ``markdown``, then ADD your own
+    observations section — what the shape means, what stands out, what is
+    unflattering. Do not retype the figures: they are correct here, and a
+    delivered sheet once printed a total two dollars off the line items directly
+    above it.
+
+    ``period`` accepts 'ytd' (default), 'last month', 'this month', 'last
+    quarter', 'Q2 2026', '2025', 'last 90 days', or '2026-01-01..2026-06-30'.
+    Windows are anchored on the statement's last session, not today.
+    """
+    from . import reviews
+
+    try:
+        brief = reviews.build_review(period=period, account=account)
+    except Exception as exc:  # unknown period, no Flex file, window out of range
+        return f"Could not build the review: {exc}"
+
+    f = brief["facts"]
+    return "\n".join([
+        f"REVIEW BRIEF · {brief['period_label']}",
+        f"  title: {brief['title']}",
+        f"  subtitle: {brief['subtitle']}",
+        "",
+        "HIGHLIGHTS (pass verbatim as `highlights`):",
+        brief["highlights"],
+        "",
+        "MARKDOWN (pass as `markdown`, then append your own observations):",
+        brief["markdown"],
+        "CONTEXT for your commentary — do not restate mechanically:",
+        f"  winning sessions {f['up_sessions']}/{f['sessions']}; "
+        f"realised {f['realized']:,.2f} across {f['closed_lots']} closed lots",
+        f"  deposits were {f['deposit_share_pct']:.1f}% of the NAV change",
+        f"  cross-check {f['reconciled']} sessions agree with the NAV movement "
+        f"IBKR reports for the same day",
+        f"  whole imported file ({f['whole_file_window']}) returned "
+        f"{f['whole_file_pct']:+.2f}% — a DIFFERENT window; never report it as this one",
+    ])
+
+
 def allocation(account: str = "") -> str:
     """Portfolio allocation & concentration from the newest imported statement's
     open positions: each position's weight as a % of the book, the largest

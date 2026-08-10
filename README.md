@@ -851,6 +851,27 @@ rendering bug.
 The body is ordinary markdown: headings, tables, and `>` for a warning callout.
 Files land in `~/.financial-research-assistant/reports`.
 
+**Performance reviews are a template, not a prompt.** Ask for one in a sentence —
+*"produce my year-to-date portfolio performance review and send it to Telegram"*,
+*"generate a performance review for last month"* — and `portfolio_review_brief`
+resolves the window and returns every figure already computed and formatted: the
+`highlights` block and the markdown body, ready to pass through to
+`render_report` verbatim. The agent adds the observations; it does not retype the
+numbers.
+
+`period` takes `ytd` (default), `last month`, `this month`, `last quarter`,
+`Q2 2026`, `2025`, `last 90 days`, or `2026-01-01..2026-06-30`. Windows anchor on
+the **statement's last session, not today**, so a file pulled on the 7th and read
+on the 10th still means the same month by "this month"; a window the statement
+cannot reach is refused rather than quietly answered for a different span, and one
+it can only partly cover says so in its own title.
+
+This exists because four generated reviews were each wrong in a different way.
+Pasted into a prompt, the method was one dropped newline from vanishing — and the
+reply looked finished either way. With the method intact, the figures still had to
+be retyped, and one sheet printed a total two dollars off the line items directly
+above it. A template that computes has neither failure available to it.
+
 **The call gets a badge.** `stance="HOLD | trim 50% at $40–$42"` puts a
 colour-coded pill under the title on both the image and the PDF — buy /
 accumulate / overweight read positive, sell / reduce / trim / underweight
