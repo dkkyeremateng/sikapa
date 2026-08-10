@@ -1220,6 +1220,15 @@ def render_report(
                 "No channel accepted a file — check TELEGRAM_BOT_TOKEN / "
                 "TELEGRAM_CHAT_ID, or read the saved file directly."
             )
+    else:
+        # Said outright, because silence here reads as success. With deliver=False
+        # the result was "Rendered … Saved: …" and nothing else, which is
+        # indistinguishable from a delivered report — so a report that was never
+        # sent could be reported to the user as sent.
+        lines.append(
+            "NOT SENT — deliver=False, so this is on disk only and the user has "
+            "NOT received it. Call again with deliver=True if they asked for it."
+        )
     return "\n".join(lines)
 
 
@@ -1465,6 +1474,12 @@ def _inline_series(line: str, heading: str) -> dict[str, Any] | None:
         clean = label.strip(" .:-–—,").strip()
         # Drop leading connectives the regex may have swallowed.
         clean = re.sub(r"^(?:and|or|with|plus|vs\.?)\s+", "", clean, flags=re.I).strip()
+        # And the trailing one the pattern swallowed on its way to the figure:
+        # "Healthcare is 27.9%" yields the label "Healthcare is", which charts as a
+        # sentence cut mid-phrase. The list path already refuses those via
+        # `_is_label`; this path had no equivalent. (Observed on a delivered sheet:
+        # bars reading "Healthcare is" and "Consumer Cyclical at".)
+        clean = _DANGLING_RE.sub("", clean).strip()
         if len(clean) < 2 or len(clean) > _MAX_LABEL:
             return None
         items.append((clean, float(digits)))

@@ -1556,3 +1556,23 @@ def test_the_guard_needs_two_performance_tiles_not_one():
         highlights="Total value | $41,265.40 | 11 positions", deliver=False,
     )
     assert not out.startswith("NOT RENDERED")
+
+
+def test_an_undelivered_report_says_it_was_not_sent():
+    """With deliver=False the result was "Rendered … Saved: …" and nothing else —
+    indistinguishable from a delivered one. A report that never left the machine
+    could therefore be reported to the user as sent, which is what they noticed."""
+    out = reports.render_report("T", _CHARTABLE, highlights="X | 1 |", deliver=False)
+    assert "NOT SENT" in out
+    assert "deliver=True" in out, "and it says how to actually send it"
+
+
+def test_an_inline_label_is_not_a_sentence_cut_mid_phrase():
+    """"Healthcare is 27.9%" yields the label "Healthcare is", which charts as a
+    fragment. The list path refuses those via `_is_label`; this path had no
+    equivalent, and shipped bars reading "Healthcare is" and "Consumer Cyclical
+    at"."""
+    got = reports._inline_series(
+        "Healthcare is 27.9% and Consumer Cyclical at 14.8% of the book.", "h"
+    )
+    assert [l for l, _v in got["items"]] == ["Healthcare", "Consumer Cyclical"]
