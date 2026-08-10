@@ -1461,3 +1461,31 @@ def test_a_real_breakdown_under_a_data_heading_still_charts():
         "- **Industrials:** 7.8%\n"
     )
     assert series and series[0]["title"] == "Sector Exposure"
+
+
+def test_a_figure_in_a_parenthetical_aside_is_not_the_items_measure():
+    """`- Sharpe ratio: 1.06 (risk-free rate = 0%)` charted as 0.0%: the first
+    percent sign belongs to the aside, and a ratio is not a percentage at all. The
+    bar read as the metric while showing a number from its own footnote. Observed
+    on a delivered risk profile."""
+    series = reports.extract_series(
+        "## Risk Profile\n"
+        "- Annualised volatility: 16.0%\n"
+        "- Sharpe ratio: 1.06 (risk-free rate = 0%)\n"
+        "- Beta vs SPY: 0.91 (less volatile than the market)\n"
+        "- Max drawdown: -20.2% (measured over 2025-08-11 to 2026-08-10)\n"
+    )
+    # Sharpe and beta carry no percentage of their own, so only two items remain —
+    # below the minimum. No chart is the right answer: volatility, a ratio and a
+    # drawdown were never a comparable set.
+    assert series == []
+
+
+def test_an_aside_does_not_stop_a_real_breakdown_charting():
+    series = reports.extract_series(
+        "## Sector Exposure\n"
+        "- **Healthcare (US listed):** 27.9% — UNH, NVO\n"
+        "- **Technology:** 21.3% (mega-cap weighted)\n"
+        "- **Industrials:** 7.8%\n"
+    )
+    assert [v for _l, v in series[0]["items"]] == [27.9, 21.3, 7.8]

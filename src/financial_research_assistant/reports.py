@@ -1159,6 +1159,8 @@ REPORT_TOOLS = [render_report]
 
 #: A percentage anywhere in a list item, sign preserved.
 _PCT_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)\s*%")
+#: A parenthetical aside — context hung off a figure, never the figure itself.
+_ASIDE_RE = re.compile(r"\s*\([^)]*\)")
 #: Where a label stops: a dash/colon separator, or the figure itself.
 _LABEL_SPLIT = re.compile(r"\s*[–—:|]\s*|\s+(?=[+-]?\d+(?:\.\d+)?\s*%)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
@@ -1456,12 +1458,23 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
             flush()  # prose ends a run
             continue
         text = item.group(1)
-        found = _PCT_RE.search(text)
-        if not found:
+        if not _PCT_RE.search(text):
             continue
+        # An EMBEDDED breakdown is tried first, and on the whole line, because it
+        # habitually lives inside the parentheses: "(North America ~65%, Europe
+        # ~35%)". Stripping asides before this point erased those breakdowns
+        # entirely — the fix below, applied one step too early.
         embedded = _inline_series(text, heading)
         if embedded:
             inline.append(embedded)
+            continue
+        # For a SINGLE measure, though, an aside cannot be it. Searched over the
+        # whole line, "Sharpe ratio: 1.06 (risk-free rate = 0%)" charts as 0.0% —
+        # the first percent sign belongs to the aside, and a ratio is not a
+        # percentage at all, so the bar reads as the metric while showing a number
+        # from its own footnote. (Observed on a delivered risk profile.)
+        found = _PCT_RE.search(_ASIDE_RE.sub("", text))
+        if not found:
             continue
         label = _clean_label(text)
         if not label:
