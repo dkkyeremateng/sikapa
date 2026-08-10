@@ -1596,3 +1596,29 @@ def test_a_real_inline_breakdown_under_a_data_heading_still_charts():
         "## Revenue Mix\n- Split by region (North America ~65%, Europe ~35%)\n"
     )
     assert series[0]["items"] == [("North America", 65.0), ("Europe", 35.0)]
+
+
+def test_a_long_observation_is_clipped_onto_the_cover_not_dropped():
+    """A hard 150-character ceiling excluded every real observation the agent
+    writes — "April carried the year: a +17.87% month against seven others near
+    flat or negative…" runs to 218 — so the analysis reached the PDF while the
+    cover, the thing actually read on a phone, carried none of it."""
+    long_note = (
+        "April carried the year: a +17.87% month against seven others near flat "
+        "or negative. All other monthly moves net to -8.49%, showing the "
+        "portfolio's gains are concentrated in one volatile month."
+    )
+    assert len(long_note) > 150
+    notes = reports.extract_notes(f"## Observations\n- {long_note}\n", set())
+    assert len(notes) == 1
+    assert notes[0].startswith("April carried the year")
+    assert len(notes[0]) <= reports._NOTE_DISPLAY + 1  # +1 for the ellipsis
+
+
+def test_a_bullet_too_short_to_be_an_observation_is_still_skipped():
+    assert reports.extract_notes("## Observations\n- Too short\n", set()) == []
+
+
+def test_a_paragraph_is_not_an_observation():
+    """Past a point a "bullet" is a paragraph, and the cover is a summary sheet."""
+    assert reports.extract_notes("## Notes\n- " + "word " * 200 + "\n", set()) == []
