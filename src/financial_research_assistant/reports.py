@@ -1109,7 +1109,15 @@ def _clean_label(text: str) -> str:
 
 
 #: A single number in a table cell: currency, percent or bare, sign preserved.
-_NUM_RE = re.compile(r"([+-−]?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(%?)")
+#
+# The dash is ESCAPED. Written `[+-−]` it is a range operator, not a literal, so
+# the class spans U+002B to U+2212 — every digit included. The sign group then
+# matched the leading digit of any unsigned multi-digit number and the rest still
+# parsed, so `74.1%` charted as `4.1%`: a plausible figure, silently wrong, on a
+# sheet whose whole promise is that it cannot invent a number. Signed cells
+# (`+11.4%`) and thousands-separated ones happened to survive, which is why this
+# stood for so long.
+_NUM_RE = re.compile(r"([+\-−]?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(%?)")
 _TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 

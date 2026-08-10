@@ -37,6 +37,31 @@ def test_tiles_are_capped_so_they_stay_scannable():
     assert len(reports.parse_highlights("\n".join(f"L{i} | V{i}" for i in range(12)))) == 6
 
 
+def test_an_unsigned_two_digit_table_cell_keeps_its_leading_digit():
+    """`[+-−]` is a RANGE spanning every digit, not three literals, so the sign
+    group ate the leading digit and `74.1%` charted as `4.1%` — a plausible wrong
+    number on a sheet whose whole promise is that it cannot invent one. Signed and
+    thousands-separated cells backtracked into the right answer, which is why only
+    the unsigned two-digit case ever showed it."""
+    assert reports._cell_number("74.1%") == (74.1, "%")
+    assert reports._cell_number("11.65") == (11.65, "")
+    assert reports._cell_number("+11.4%") == (11.4, "%")
+    assert reports._cell_number("-4.8%") == (-4.8, "%")
+    assert reports._cell_number("$208.7B") == (208.7, "$")
+    assert reports._cell_number("1,234.5") == (1234.5, "")
+
+
+def test_a_charted_table_reports_the_figures_the_table_states():
+    series = reports.extract_series(
+        "## Guidance\n"
+        "| Metric | Guided |\n|---|---|\n"
+        "| Q4 revenue | 5.2% |\n| Gross margin | 74.1% |\n| Opex growth | 9.4% |\n"
+    )
+    assert series[0]["items"] == [
+        ("Q4 revenue", 5.2), ("Gross margin", 74.1), ("Opex growth", 9.4)
+    ]
+
+
 # --- verdict figures promoted from headings -------------------------------------
 #
 # The NVO report that prompted these: five highlight tiles of context, and the
