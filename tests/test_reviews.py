@@ -216,14 +216,21 @@ def test_a_paragraph_of_observations_becomes_bullets(monkeypatch):
     assert "- Deposits dominated." in seen["markdown"]
 
 
-def test_a_review_with_no_observations_says_so(monkeypatch):
-    """Figures alone are a table, not a review — the omission is reported rather
-    than shipped silently."""
-    from financial_research_assistant import tools
-    _capture(monkeypatch)
+def test_a_review_with_no_observations_is_refused(monkeypatch):
+    """Warning about it shipped: a delivered sheet carried correct tiles and charts
+    and no interpretation at all, because a note in the tool result is easy to read
+    past once the render has already succeeded. Figures alone are a table; the
+    reading of them is the review."""
+    from financial_research_assistant import reports, tools
+    rendered = []
+    monkeypatch.setattr(reports, "render_report",
+                        lambda *a, **k: rendered.append(1) or "rendered")
     _brief(monkeypatch)
 
-    assert "No observations were supplied" in tools.render_review()
+    out = tools.render_review()
+    assert out.startswith("NOT RENDERED")
+    assert "observations" in out
+    assert not rendered, "and nothing was drawn or delivered"
 
 
 def test_an_unknown_period_is_reported_not_rendered(monkeypatch):
