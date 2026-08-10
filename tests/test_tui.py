@@ -1872,3 +1872,117 @@ async def test_tui_alert_survives_a_failing_os_notification(monkeypatch, tmp_pat
 
         assert toasts == ["NVDA reports earnings 2026-01-08"]
         assert "🔔 NVDA reports earnings 2026-01-08" in log_text(app)
+
+
+# -- Esc: palette first, turn second ----------------------------------------
+
+
+async def test_escape_closes_the_palette_before_it_cancels_a_turn(monkeypatch, tmp_path):
+    """Esc is bound app-wide, so it is also the key that dismisses the slash
+    palette — and the palette can be open while a turn streams underneath it.
+    Getting a list off the screen must never throw away minutes of tool calls."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="palette-esc")
+    async with app.run_test() as pilot:
+        worker = RecordingWorker()
+        app._busy = True
+        app._turn_worker = cast(Worker, worker)
+        palette = app.query_one("#command-list", OptionList)
+
+        app.query_one(CommandInput).focus()
+        await pilot.press("slash")
+        await pilot.pause()
+        assert palette.display
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not palette.display, "the palette closed"
+        assert worker.cancelled is False, "and the turn kept running"
+        assert "cancelled" not in log_text(app)
+
+        # With the palette closed, Esc means what it always meant.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert worker.cancelled is True
+        assert "cancelled" in log_text(app)
+
+
+# -- a worker that raises ----------------------------------------------------
+
+
+async def test_an_unclassified_exception_renders_an_error_and_the_app_lives(
+    monkeypatch, tmp_path
+):
+    """Textual's @work defaults to exit_on_error=True, so anything the adapter did
+    not convert into an `error` event tore the whole app down with a traceback —
+    taking the visible transcript and every queued message with it."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+
+    async def exploding(*args, **kwargs):
+        yield AgentEvent("token", "partial answer")
+        raise RuntimeError("the adapter never classified this")
+
+    monkeypatch.setattr("financial_research_assistant.tui.run_turn", exploding)
+    app = AgentApp(fake=True, session_id="worker-crash")
+    async with app.run_test() as pilot:
+        app.query_one(CommandInput).value = "boom"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.is_running, "the app is still up"
+        assert "error" in log_text(app)
+        assert app._exit_code == 1
+        assert app._busy is False and app._turn_worker is None
+
+        # ...and the session is usable: the next turn runs normally.
+        async def fine(*args, **kwargs):
+            yield AgentEvent("final", "all good")
+
+        monkeypatch.setattr("financial_research_assistant.tui.run_turn", fine)
+        app.query_one(CommandInput).value = "again"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "all good" in log_text(app)
+        assert app._exit_code == 0
+
+
+# -- /new state -------------------------------------------------------------
+
+
+async def test_new_conversation_clears_the_rating_targets(monkeypatch, tmp_path):
+    """/copy, /good and /bad act on "the last exchange". After /new that exchange
+    belongs to a conversation that is no longer on screen, so leaving the handles
+    pointing at it filed the PREVIOUS thread's Q/A as an exemplar memory."""
+    monkeypatch.setenv("MEMORY_BACKEND", "local")
+    monkeypatch.setenv("MEMORY_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMORY_USER", "tui-new")
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path / "sess"))
+
+    app = AgentApp(fake=True, session_id="rate-new")
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        box.value = "how risky is my portfolio?"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app._last_answer
+
+        box.value = "/new"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._last_user == "" and app._last_answer == ""
+
+        box.value = "/good"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "nothing to rate yet" in log_text(app)
+
+        box.value = "/copy"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "nothing to copy yet" in log_text(app)
+
+    from financial_research_assistant.memory import get_memory
+
+    assert get_memory().all() == [], "no memory was filed from the closed conversation"

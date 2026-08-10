@@ -89,17 +89,27 @@ def lookback_days(days: int, as_of: date | None) -> int:
 def as_of_series(
     series: list[tuple[str, float]], as_of: date | None, days: int | None = None
 ) -> list[tuple[str, float]]:
-    """``series`` cut to the ``days`` calendar days ending at ``as_of``.
+    """``series`` cut to the ``days`` calendar days ending at ``as_of`` — or, with
+    no ``as_of``, ending at the last row the series actually has.
 
     ``on or before``, not ``on``: an ``as_of`` landing on a weekend, a holiday or
     a halt has no row of its own, and the honest answer is the last session that
     did trade — which the caller then reports, so the shift is visible rather
     than assumed.
 
-    ``days`` undoes the widening ``lookback_days`` applied to reach the cut point.
-    Without it, a caller that uses the series whole computes over however much
-    history the widened range bucket happened to contain — seen live as a 365-day
-    regression covering 976 days.
+    ``days`` is the window the caller asked for, and it is enforced in BOTH
+    directions. With an ``as_of`` it undoes the widening ``lookback_days`` applied
+    to reach the cut point. Without one it undoes a widening nobody asked for: the
+    sources answer in coarse range buckets, so a request for 400 days comes back
+    as two years. Either way a caller that uses the series WHOLE — ``risk_metrics``,
+    ``factors._ticker_returns``, the screener's ``max(closes)`` all-time high —
+    would otherwise compute over however much history the bucket happened to
+    contain, which was seen live as a 365-day regression covering 976 days.
+
+    With no ``as_of`` the window is anchored on the series' own last date rather
+    than on today. That keeps the trim from ever emptying a series (the final row
+    always survives), which matters because a stale or thinly traded symbol whose
+    last print is weeks old must still yield a last price rather than nothing.
 
     The trim is by DATE, not by row count, because ``days`` means calendar days
     everywhere else here: with no ``as_of`` it picks a Yahoo range bucket, so
@@ -107,13 +117,19 @@ def as_of_series(
     would instead yield 365 sessions — about 17 months — so the same argument would
     quietly mean two different windows depending on whether a date was passed.
     """
-    if as_of is None:
-        return series
-    cutoff = as_of.isoformat()
-    cut = [row for row in series if row[0] <= cutoff]
-    if not days or days <= 0:
+    cut = series
+    if as_of is not None:
+        cutoff = as_of.isoformat()
+        cut = [row for row in series if row[0] <= cutoff]
+    if not days or days <= 0 or not cut:
         return cut
-    start = (as_of - timedelta(days=days)).isoformat()
+    anchor = as_of
+    if anchor is None:
+        try:
+            anchor = date.fromisoformat(cut[-1][0][:10])
+        except ValueError:
+            return cut  # an unparseable last date: better whole than truncated
+    start = (anchor - timedelta(days=days)).isoformat()
     return [row for row in cut if row[0] > start]
 
 

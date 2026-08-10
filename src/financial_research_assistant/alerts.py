@@ -37,8 +37,11 @@ import os
 import shutil
 import sys
 from collections import deque
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
+
+from .storage import write_private
 
 if TYPE_CHECKING:  # type-only: `monitor` imports this module at runtime
     from . import monitor
@@ -248,6 +251,36 @@ def _alerts_file() -> Path:
     return Path.home() / ".financial-research-assistant" / "alerts.json"
 
 
+@contextmanager
+def _locked():
+    """Serialize read-modify-write of the rule file across processes.
+
+    Every mutation here rewrites the whole file after reading it, and the readers
+    are plural and concurrent: a TUI turn adding a rule, a cron ``--digest``, and
+    a scheduled task can all be running at once. Interleaved, two ``add_alert``
+    calls both read the same list, both mint the same ``_next_id``, and the second
+    write drops the first rule entirely. Same ``fcntl`` pattern (and same
+    degrade-to-no-locking-off-POSIX trade) as ``tasks.py``.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        yield
+        return
+    path = _alerts_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".lock")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def load_alerts() -> list[dict[str, Any]]:
     p = _alerts_file()
     if not p.exists():
@@ -260,9 +293,14 @@ def load_alerts() -> list[dict[str, Any]]:
 
 
 def save_alerts(rules: list[dict[str, Any]]) -> None:
-    p = _alerts_file()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(rules, indent=2), encoding="utf-8")
+    """Write the rule file ``0600``, atomically.
+
+    The rules name the tickers and price levels the user cares about — a read of
+    this file is a read of their positions and their intentions. And because the
+    whole list is rewritten each time, a torn write leaves JSON that
+    ``load_alerts`` shrugs off as "no rules", silently switching the digest's
+    alerts off. See ``storage.write_private``."""
+    write_private(_alerts_file(), json.dumps(rules, indent=2), prefix=".alerts-")
 
 
 def _next_id(rules: list[dict[str, Any]]) -> str:
@@ -326,10 +364,11 @@ def add_alert(symbol: str, kind: str, value: float = 0.0) -> str:
     elif v <= 0:
         return ("Give a positive threshold — a percent for drop/rise/move, or a "
                 "price for below/above.")
-    rules = load_alerts()
-    rule = {"id": _next_id(rules), "symbol": sym, "kind": k, "value": v}
-    rules.append(rule)
-    save_alerts(rules)
+    with _locked():
+        rules = load_alerts()
+        rule = {"id": _next_id(rules), "symbol": sym, "kind": k, "value": v}
+        rules.append(rule)
+        save_alerts(rules)
     return (f"Added alert {rule['id']}: {_describe(rule)}. It's checked whenever you "
             f"run the portfolio digest (`portfolio_digest` or the --digest CLI).")
 
@@ -352,16 +391,17 @@ def remove_alert(alert_id: str) -> str:
     ``all`` to clear every rule. Use for 'stop alerting me about X / remove that
     alert / clear my alerts'."""
     aid = (alert_id or "").strip().lower()
-    rules = load_alerts()
-    if not rules:
-        return "No alert rules to remove."
-    if aid in ("all", "*", "everything"):
-        save_alerts([])
-        return f"Removed all {len(rules)} alert rule(s)."
-    kept = [r for r in rules if str(r.get("id", "")).lower() != aid]
-    if len(kept) == len(rules):
-        return f"No alert with id {alert_id!r}. Use `list_alerts` to see the ids."
-    save_alerts(kept)
+    with _locked():
+        rules = load_alerts()
+        if not rules:
+            return "No alert rules to remove."
+        if aid in ("all", "*", "everything"):
+            save_alerts([])
+            return f"Removed all {len(rules)} alert rule(s)."
+        kept = [r for r in rules if str(r.get("id", "")).lower() != aid]
+        if len(kept) == len(rules):
+            return f"No alert with id {alert_id!r}. Use `list_alerts` to see the ids."
+        save_alerts(kept)
     return f"Removed alert {alert_id}."
 
 

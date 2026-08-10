@@ -33,8 +33,18 @@ def _install(monkeypatch, series_by_symbol, info_by_symbol, earnings_by_symbol=N
     def fake_info(symbol):
         return dict(info_by_symbol.get(symbol.upper(), {}))
 
-    def fake_earnings(symbol, limit=6):
-        return list(earnings_by_symbol.get(symbol.upper(), []))
+    def fake_earnings(symbol, limit=6, reported_only=False):
+        """Honours `limit` — and `reported_only` the way the real helper does.
+
+        yfinance lists SCHEDULED quarters before reported ones, so a fake that
+        ignores `limit` hands back rows the caller would never have received and
+        hides a streak cut short by the upcoming ones eating the budget. Rows are
+        given newest-first, upcoming included.
+        """
+        rows = list(earnings_by_symbol.get(symbol.upper(), []))
+        if reported_only:
+            rows = [r for r in rows if r.get("reported") is not None]
+        return rows[:limit]
 
     monkeypatch.setattr(tools, "_fetch_daily", fake_daily)
     monkeypatch.setattr(fundamentals, "_fetch_info", fake_info)
@@ -122,6 +132,40 @@ def test_near_high_window_restricts_recency(monkeypatch):
     assert "0 passed" in out
 
 
+def test_the_high_lookback_window_bounds_the_high(monkeypatch):
+    """`high_lookback_days` is the whole meaning of the near-high criterion, and
+    `_near_high` takes `max(closes)` over whatever series it is handed. The price
+    source answers in coarse range buckets, so a 400-day request arrives as two
+    years — and a peak set outside the requested window rules out a stock that is
+    sitting half a percent under its high inside it."""
+    from datetime import date, timedelta
+
+    from financial_research_assistant import pointintime as pit
+
+    anchor = date(2026, 7, 17)
+    sessions = [
+        d for i in range(900)
+        if (d := anchor - timedelta(days=899 - i)).weekday() < 5
+    ]
+    # A 200 spike at the very start, then a plateau at 100 with the final close
+    # 0.5% under it.
+    series = [
+        (d.isoformat(), 200.0 if i < 20 else (99.5 if i == len(sessions) - 1 else 100.0))
+        for i, d in enumerate(sessions)
+    ]
+    monkeypatch.setattr(
+        tools, "_fetch_daily",
+        lambda sym, days, strict=False, as_of=None, **_kw: pit.as_of_series(
+            series, as_of, days
+        ),
+    )
+    near = screener._near_high("X", 400, 3, 1.0, None, 0.0)
+    assert near is not None, "a peak from 2.5 years ago is outside a 400-day lookback"
+    assert near["high"] == 100.0
+    # And a lookback that genuinely reaches the spike still sees it.
+    assert screener._near_high("X", 900, 3, 1.0, None, 0.0) is None
+
+
 def test_beat_streak_stops_at_first_miss_and_skips_upcoming(monkeypatch):
     history = {
         "X": [
@@ -133,6 +177,21 @@ def test_beat_streak_stops_at_first_miss_and_skips_upcoming(monkeypatch):
     }
     _install(monkeypatch, {}, {}, history)
     assert screener._beat_streak("X", need=3) == 1
+
+
+def test_upcoming_quarters_do_not_eat_the_beat_streak_budget(monkeypatch):
+    """yfinance returns SCHEDULED quarters first. Asking for `need + 2` rows on a
+    company with four dates on the calendar spends most of the budget on rows with
+    nothing reported in them, and a four-quarter beat streak reads as two — the
+    screen then rejects exactly the consistent beaters the criterion exists to
+    find."""
+    history = {
+        "X": [{"reported": None, "estimate": 2.0} for _ in range(4)]
+             + [{"reported": 2.2, "estimate": 2.0} for _ in range(4)]
+             + [{"reported": 1.9, "estimate": 2.0}],
+    }
+    _install(monkeypatch, {}, {}, history)
+    assert screener._beat_streak("X", need=4) == 4
 
 
 def test_default_universe_and_truncation_note(monkeypatch):

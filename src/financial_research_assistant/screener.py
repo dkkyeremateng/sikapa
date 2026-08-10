@@ -212,12 +212,14 @@ def _near_high(
 
 def _beat_streak(symbol: str, need: int) -> int:
     """Count consecutive most-recent REPORTED quarters whose EPS beat the analyst
-    estimate. Rows without a reported figure (upcoming quarters) are skipped; the
-    streak stops at the first non-beat. Fetches a couple extra quarters beyond
-    ``need`` so a full streak can be confirmed."""
+    estimate. The streak stops at the first non-beat. Fetches a couple of extra
+    quarters beyond ``need`` so a full streak can be confirmed, and asks for
+    reported rows only — the scheduled quarters yfinance lists first would
+    otherwise consume the limit and cut the streak short at whatever the remaining
+    rows happened to show."""
     from .fundamentals import _fetch_earnings_history, _num
 
-    history = _fetch_earnings_history(symbol, limit=max(need + 2, 4))
+    history = _fetch_earnings_history(symbol, limit=max(need + 2, 4), reported_only=True)
     streak = 0
     for row in history:  # newest first
         reported, estimate = _num(row.get("reported")), _num(row.get("estimate"))

@@ -129,8 +129,13 @@ def parse_statement(source: str | Path) -> dict[str, Any]:
             continue
         record = {cols[i]: fields[i] for i in range(min(len(cols), len(fields)))}
 
-        # A per-section "Total" row is a Data row whose first field is "Total".
-        if fields and fields[0].strip() == "Total":
+        # A per-section aggregate is a Data row whose first column says so. On a
+        # multi-currency statement that column (Currency, or Asset Class in NAV)
+        # also carries "Total in USD" and "Total Dividends in USD" — the blended
+        # cross-currency sums. Matching only the bare word let those through as
+        # rows of their own, inventing a "Total in USD" currency whose amounts
+        # double every figure they appear in.
+        if fields and fields[0].strip().startswith("Total"):
             continue
 
         acct = (record.get("Account") or "").strip()
@@ -470,16 +475,27 @@ def _looks_like_ofx(head: str) -> bool:
     return "OFXHEADER" in upper or "<OFX>" in upper
 
 
+def _file_source(source: str | Path) -> Path | None:
+    """The file a statement source names, or ``None`` when the source IS the
+    document text.
+
+    This is the one place the path-vs-inline rule lives, so every entry point
+    agrees on what counts as a filename: a ``Path`` always names a file, while a
+    string does only when it is short, newline-free, and exists on disk. Deciding
+    it per caller is what lets a parser be handed a path and read it as content.
+    """
+    if isinstance(source, Path):
+        return source
+    if "\n" not in source and len(source) < 4096 and Path(source).exists():
+        return Path(source)
+    return None
+
+
 def _source_head(source: str | Path, n: int = 1024) -> tuple[str, str]:
-    """Return ``(suffix, head_text)`` for a statement source, reusing the exact
-    path-vs-inline rule from ``_read_rows``: a ``Path`` (or a short newline-free
-    string naming an existing file) is read from disk; anything else is treated
-    as the document text itself. ``suffix`` is the lowercased file extension when
-    the source is a file, else ``""``."""
-    if isinstance(source, Path) or (
-        "\n" not in source and len(source) < 4096 and Path(source).exists()
-    ):
-        p = Path(source)
+    """Return ``(suffix, head_text)`` for a statement source. ``suffix`` is the
+    lowercased file extension when the source is a file, else ``""``."""
+    p = _file_source(source)
+    if p is not None:
         return p.suffix.lower(), p.read_text(encoding="utf-8-sig", errors="replace")[:n]
     return "", str(source)[:n]
 
@@ -541,11 +557,15 @@ def parse_ofx(source: str | Path) -> dict[str, Any]:
             "with:  pip install 'financial-research-assistant[ofx]'"
         ) from e
 
-    # ofxtools wants bytes: a filename on disk, else the document text encoded.
-    suffix, _head = _source_head(source)
+    # ofxtools wants a filename on disk, else the document text encoded. The
+    # extension can't decide which: routing detects OFX from the header too, so a
+    # file reaches here under any suffix (a bank's download named .txt, or none at
+    # all) — keying on it would hand the parser the path as if it were the
+    # document, and the import would fail on text that was never OFX.
+    path = _file_source(source)
     tree = OFXTree()
-    if suffix in {".ofx", ".qfx"} or isinstance(source, Path):
-        tree.parse(str(source))
+    if path is not None:
+        tree.parse(str(path))
     else:
         tree.parse(io.BytesIO(str(source).encode("utf-8")))
     ofx = tree.convert()
@@ -835,6 +855,19 @@ def _resolve_account(conn: sqlite3.Connection, account: str | None) -> str | Non
     return row["account"] if row else None
 
 
+def default_account() -> str | None:
+    """The account a query falls back to when none is named — the newest import's.
+    Public so a tool can LABEL the scope it used: with several accounts in the
+    store, which one a figure covers is part of the figure."""
+    if not db_path().exists():
+        return None
+    conn = _connect()
+    try:
+        return _resolve_account(conn, None)
+    finally:
+        conn.close()
+
+
 def query_positions(symbol: str | None = None, account: str | None = None) -> list[dict[str, Any]]:
     """Open positions from the newest import **for one account**, each enriched
     with the instrument's description and ISIN (``security_id``). ``symbol``
@@ -1104,6 +1137,62 @@ def is_long_term(open_iso: str, close_iso: str) -> bool:
     return closed > anniversary
 
 
+#: The value of ``account`` that opts out of per-account scoping and walks every
+#: account's trades as one book. Spelled out rather than implied by ``None``,
+#: because pooling is a deliberate and usually wrong choice — see
+#: ``_trade_split_events``.
+ALL_ACCOUNTS = "all"
+
+
+def _trade_key(row: Any) -> tuple[Any, ...]:
+    """The natural identity of a trade: same account, ticker, timestamp, signed
+    quantity and price means the same fill, no matter which statement it arrived
+    in. Floats are rounded so a re-export's last-digit noise doesn't defeat it."""
+    return (
+        row["account"],
+        (row["symbol"] or "").upper(),
+        row["datetime"] or "",
+        round(row["quantity"] or 0.0, 8),
+        round(row["trade_price"] or 0.0, 8),
+    )
+
+
+def _dedupe_across_imports(rows: list[Any]) -> list[Any]:
+    """Drop trades that appear in more than one import of the same period.
+
+    Statements OVERLAP. Import an annual statement and any of the monthlies inside
+    it and every trade in the covered month is stored twice — which doubles the
+    open lots, the realized gains and the harvestable losses computed from them,
+    with nothing in the output to hint at it.
+
+    ``query_performance_history`` reconciles the same overlap by DROPPING whole
+    periods (finest resolution wins), which is right for chaining returns and
+    wrong here: dropping the annual statement in favour of one monthly would
+    discard the other eleven months of trades. So the reconciliation is per-trade
+    instead.
+
+    Multiplicity within a single import is preserved: two genuinely identical
+    fills in one statement stay two fills, and the count kept is the largest any
+    one import reported. Rows keep their original order."""
+    from collections import Counter, defaultdict
+
+    per_import: dict[Any, Counter[tuple[Any, ...]]] = defaultdict(Counter)
+    for r in rows:
+        per_import[r["import_id"]][_trade_key(r)] += 1
+    keep: Counter[tuple[Any, ...]] = Counter()
+    for counts in per_import.values():
+        for key, n in counts.items():
+            keep[key] = max(keep[key], n)
+    taken: Counter[tuple[Any, ...]] = Counter()
+    out = []
+    for r in rows:
+        key = _trade_key(r)
+        if taken[key] < keep[key]:
+            taken[key] += 1
+            out.append(r)
+    return out
+
+
 def _trade_split_events(
     symbol: str | None = None, account: str | None = None
 ) -> list[tuple[Any, ...]]:
@@ -1113,44 +1202,66 @@ def _trade_split_events(
     (0) before same-day trades (1), so a same-day sell matches post-split lots.
     ``payload`` is the trade row for ``"trade"`` and ``(symbol, factor)`` for
     ``"split"``. Shared by ``realized_gains`` and ``open_lots`` so the split
-    handling lives in one place. Returns ``[]`` when the store is empty."""
+    handling lives in one place. Returns ``[]`` when the store is empty.
+
+    ``account`` defaults to the newest import's account, the same rule
+    ``query_positions`` follows. FIFO across accounts is not a view of anything
+    real: a sell in one account would consume a lot opened in another, producing
+    a cost basis and a holding period that belong to shares you still hold
+    elsewhere. Pass ``account="all"`` to walk every account as one book anyway.
+
+    Duplicate fills from overlapping statements are reconciled first (see
+    ``_dedupe_across_imports``); repeated corporate actions likewise, since a
+    split applied twice rescales every open lot by the square of its factor."""
     if not db_path().exists():
         return []
     conn = _connect()
     try:
+        if (account or "").strip().lower() == ALL_ACCOUNTS:
+            acct = None
+        else:
+            acct = _resolve_account(conn, account)
+            if acct is None:
+                return []
         clauses, params = [], []
         if symbol:
             clauses.append("UPPER(symbol) = ?")
             params.append(symbol.upper())
-        if account:
+        if acct:
             clauses.append("account = ?")
-            params.append(account)
+            params.append(acct)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(
-            f"SELECT symbol, datetime, quantity, trade_price, proceeds, basis "
-            f"FROM trades{where} ORDER BY datetime ASC, id ASC",
+            f"SELECT import_id, account, symbol, datetime, quantity, trade_price, "
+            f"proceeds, basis FROM trades{where} ORDER BY datetime ASC, id ASC",
             params,
         ).fetchall()
         ca_clauses, ca_params = [], []
-        if account:
+        if acct:
             ca_clauses.append("account = ?")
-            ca_params.append(account)
+            ca_params.append(acct)
         ca_where = (" WHERE " + " AND ".join(ca_clauses)) if ca_clauses else ""
         ca_rows = conn.execute(
-            f"SELECT report_date, datetime, description FROM corporate_actions{ca_where}",
+            f"SELECT account, report_date, datetime, description "
+            f"FROM corporate_actions{ca_where}",
             ca_params,
         ).fetchall()
     finally:
         conn.close()
 
     events: list[tuple[Any, ...]] = []
-    for r in rows:
+    for r in _dedupe_across_imports(rows):
         events.append(((r["datetime"] or "")[:10], 1, "trade", r))
+    seen_splits: set[tuple[Any, ...]] = set()
     for c in ca_rows:
         factor = _split_factor(c["description"])
         sym = _symbol_from_description(c["description"])
         if factor and sym != "?" and (symbol is None or sym == symbol.upper()):
             when = (c["datetime"] or c["report_date"] or "")[:10]
+            # One symbol cannot split twice on one day, so a repeat is an overlap.
+            if (c["account"], when, sym, factor) in seen_splits:
+                continue
+            seen_splits.add((c["account"], when, sym, factor))
             events.append((when, 0, "split", (sym, factor)))
     events.sort(key=lambda e: (e[0], e[1]))
     return events
@@ -1165,8 +1276,12 @@ def open_lots(
     Walks the same trade+split stream as ``realized_gains`` but keeps the leftover
     (unsold) lots instead of recording gains. Returns ``{symbol: [{qty,
     cost_per_share, open_date}, …]}`` (oldest lot first), splits already applied so
-    each lot's qty and cost/share are split-adjusted. ``symbol``/``account`` scope
-    the input. The basis is commission-inclusive (same as ``realized_gains``)."""
+    each lot's qty and cost/share are split-adjusted. The basis is
+    commission-inclusive (same as ``realized_gains``).
+
+    ``symbol`` scopes the input; ``account`` defaults to the newest import's
+    account (``"all"`` pools every account into one book — see
+    ``_trade_split_events`` for why that is rarely what you want)."""
     from collections import defaultdict, deque
 
     events = _trade_split_events(symbol, account)
@@ -1214,10 +1329,12 @@ def realized_gains(
     commissions.
 
     ``year`` counts only realizations *sold* in that calendar year (lots may open
-    earlier). ``symbol``/``account`` scope the input. Returns per-symbol and
-    total short/long/realized, plus ``unmatched_proceeds`` for any sell with no
-    open lot (e.g. the opening statement wasn't imported, or a short sale) so the
-    number is never silently wrong.
+    earlier). ``symbol`` scopes the input; ``account`` defaults to the newest
+    import's account (``"all"`` pools every account into one book — see
+    ``_trade_split_events``). Returns per-symbol and total short/long/realized,
+    plus ``unmatched_proceeds`` for any sell with no open lot (e.g. the opening
+    statement wasn't imported, or a short sale) so the number is never silently
+    wrong.
 
     Note: FIFO here; IBKR's own default is also FIFO but the broker's realized
     figures can differ with wash-sale or specific-lot adjustments not in the

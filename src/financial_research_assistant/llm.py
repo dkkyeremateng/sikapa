@@ -138,7 +138,12 @@ def _credentials(
             # re-reads the credential per request so refreshes are picked up.
             from . import codex_proxy
 
-            return codex_proxy.ensure_running(), stored
+            # The key handed to the client is the proxy's own per-process token,
+            # never the Codex one: the proxy reads that from the store itself on
+            # every request, so the real token would be a spendable secret sent to
+            # a local socket that has no use for it. Evaluated in order — the token
+            # only exists once the server has been started.
+            return codex_proxy.ensure_running(), codex_proxy.local_token()
         pinned = auth.base_url(scope)
         if pinned:
             return base_url or pinned, stored

@@ -178,16 +178,18 @@ def _fetch_daily(
     return a window that ends 730 days past the point of interest and cut to
     nothing.
 
-    That widening is then undone: the result is trimmed to the last ``days``
-    sessions. It has to be, because the widened request reaches for a bigger Yahoo
-    range bucket, and callers that use the returned series WHOLE (``risk_metrics``,
-    ``factors._ticker_returns``) would otherwise silently compute over a window
-    several times longer than they asked for — observed live as a 365-day
-    regression covering 976 days. Only the ``as_of`` path trims, so the
-    no-``as_of`` contract (return the bucket, caller slices) is unchanged.
+    The returned series is then trimmed to the last ``days`` calendar days,
+    whether or not ``as_of`` was given. Two separate widenings make that
+    necessary: the ``as_of`` widening above, and Yahoo's own coarse range buckets,
+    which round 400 days up to two years and an all-time-high request up to
+    ``max``. Callers that use the series WHOLE — ``risk_metrics``,
+    ``factors._ticker_returns``, the screener's ``max(closes)`` — would otherwise
+    compute over a window several times longer than they asked for; observed live
+    as a 365-day regression covering 976 days.
 
     The CACHE still holds the full fetched range, so two callers wanting different
-    as_of dates within one bucket share the fetch and slice it separately."""
+    windows or as_of dates within one bucket share the fetch and slice it
+    separately."""
     sym = symbol.strip().upper()
     rng = _yahoo_range(lookback_days(days, as_of))
     key = (sym, rng)
@@ -789,12 +791,28 @@ def export_data(kind: str, path: str, account: str = "") -> str:
     return f"Exported {len(rows)} {kind} row(s) to {dest}."
 
 
+def _account_scope_note(account: str) -> str:
+    """The ``· account U123`` suffix a lot-derived figure carries.
+
+    FIFO lot matching is per-account — a sell in one account cannot consume a lot
+    opened in another — so which account a total covers is part of the total. With
+    several accounts imported, an unlabelled figure reads as the whole book."""
+    from . import statements
+
+    if (account or "").strip().lower() == statements.ALL_ACCOUNTS:
+        return " · ALL accounts pooled into one FIFO book"
+    named = (account or "").strip() or statements.default_account() or ""
+    return f" · account {named}" if named else ""
+
+
 def realized_gains(year: int = 0, symbol: str = "", account: str = "") -> str:
     """Realized capital gains from your imported trades, computed by FIFO lot
     matching and split into short-term (held < 1 year) vs long-term (≥ 1 year).
     Use for 'realized gains / capital gains / what did I make selling / tax'
     questions. ``year`` filters to gains *realized* that calendar year (0 = all);
-    ``symbol`` and ``account`` scope it. Gains are net of commissions. Reports
+    ``symbol`` scopes it. ``account`` picks the account (default: the newest
+    import's — lots and sells are matched WITHIN one account; pass ``"all"`` to
+    pool every account into one book). Gains are net of commissions. Reports
     unmatched sell proceeds when a sell has no imported opening lot."""
     from . import statements
 
@@ -807,7 +825,7 @@ def realized_gains(year: int = 0, symbol: str = "", account: str = "") -> str:
             "`import_ibkr_statement`, or widen the filters."
         )
     scope = f" · {year}" if year else ""
-    lines = [f"REALIZED GAINS (FIFO{scope}):"]
+    lines = [f"REALIZED GAINS (FIFO{scope}{_account_scope_note(account)}):"]
     for sym, v in sorted(res["by_symbol"].items(), key=lambda kv: kv[1]["realized"], reverse=True):
         lines.append(
             f"  {sym:<6} total {v['realized']:+,.2f}  "
@@ -856,7 +874,12 @@ def income_summary(year: int = 0, account: str = "") -> str:
             fx_missing.append(ccy)
         else:
             total_base += a["net"] * rate
-    if len(res["by_currency"]) > 1 or fx_missing:
+    # The converted total earns its place whenever ANY currency isn't the base one.
+    # An account reporting entirely in EUR needs it MORE than a mixed one, not
+    # less: without it a USD-based reader gets a figure in a currency they don't
+    # think in and nothing to weigh it against. Two currencies both equal to the
+    # base is impossible (they key a dict), so this covers the mixed case too.
+    if any(c != BASE_CURRENCY for c in res["by_currency"]) or fx_missing:
         note = f" (missing FX for {', '.join(fx_missing)})" if fx_missing else ""
         when = "year-end" if year else "recent"
         lines.append(f"  ≈ {total_base:,.2f} {BASE_CURRENCY} net total at {when} FX{note}")
@@ -940,8 +963,14 @@ def _fx_lookup(currency: str, on_date: str | None = None) -> tuple[float, str] |
     """``(rate, rate_date)`` — units of the base currency (USD) per 1 unit of
     ``currency``, and the actual series date the rate came from — or None if it
     can't be fetched. ``on_date`` (YYYY-MM-DD) uses the rate on/just-before that
-    day; otherwise the latest. ``rate_date`` lets callers report the true date
-    used rather than assuming it equals the requested one."""
+    day; otherwise the latest.
+
+    ``rate_date`` is not decoration: when the pair's history doesn't reach back to
+    ``on_date`` there is no rate on or before it, and the closest thing available
+    is the series' EARLIEST rate — which is *after* the requested day. That is
+    still the best answer, and it is returned, but a caller that renders it as
+    "the closest date on or before" states the opposite of what happened. Compare
+    the dates before phrasing anything."""
     c = (currency or BASE_CURRENCY).strip().upper()
     if c in (BASE_CURRENCY, "", "?"):
         return 1.0, on_date or ""
@@ -982,8 +1011,16 @@ def convert_currency(amount: float, from_currency: str, on_date: str = "") -> st
     rate, rate_date = res
     # Report the date the rate actually came from. When a requested historical date
     # falls on a weekend/holiday (or predates the series) the true date differs, so
-    # naming it avoids implying a rate that doesn't exist for that exact day.
-    if rate_date and on_date and rate_date != on_date:
+    # naming it avoids implying a rate that doesn't exist for that exact day. Which
+    # SIDE it falls on matters too: a date the pair's history doesn't reach yields
+    # the earliest rate there is, which is after the day asked about, and calling
+    # that "on/before" would describe the one thing it isn't.
+    if rate_date and on_date and rate_date > on_date:
+        when = (
+            f" (rate as of {rate_date} — the FX history doesn't reach back to "
+            f"{on_date}, so this is the EARLIEST rate available, from after that day)"
+        )
+    elif rate_date and on_date and rate_date != on_date:
         when = f" (rate as of {rate_date}, the closest date on/before {on_date})"
     elif rate_date and on_date:
         when = f" (rate on {rate_date})"
@@ -1126,6 +1163,36 @@ def compare_prices(symbols: str, days: int = 180, as_of: str = "") -> str:
     return ChartText(head, _render_multi_series("Price (rebased to 100)", series))
 
 
+#: How far the benchmark's first/last in-period session may sit from the portfolio
+#: period's own bounds. A statement period routinely starts or ends on a weekend or
+#: a market holiday, so a few days of slack is normal data, not missing data.
+_BENCH_EDGE_TOLERANCE_DAYS = 7
+
+#: Requested beyond the reach back to the period start, so the session on/before
+#: it is comfortably inside the fetched window rather than at its very edge.
+_BENCH_FETCH_MARGIN_DAYS = 10
+
+
+def _period_edges_missing(series: list[tuple[str, float]], start: str, end: str) -> bool:
+    """Whether a benchmark series already filtered to ``[start, end]`` fails to
+    reach either end of that period.
+
+    Row count can't answer this. A series covering the last nine months of a
+    year-long period has hundreds of rows and produces a perfectly plausible
+    return — for the wrong window. And since the comparison's whole output is the
+    DIFFERENCE between two returns, a benchmark measured over a shorter span
+    yields a confident "you outperformed by 4 points" that is an artifact of the
+    mismatch. So the edges are checked instead of the length."""
+    if not series:
+        return True
+    try:
+        head = (date.fromisoformat(series[0][0]) - date.fromisoformat(start)).days
+        tail = (date.fromisoformat(end) - date.fromisoformat(series[-1][0])).days
+    except ValueError:
+        return True
+    return max(head, tail) > _BENCH_EDGE_TOLERANCE_DAYS
+
+
 def portfolio_vs_benchmark(benchmark: str = "SPY", account: str = "") -> str:
     """Compare your portfolio's deposit-independent performance (TWRR index) to a
     benchmark index over the same span. Use for 'am I beating the market / vs the
@@ -1143,9 +1210,13 @@ def portfolio_vs_benchmark(benchmark: str = "SPY", account: str = "") -> str:
         )
     start, end = pts[0]["date"], pts[-1]["date"]
     port_ret = pts[-1]["index"] - 100.0
-    span_days = (date.fromisoformat(end) - date.fromisoformat(start)).days
+    # The price window always ENDS today, so it has to be sized by how far back the
+    # period STARTS, not by how long the period is. Sizing it by the span reaches
+    # only that far back from today, which for a period that closed a year ago
+    # lands entirely after it.
+    reach = (date.today() - date.fromisoformat(start)).days + _BENCH_FETCH_MARGIN_DAYS
     try:
-        bench = _fetch_daily(benchmark, max(5, span_days + 5), strict=True)
+        bench = _fetch_daily(benchmark, max(5, reach), strict=True)
     except PriceDataUnavailable:
         return (
             f"Portfolio return over {start} → {end} was {port_ret:+.2f}%, but the "
@@ -1153,10 +1224,14 @@ def portfolio_vs_benchmark(benchmark: str = "SPY", account: str = "") -> str:
             f"{benchmark.upper()} to compare. Please try again shortly."
         )
     bench = [(d, c) for d, c in bench if start <= d <= end]
-    if len(bench) < 2:
+    if len(bench) < 2 or _period_edges_missing(bench, start, end):
+        covered = f"only {bench[0][0]} → {bench[-1][0]}" if bench else "nothing"
         return (
-            f"Portfolio return over {start} → {end} was {port_ret:+.2f}%, but "
-            f"couldn't fetch {benchmark.upper()} prices for that span to compare."
+            f"Portfolio return over {start} → {end} was {port_ret:+.2f}%, but the "
+            f"available {benchmark.upper()} history covers {covered} of that span — "
+            f"not enough to compare like for like. Reporting an out/underperformance "
+            f"figure from a shorter benchmark window would be the difference between "
+            f"two different periods, so there is no verdict here."
         )
     bench_ret = (bench[-1][1] - bench[0][1]) / bench[0][1] * 100.0
     diff = port_ret - bench_ret
@@ -1218,8 +1293,18 @@ def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY",
     # _aligned_closes drops a symbol with no data; beta needs both series.
     if dates_b and symbol.upper() in aligned and benchmark.upper() in aligned:
         sc, bc = aligned[symbol.upper()], aligned[benchmark.upper()]
-        sr = [(sc[i] - sc[i - 1]) / sc[i - 1] for i in range(1, len(sc)) if sc[i - 1]]
-        br = [(bc[i] - bc[i - 1]) / bc[i - 1] for i in range(1, len(bc)) if bc[i - 1]]
+        # Skip a session in BOTH series or in neither. Dropping it from only the
+        # series that had the unusable close shortens that list alone, which shifts
+        # every later value one slot earlier — and beta pairs them by POSITION, so
+        # from that point on each day's stock return is matched against the wrong
+        # day's market return. The covariance stays a real number; it just stops
+        # measuring anything.
+        pairs = [
+            ((sc[i] - sc[i - 1]) / sc[i - 1], (bc[i] - bc[i - 1]) / bc[i - 1])
+            for i in range(1, min(len(sc), len(bc))) if sc[i - 1] and bc[i - 1]
+        ]
+        sr = [s for s, _ in pairs]
+        br = [b for _, b in pairs]
         n = min(len(sr), len(br))
         if n >= 20:
             var_b = _stats.pvariance(br[:n])

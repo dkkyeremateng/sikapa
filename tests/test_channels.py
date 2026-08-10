@@ -79,6 +79,37 @@ def test_empty_text_is_not_sent(registry):
     assert channels.deliver("   ") == ([], [])
 
 
+# --- who actually carried the answer --------------------------------------------
+
+
+def test_a_banner_channel_does_not_count_as_carrying_the_answer(registry):
+    """A truncating channel is a courtesy, not delivery: it showed the user that
+    something happened, not what it said. The caller has to be able to tell the
+    difference without knowing any channel by name."""
+    channels.register_channel(channels.Channel(
+        "banner", lambda: True, lambda t: True, "Banner", full_content=False,
+    ))
+    assert channels.carried_full_text(["banner"]) is False
+    assert channels.carried_full_text(["banner", "alpha"]) is True
+    assert channels.carried_full_text([]) is False
+
+
+def test_channels_carry_the_whole_message_unless_they_say_otherwise(registry):
+    """The default has to be the safe one — a new channel that forgot to declare
+    itself must not silently start parking every answer for redelivery."""
+    assert channels.carried_full_text(["alpha"]) is True
+    assert channels.carried_full_text(["gone-from-the-registry"]) is True
+
+
+def test_the_desktop_channel_declares_itself_a_banner():
+    """It is enabled by default and returns True the moment the notifier process is
+    spawned — before, and regardless of, anything appearing on screen. So a failed
+    Telegram send plus a "successful" toast used to count as a delivered analysis,
+    and the answer was never parked for redelivery."""
+    assert channels.CHANNEL_REGISTRY["desktop"].full_content is False
+    assert channels.CHANNEL_REGISTRY["telegram"].full_content is True
+
+
 def test_describe_targets_is_honest_when_nothing_is_configured(monkeypatch):
     """A user told "it will be sent to you" who configured no channel would go
     looking for a message that never arrives."""

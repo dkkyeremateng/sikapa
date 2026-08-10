@@ -51,7 +51,10 @@ def diagnose(
     query should have driven, and the trace says which tools actually ran, so a
     miss names exactly what routing guidance to add. Content misses
     (contains/regex/llm_judge) are reported for human review but not turned into
-    automatic prompt rules — too vague to apply safely.
+    automatic prompt rules — too vague to apply safely. A failing trajectory item
+    that called every expected tool is reported the same way: nothing is missing
+    to route, but a failure that appears in no section of the report is worse than
+    a vague one.
 
     A rubric miss sits between the two. It is more specific than a content miss —
     the breakdown names WHICH dimension of the derivation failed and carries that
@@ -82,22 +85,32 @@ def diagnose(
     if eval_type == "trajectory":
         expected = [c.get("tool", "") for c in criteria if c.get("tool")]
         missing = [t for t in expected if t not in tools]
-        if not missing:
-            return None
-        return {
-            "kind": "routing",
-            "query": query,
-            "eval_type": eval_type,
-            "score": round(score, 4),
-            "expected": missing,
-            "called": list(tools),
-        }
+        if missing:
+            return {
+                "kind": "routing",
+                "query": query,
+                "eval_type": eval_type,
+                "score": round(score, 4),
+                "expected": missing,
+                "called": list(tools),
+            }
+        # Every expected tool ran and the item still scored under the floor —
+        # an `ordered` item whose calls came in the wrong sequence, typically.
+        # There is no missing tool to write a routing rule about, but the item
+        # DID fail, and returning None here dropped it from both sections of the
+        # report: the run looked cleaner than it was, and the only trace of the
+        # failure was a mean that didn't match the listed misses. It falls
+        # through to the content shape, which reports without auto-applying.
     return {
         "kind": "content",
         "query": query,
         "eval_type": eval_type,
         "score": round(score, 4),
-        "criteria": [c.get("answer") or c.get("pattern") or "" for c in criteria],
+        "criteria": [
+            c.get("answer") or c.get("pattern") or c.get("tool")
+            or c.get("requirement") or ""
+            for c in criteria
+        ],
         "answer_snippet": (answer or "").strip()[:200],
     }
 

@@ -29,12 +29,14 @@ make, so there's no new dependency for a feature that is off by default.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 import json
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 _API = "https://api.telegram.org"
@@ -271,6 +273,49 @@ def _offset_file() -> Path:
     return Path.home() / ".financial-research-assistant" / "telegram-offset.json"
 
 
+@contextmanager
+def _inbox_lock() -> Iterator[bool]:
+    """Hold the right to poll the inbox; yields whether we got it.
+
+    Reading the cursor, fetching, and writing the cursor back is one
+    read-modify-write over shared state, exactly like the task store — and it has
+    the same two claimants, a cron ``--run-due`` and a ``--watch`` loop. Unguarded,
+    both read the same offset, both receive the same update, and both run a full
+    model turn on one message; the user gets two answers and pays twice.
+
+    Non-blocking, unlike ``tasks._locked``: the lock is held across a long poll of
+    up to ``POLL_TIMEOUT`` seconds, so waiting for it would stall a cron tick for
+    half a minute to do work the other process is already doing. Losing the race
+    means "someone else owns the inbox right now", and the correct response is to
+    skip it this tick. POSIX-only; without ``fcntl`` this degrades to no locking
+    rather than failing, the same trade ``tasks.py`` makes.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        yield True
+        return
+    path = _offset_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:  # pragma: no cover - an unwritable state dir
+        yield True  # a missing lock file costs a duplicate answer, not a poll
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def _read_offset() -> int:
     try:
         return int(json.loads(_offset_file().read_text(encoding="utf-8")).get("offset", 0))
@@ -298,29 +343,37 @@ def get_updates(timeout: int = POLL_TIMEOUT) -> list[dict[str, Any]]:
     The cursor advances past EVERY update, including the ones the allowlist drops —
     otherwise a message from a stranger is re-fetched forever and the queue never
     moves past it.
+
+    The whole read-fetch-write span runs under ``_inbox_lock``, so a second runner
+    polling at the same moment gets nothing rather than a second copy of the same
+    message. Returning ``[]`` when the lock is held is not a lost message: the
+    process that owns the poll is answering it.
     """
     if not inbound_enabled():
         return []
-    offset = _read_offset()
-    payload: dict[str, Any] = {"timeout": timeout, "allowed_updates": ["message"]}
-    if offset:
-        payload["offset"] = offset
-    data = _call("getUpdates", payload, timeout=timeout + 10)
-    out: list[dict[str, Any]] = []
-    highest = offset
-    for upd in data.get("result", []):
-        highest = max(highest, int(upd.get("update_id", 0)) + 1)
-        msg = upd.get("message") or {}
-        chat = (msg.get("chat") or {}).get("id")
-        text = (msg.get("text") or "").strip()
-        if not text or chat is None or not is_allowed(chat):
-            continue
-        frm = msg.get("from") or {}
-        out.append({
-            "chat_id": str(chat),
-            "text": text,
-            "name": frm.get("username") or frm.get("first_name") or str(chat),
-        })
-    if highest != offset:
-        _write_offset(highest)
+    with _inbox_lock() as held:
+        if not held:
+            return []
+        offset = _read_offset()
+        payload: dict[str, Any] = {"timeout": timeout, "allowed_updates": ["message"]}
+        if offset:
+            payload["offset"] = offset
+        data = _call("getUpdates", payload, timeout=timeout + 10)
+        out: list[dict[str, Any]] = []
+        highest = offset
+        for upd in data.get("result", []):
+            highest = max(highest, int(upd.get("update_id", 0)) + 1)
+            msg = upd.get("message") or {}
+            chat = (msg.get("chat") or {}).get("id")
+            text = (msg.get("text") or "").strip()
+            if not text or chat is None or not is_allowed(chat):
+                continue
+            frm = msg.get("from") or {}
+            out.append({
+                "chat_id": str(chat),
+                "text": text,
+                "name": frm.get("username") or frm.get("first_name") or str(chat),
+            })
+        if highest != offset:
+            _write_offset(highest)
     return out

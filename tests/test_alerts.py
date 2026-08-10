@@ -1,6 +1,8 @@
 """Alert-rule store, evaluation, and digest integration — fully offline."""
 
 import datetime as dt
+import stat
+import threading
 
 import pytest
 
@@ -245,6 +247,70 @@ def test_digest_surfaces_triggered_alerts(monkeypatch, tmp_path):
     out = monitor.build_digest(today=dt.date(2026, 1, 5))
     assert "## 🔔 Alerts triggered" in out
     assert "AAPL down -10.0%" in out
+
+
+# --- the rule store itself ---------------------------------------------------
+
+
+def test_the_rule_file_is_0600():
+    """The rules name the tickers and the price levels the user cares about —
+    reading them is reading their positions and their intentions."""
+    alerts.add_alert("AAPL", "drop", 5)
+    mode = stat.S_IMODE(alerts._alerts_file().stat().st_mode)
+    assert mode == 0o600, f"alert store is {oct(mode)}"
+
+
+def test_no_temporary_file_survives_a_save():
+    alerts.add_alert("AAPL", "drop", 5)
+    d = alerts._alerts_file().parent
+    assert [p.name for p in d.iterdir() if p.name.startswith(".alerts-")] == []
+
+
+def test_concurrent_adds_do_not_lose_rules():
+    """Each mutation reads the whole list, appends, and rewrites it. Run two of
+    them at once without a lock and both read the same list, both mint the same
+    ``_next_id``, and the second write erases the first rule — the user is told
+    "Added alert a4" for a rule that no longer exists."""
+    workers, per_worker = 6, 5
+    errors: list[BaseException] = []
+
+    def add(worker: int) -> None:
+        try:
+            for i in range(per_worker):
+                alerts.add_alert(f"SYM{worker}{i}", "drop", 5)
+        except BaseException as e:  # surfaced below rather than lost in the thread
+            errors.append(e)
+
+    threads = [threading.Thread(target=add, args=(w,)) for w in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    rules = alerts.load_alerts()
+    assert len(rules) == workers * per_worker
+    assert len({r["id"] for r in rules}) == len(rules), "ids collided — a rule was overwritten"
+    assert len({r["symbol"] for r in rules}) == len(rules), "a rule was dropped"
+
+
+def test_a_concurrent_remove_does_not_resurrect_a_removed_rule():
+    """The same read-modify-write race in the other direction: a remove that
+    reads the list before a concurrent add's write lands would put the added rule
+    back."""
+    for i in range(20):
+        alerts.add_alert(f"SYM{i}", "drop", 5)
+
+    removed = [r["id"] for r in alerts.load_alerts()[:10]]
+    threads = [threading.Thread(target=alerts.remove_alert, args=(rid,)) for rid in removed]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    left = {r["id"] for r in alerts.load_alerts()}
+    assert not (left & set(removed)), "a removed rule came back"
+    assert len(left) == 10
 
 
 def test_alert_tools_registered():

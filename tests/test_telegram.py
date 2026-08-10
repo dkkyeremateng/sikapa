@@ -5,6 +5,7 @@ reach the network.
 """
 
 import json
+import os
 import urllib.error
 
 import pytest
@@ -128,6 +129,39 @@ def test_the_cursor_persists_so_a_restart_does_not_re_answer(monkeypatch):
     telegram.get_updates()
     telegram.get_updates()
     assert seen[1]["offset"] == 101, "the second poll must resume after the first"
+
+
+def test_a_second_poller_takes_nothing_while_another_owns_the_inbox(monkeypatch):
+    """Reading the cursor, fetching and writing it back is one read-modify-write
+    over shared state with two claimants — a cron `--run-due` and a `--watch` loop.
+    Unguarded, both saw the same update and both ran a full model turn on it: two
+    answers to one message, billed twice."""
+    import fcntl
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:abc")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "999")
+    calls: list[dict] = []
+
+    def fake_call(method, payload, timeout=30.0):
+        calls.append(payload)
+        return _updates(999)
+
+    monkeypatch.setattr(telegram, "_call", fake_call)
+
+    lock = telegram._offset_file().with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        assert telegram.get_updates() == []
+        assert calls == [], "not even fetched: the other runner is already answering it"
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    # And the lock is released again, so the next poll is a normal one.
+    assert [m["chat_id"] for m in telegram.get_updates()] == ["999"]
+    assert telegram._read_offset() == 101
 
 
 # --- token hygiene -------------------------------------------------------------

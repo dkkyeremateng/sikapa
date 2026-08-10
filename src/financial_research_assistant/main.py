@@ -524,6 +524,31 @@ def _handle_memory(value: str) -> int:
     return 0
 
 
+def _write_trace(
+    trace_path: str,
+    prompt: str,
+    answer: str,
+    tools: list[dict[str, Any]],
+    usage: dict[str, Any],
+    error: str = "",
+) -> None:
+    """Write the machine-readable trajectory for eval_type "trajectory"
+    (evaluate.py).
+
+    Written on the failing path too, carrying an ``error`` marker. An eval harness
+    reads this file by the path it passed in, so a run that dies without writing it
+    either raises FileNotFoundError (reported as a harness bug rather than a failed
+    run) or — when the path is reused across runs, which is how a sweep works —
+    silently hands back the PREVIOUS run's trajectory and scores that instead."""
+    payload: dict[str, Any] = {
+        "query": prompt, "answer": answer, "tools": tools, "usage": usage,
+    }
+    if error:
+        payload["error"] = error
+    with open(trace_path, "w") as f:
+        json.dump(payload, f)
+
+
 async def _headless(
     prompt: str,
     session_id: str,
@@ -591,13 +616,13 @@ async def _headless(
             final = ev.text
         elif ev.kind == "error":
             print(f"error: {ev.text}", file=sys.stderr)
+            if trace_path is not None:
+                _write_trace(trace_path, prompt, final, tools, usage, error=ev.text)
             return 1
     if final:
         sessions.log_turn(session_id, prompt, final)
     if trace_path is not None:
-        # Machine-readable trajectory for eval_type "trajectory" (evaluate.py).
-        with open(trace_path, "w") as f:
-            json.dump({"query": prompt, "answer": final, "tools": tools, "usage": usage}, f)
+        _write_trace(trace_path, prompt, final, tools, usage)
     print(final)
     return 0
 

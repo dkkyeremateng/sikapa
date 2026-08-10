@@ -31,7 +31,8 @@ import os
 from .memory import get_memory
 
 # Substrings (case-insensitive) that mark a section as thin/unavailable. These
-# match the "no data" shapes the gather + underlying tools actually emit.
+# match the "no data" shapes the gather + underlying tools actually emit, and each
+# only appears in a sentence ABOUT missing data — never inside a healthy result.
 _GAP_MARKERS = (
     "unavailable",
     "not enough",
@@ -39,8 +40,23 @@ _GAP_MARKERS = (
     "not available",
     "couldn't",
     "could not",
-    "n/a",
 )
+
+#: ``n/a`` is deliberately NOT one of them. It is how ``fundamentals.py`` renders
+#: any single missing FIELD (``_fmt``/``_money``), so as a substring it fires on
+#: perfectly good output: every company that pays no dividend, or whose sector is
+#: blank, would permanently teach "the fundamentals data was unavailable" and have
+#: that lesson injected into every later report on it. It means a gap only when it
+#: IS the whole section — the tool returned the marker and nothing else.
+_NA_TRIM = " \t\n.-—·:"
+
+
+def _is_gap(text: str) -> bool:
+    """Whether a gathered section came back unavailable or too thin."""
+    low = (text or "").strip().lower()
+    if any(m in low for m in _GAP_MARKERS):
+        return True
+    return low.strip(_NA_TRIM) == "n/a"
 
 
 def _reflect_enabled() -> bool:
@@ -56,8 +72,7 @@ def _gap_lessons(subject: str, sections: list[tuple[str, str]]) -> list[str]:
     subj = subject.strip().upper()
     lessons = []
     for label, text in sections:
-        low = (text or "").lower()
-        if any(m in low for m in _GAP_MARKERS):
+        if _is_gap(text):
             lessons.append(
                 f"When researching {subj}, the '{label}' data was unavailable or "
                 f"too thin — try an alternate source or note the gap explicitly."

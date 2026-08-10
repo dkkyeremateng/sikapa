@@ -13,7 +13,9 @@ Usage:
 The floor also reads EVAL_MIN_SCORE if --min-score is omitted (default 0.8).
 Note: --fake can't answer content evals, so a content dataset scores low
 offline by design — run the gate live, and use `evaluate.py --fake` for the
-offline plumbing check (see .github/workflows/eval.yml).
+offline plumbing check (see .github/workflows/eval.yml). It cannot grade judged
+items either, only auto-pass them, so an offline run reports how much of its mean
+came from that (see `_report_auto_passes`).
 """
 
 import argparse
@@ -44,12 +46,41 @@ def main() -> int:
     status = "PASS" if ok else "FAIL"
     print(f"\n[{status}] mean score {mean:.3f} (floor {args.min_score:.3f}) "
           f"over {len(results)} items")
+    _report_auto_passes(results, mean)
     if not ok:
         worst = sorted(results, key=lambda r: r["score"])[:3]
         for r in worst:
             print(f"  low: {r['score']:.2f}  {r['query'][:60]}", file=sys.stderr)
         _emit_diagnosis(items, results, mean)
     return 0 if ok else 1
+
+
+def _report_auto_passes(results: list[dict], mean: float) -> None:
+    """Say how much of the mean came from items nothing actually graded.
+
+    Offline, `llm_judge` and `rubric` items award full marks for any non-empty
+    output — there is no judge model to ask, and refusing to score them would be
+    just as misleading in the other direction. But that means a judged-heavy
+    dataset can carry `--fake` runs over the floor while every answer is "Error:
+    tool unavailable": the gate reports a PASS that says nothing about answers.
+    Naming the auto-passed share, and the mean without it, makes that visible in
+    the log instead of leaving it to be discovered by whatever ships next.
+    """
+    auto = [r for r in results if r.get("auto_pass")]
+    if not auto:
+        return
+    contribution = sum(r["score"] for r in auto) / len(results)
+    graded = [r for r in results if not r.get("auto_pass")]
+    graded_mean = sum(r["score"] for r in graded) / len(graded) if graded else 0.0
+    print(f"  NOTE: {len(auto)}/{len(results)} judged item(s) were auto-passed "
+          f"offline (--fake cannot grade content), contributing {contribution:.3f} "
+          f"of the {mean:.3f} mean.")
+    if graded:
+        print(f"        mean over the {len(graded)} actually-graded item(s): "
+              f"{graded_mean:.3f}")
+    else:
+        print("        NOTHING in this run was graded — the score is entirely "
+              "auto-passes.")
 
 
 def _emit_diagnosis(items, results, mean) -> None:

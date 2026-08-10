@@ -196,6 +196,50 @@ class Memory(Protocol):
     def rank(self, query: str, entries: list[dict[str, Any]], k: int) -> list[dict[str, Any]]: ...
 
 
+# --- Dedup thresholds -------------------------------------------------------
+# Term-Jaccard above which a new entry counts as a near-duplicate of an existing
+# one of the same kind.
+
+#: Free-form facts. Two phrasings of one holding or preference share most of their
+#: words, so this catches a restatement without merging two different facts.
+_NEAR_DUP = 0.85
+#: Lessons and feedback are TEMPLATED — a gap lesson is one fixed sentence with the
+#: section label substituted in — so nearly every term is boilerplate and the few
+#: that differ ARE the content. At the free-form threshold, "the 'News' data was
+#: unavailable" swallowed "the 'Peers' data was unavailable" and only the first gap
+#: of a run was ever learned; these dedup on near-identity instead.
+_TEMPLATED_DUP = 0.98
+
+
+def _dedup_channel(kind: str) -> str:
+    """Which pile an entry dedups against.
+
+    Each specially-framed kind is its own channel: a ``lesson`` and an ``avoid``
+    are recalled separately and framed differently, and the ``avoid`` for an
+    exchange shares every word with its ``exemplar`` — comparing across them threw
+    the user's correction away and kept the guidance it corrected. Every free-form
+    category ('note', 'preference', 'holding', …) is ONE pile of plain facts, so
+    re-stating a fact under a different tag is still a restatement.
+    """
+    kind = kind or "note"
+    return kind if kind in _SPECIAL_KINDS else ""
+
+
+#: The feedback verdicts are mutually exclusive: re-rating one answer the other way
+#: is a correction, not a second opinion.
+_OPPOSITE_VERDICT = {"exemplar": "avoid", "avoid": "exemplar"}
+#: Splits a stored feedback entry's exchange from the optional "why" note, so a
+#: reversed verdict is recognised as the same exchange even when only one side
+#: carried a note ("/bad too verbose" after a bare "/good").
+_NOTE_TAIL = re.compile(r"\bnote:\s", re.I)
+
+
+def _verdict_key(text: str) -> str:
+    """What identifies a rated exchange across a changed verdict: the Q/A, without
+    the trailing note either rating may or may not have added."""
+    return _cmp(_NOTE_TAIL.split(text or "", maxsplit=1)[0])
+
+
 def _keyword_rank(query: str, entries: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
     """Rank entries by query-term overlap (recency breaks ties), keeping only
     those with at least one shared term. The deterministic default retrieval."""
@@ -222,7 +266,11 @@ class LocalMemory:
         if not self._file.exists():
             return []
         out: list[dict[str, Any]] = []
-        for line in self._file.read_text().splitlines():
+        # UTF-8 explicitly, because `write_private` writes UTF-8: on a platform
+        # whose default encoding is cp1252 a store holding "€" (a base currency, a
+        # European ticker) would raise UnicodeDecodeError out of the read itself —
+        # outside the per-line guard below — and take down every turn that recalls.
+        for line in self._file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -254,17 +302,41 @@ class LocalMemory:
             prefix=".memory-",
         )
 
-    def _is_dup(self, text: str, entries: list[dict[str, Any]]) -> bool:
-        """True if ``text`` is an exact or near-duplicate (term Jaccard ≥ 0.85) of
-        an existing entry."""
+    def _is_dup(self, text: str, entries: list[dict[str, Any]], kind: str = "note") -> bool:
+        """True if ``text`` is an exact or near-duplicate of an existing entry in
+        the same dedup channel (see ``_dedup_channel``)."""
+        channel = _dedup_channel(kind)
+        threshold = _TEMPLATED_DUP if channel else _NEAR_DUP
         nt, ntext = _terms(text), text.lower()
         for e in entries:
+            if _dedup_channel(e.get("kind", "")) != channel:
+                continue
             if e["text"].lower() == ntext:
                 return True
             et = _terms(e["text"])
-            if nt and et and len(nt & et) / len(nt | et) >= 0.85:
+            if nt and et and len(nt & et) / len(nt | et) >= threshold:
                 return True
         return False
+
+    def _archive_opposite_verdict(
+        self, entries: list[dict[str, Any]], text: str, kind: str
+    ) -> None:
+        """Archive the same exchange stored under the opposite feedback verdict.
+
+        ``/good`` then ``/bad`` on one answer stores the SAME Q/A under two kinds.
+        Keeping both would hand the next similar question that exchange as an
+        example to emulate AND one to avoid, so the newer verdict wins and the
+        older is superseded — kept for audit, never recalled, exactly like a
+        replaced single-valued fact."""
+        other = _OPPOSITE_VERDICT.get(kind)
+        if other is None:
+            return
+        key = _verdict_key(text)
+        stamp = date.today().isoformat()
+        for e in entries:
+            if (not e.get("superseded") and e.get("kind") == other
+                    and _verdict_key(e["text"]) == key):
+                e["superseded"] = stamp
 
     def _make_entry(self, text: str, kind: str) -> dict[str, Any]:
         """Build a stored entry. Subclasses override to attach extra fields (e.g.
@@ -277,13 +349,19 @@ class LocalMemory:
         text = " ".join((text or "").split())
         if not text:
             return False
+        kind = kind or "note"
         entries = self._load()
         active = [e for e in entries if not e.get("superseded")]
         # A restatement of an active memory (ignoring case and trailing
         # punctuation) is always a no-op — so "moderate" and "moderate." don't
         # create a spurious update, while a genuinely different value still does.
+        # Within one dedup channel: the same Q/A filed as an `exemplar` and then as
+        # an `avoid` is the user REVERSING a verdict, not restating it, and
+        # `_archive_opposite_verdict` resolves that instead of discarding it.
         norm = _cmp(text)
-        if any(_cmp(e["text"]) == norm for e in active):
+        channel = _dedup_channel(kind)
+        if any(_cmp(e["text"]) == norm for e in active
+               if _dedup_channel(e.get("kind", "")) == channel):
             return False
         key = subject_key(text) if _supersede_enabled() and kind not in _SPECIAL_KINDS else None
         if key:
@@ -297,9 +375,10 @@ class LocalMemory:
                 if (not e.get("superseded") and e.get("kind") not in _SPECIAL_KINDS
                         and subject_key(e["text"]) == key):
                     e["superseded"] = stamp
-        elif self._is_dup(text, active):
+        elif self._is_dup(text, active, kind):
             # Not a single-valued update: drop near-duplicates (holdings, notes, …).
             return False
+        self._archive_opposite_verdict(entries, text, kind)
         entries.append(self._make_entry(text, kind))
         self._write(entries)
         return True
@@ -417,9 +496,15 @@ class _Mem0Adapter:
         return True
 
     def search(self, query: str, k: int = 3) -> list[str]:
-        hits = self._mem.search(query=query, user_id=self._user, limit=k)
-        results = hits.get("results", hits) if isinstance(hits, dict) else hits
-        return [h.get("memory", "") for h in results][:k]
+        try:
+            hits = self._mem.search(query=query, user_id=self._user, limit=k)
+            results = hits.get("results", hits) if isinstance(hits, dict) else hits
+            return [h.get("memory", "") for h in results][:k]
+        except Exception:
+            # mem0 is a service (vector store + its own LLM), and this runs on the
+            # way IN to every turn. No recalled facts is a thinner answer; a raised
+            # exception is no answer at all — same trade the other methods make.
+            return []
 
     def forget(self, query: str) -> int:
         removed = 0
@@ -455,9 +540,12 @@ class _Mem0Adapter:
 
     def remember(self, user_msg: str, answer: str = "") -> None:
         # mem0 extracts salient facts itself, so let it see the whole turn.
-        self._mem.add(
-            f"user: {user_msg}\nassistant: {answer}".strip(), user_id=self._user
-        )
+        try:
+            self._mem.add(
+                f"user: {user_msg}\nassistant: {answer}".strip(), user_id=self._user
+            )
+        except Exception:
+            pass  # auto-capture runs after the answer; losing it must not lose that
 
 
 def _local_root() -> Path:

@@ -66,15 +66,24 @@ def _request(url: str):
 def _fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
     """GET a JSON document from SEC with the required User-Agent, a same-process
     cache, and one retry; ``{}`` on any failure (network, non-JSON, unknown)."""
-    if url in _JSON_CACHE:
-        return _JSON_CACHE[url]
+    cached = _JSON_CACHE.get(url)
+    if isinstance(cached, dict):
+        return cached
     for _ in range(2):  # one retry — SEC occasionally 5xx / rate-limits
         try:
             with urllib.request.urlopen(_request(url), timeout=timeout) as resp:  # noqa: S310
                 data = json.loads(resp.read().decode("utf-8", "replace"))
+            if not isinstance(data, dict):
+                # A JSON list or scalar (an error envelope, an endpoint that
+                # changed shape) is not something any caller here can read. It used
+                # to be cached anyway while the call returned {}, so the SECOND
+                # lookup of the same URL handed back the raw list and the next
+                # `.get()` raised AttributeError mid-turn — a failure that only
+                # appeared on the retry.
+                return {}
             if data:
                 _JSON_CACHE[url] = data
-            return data if isinstance(data, dict) else {}
+            return data
         except Exception:  # noqa: BLE001 — degrade to no-data, never abort the turn
             continue
     return {}
@@ -175,6 +184,21 @@ def _submission_recent(cik: str) -> tuple[str, list[dict[str, Any]]]:
         for i, form in enumerate(forms)
     ]
     return sub.get("name") or "", out
+
+
+def _latest_form(filings: list[dict[str, Any]], ft: str) -> dict[str, Any] | None:
+    """The most recent filing of form ``ft``, preferring the ORIGINAL document over
+    an amendment of it.
+
+    A prefix match alone also matches "10-K/A", and an amendment is routinely a
+    cover page plus one restated exhibit rather than the whole document — so when
+    the newest entry was an amendment, the tearsheet reported that it "couldn't
+    locate the usual sections" while the real 10-K sat one row below it. The prefix
+    match stays as the fallback, so a form family ("10-") and a filer whose only
+    filing of that type IS the amendment both still resolve."""
+    ft = ft.strip().upper()
+    exact = next((f for f in filings if f["form"].strip().upper() == ft), None)
+    return exact or next((f for f in filings if f["form"].upper().startswith(ft)), None)
 
 
 def _filter_forms(filings: list[dict[str, Any]], ft: str, limit: int) -> list[dict[str, Any]]:
@@ -831,7 +855,7 @@ def sec_filing_excerpt(symbol: str, query: str, form_type: str = "10-K",
         return _no_cik(sym)
     name, filings = _submission_recent(cik)
     ft = form_type.strip().upper() or "10-K"
-    match = next((f for f in filings if f["form"].upper().startswith(ft)), None)
+    match = _latest_form(filings, ft)
     if not match:
         return f"No recent {ft} filing found for {name or sym} ({sym})."
     url = _filing_url(cik, match["accession"], match["doc"])
@@ -885,7 +909,7 @@ def filing_summary(symbol: str, form_type: str = "10-K") -> str:
         return _no_cik(sym)
     name, filings = _submission_recent(cik)
     ft = form_type.strip().upper() or "10-K"
-    match = next((f for f in filings if f["form"].upper().startswith(ft)), None)
+    match = _latest_form(filings, ft)
     if not match:
         return f"No recent {ft} filing found for {name or sym} ({sym})."
     url = _filing_url(cik, match["accession"], match["doc"])

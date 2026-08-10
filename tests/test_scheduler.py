@@ -5,6 +5,7 @@ a recorder, so no test here spends a token or sends a message.
 """
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 
@@ -417,3 +418,166 @@ def test_a_parked_answer_is_visible_in_the_listing(monkeypatch, answers):
     tasks.add_task("x", "+0m")
     asyncio.run(scheduler.run_due())
     assert "answer waiting to be delivered" in tasks.list_scheduled_tasks()
+
+
+# --- a banner is not the answer --------------------------------------------------
+
+
+@pytest.fixture
+def outage(monkeypatch):
+    """A dead full-content channel beside a working banner one — the real registry,
+    so the decision is made where it will be made in production."""
+    banners: list[str] = []
+    monkeypatch.setattr(channels, "CHANNEL_REGISTRY", {}, raising=False)
+    channels.register_channel(channels.Channel(
+        "telegram", lambda: True, lambda t: False, "Telegram",
+    ))
+    channels.register_channel(channels.Channel(
+        "desktop", lambda: True, lambda t: bool(banners.append(t) or True),
+        "desktop notification", full_content=False,
+    ))
+    monkeypatch.setenv("NOTIFY_CHANNELS", "telegram,desktop")
+    return banners
+
+
+def test_a_toast_is_not_delivery_so_the_answer_is_still_parked(outage, answers):
+    """The reported failure: `desktop` is on by default and reports success the
+    moment the notifier is spawned. With Telegram down the run came back with one
+    "delivered" channel, nothing was parked, and a full analysis was permanently
+    reduced to a 200-character banner."""
+    tasks.add_task("Analyse FISV", "+0m")
+    asyncio.run(scheduler.run_due())
+    assert outage, "the toast still goes up — it is a courtesy, just not the answer"
+    parked = tasks.undelivered()
+    assert len(parked) == 1 and "answer to Analyse FISV" in parked[0]["pending_delivery"]
+
+
+def test_a_toast_does_not_clear_a_parked_answer_either(outage, answers):
+    """Redelivery has to hold out for a channel that carries the whole thing;
+    otherwise the first tick after the outage quietly drops it."""
+    tasks.add_task("Analyse FISV", "+0m")
+    asyncio.run(scheduler.run_due())
+    assert asyncio.run(scheduler.retry_deliveries()) == []
+    assert tasks.undelivered(), "still only banners"
+
+    sent: list[str] = []
+    channels.register_channel(channels.Channel(
+        "telegram", lambda: True, lambda t: bool(sent.append(t) or True), "Telegram",
+    ))
+    assert asyncio.run(scheduler.retry_deliveries()) == ["s1"]
+    assert "answer to Analyse FISV" in sent[0]
+    assert tasks.undelivered() == []
+
+
+def test_a_full_content_channel_still_settles_the_delivery(monkeypatch, answers):
+    """The other half: a working Telegram must not start parking answers that
+    already arrived."""
+    monkeypatch.setattr(channels, "CHANNEL_REGISTRY", {}, raising=False)
+    channels.register_channel(channels.Channel(
+        "telegram", lambda: True, lambda t: True, "Telegram",
+    ))
+    monkeypatch.setenv("NOTIFY_CHANNELS", "telegram")
+    tasks.add_task("x", "+0m")
+    asyncio.run(scheduler.run_due())
+    assert tasks.undelivered() == []
+
+
+# --- one bad task must not strand the claimed batch ------------------------------
+
+
+def test_a_delivery_blowing_up_does_not_abandon_the_rest_of_the_batch(monkeypatch, answers):
+    """The batch is already CLAIMED when the loop starts. An exception escaping one
+    iteration used to abandon every task after it mid-tick — none of them ran, and
+    all of them sat in "running", which nothing would claim again."""
+    def explode(text, prefer=""):
+        if "job 0" in text:
+            raise RuntimeError("the channel exploded")
+        return ["telegram"], []
+
+    monkeypatch.setattr(channels, "deliver", explode)
+    for i in range(3):
+        tasks.add_task(f"job {i}", "+0m")
+    results = asyncio.run(scheduler.run_due())
+    assert [r["ok"] for r in results] == [False, True, True]
+    assert [t["status"] for t in tasks.load_tasks()] == ["done", "done", "done"]
+
+
+def test_a_store_failure_leaves_only_its_own_task_for_the_claim_timeout(monkeypatch, answers, delivered):
+    """When the failure lands before the outcome is written, the task genuinely is
+    still claimed — that one is recovered by the expiring claim, and the rest of the
+    batch runs regardless."""
+    real = tasks.record_result
+
+    def flaky(task_id, ok, result, now=None):
+        if task_id == "s1":
+            raise OSError("no space left on device")
+        return real(task_id, ok, result, now)
+
+    monkeypatch.setattr(tasks, "record_result", flaky)
+    for i in range(3):
+        tasks.add_task(f"job {i}", "+0m")
+    results = asyncio.run(scheduler.run_due())
+    assert [r["ok"] for r in results] == [False, True, True]
+    assert [t["status"] for t in tasks.load_tasks()] == ["running", "done", "done"]
+
+    monkeypatch.setattr(tasks, "record_result", real)
+    later = tasks.now_utc() + timedelta(minutes=tasks.DEFAULT_CLAIM_TIMEOUT_MINUTES + 1)
+    assert [t["id"] for t in tasks.claim_due(now=later)] == ["s1"]
+
+
+# --- blocking HTTP stays off the event loop ------------------------------------
+
+
+async def _ticks_while(coro, budget: float = 1.0) -> int:
+    """Run ``coro`` while a second coroutine counts turns of the same loop."""
+    ticks = 0
+    running = True
+
+    async def counter():
+        nonlocal ticks
+        while running:
+            ticks += 1
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(counter())
+    try:
+        await asyncio.wait_for(coro, timeout=budget)
+    finally:
+        running = False
+        task.cancel()
+    return ticks
+
+
+def test_a_long_poll_leaves_the_rest_of_the_loop_running(inbox, answers):
+    """`telegram.get_updates` parks on a socket for up to POLL_TIMEOUT seconds. Run
+    on the loop thread it holds every other coroutine sharing that loop — the watch
+    tick, an in-flight turn — for the whole window."""
+    import time
+
+    def slow_updates(timeout=0):
+        time.sleep(0.15)
+        return [{"chat_id": "999", "text": "how is NVDA?", "name": "me"}]
+
+    inbox["monkeypatch"].setattr(inbox["telegram"], "get_updates", slow_updates)
+    ticks = asyncio.run(_ticks_while(scheduler.poll_inbox()))
+    assert ticks > 2, "the loop was blocked behind the poll"
+    assert answers["seen"][0][0] == "how is NVDA?", "and the message was still answered"
+
+
+def test_a_slow_delivery_leaves_the_rest_of_the_loop_running(monkeypatch, answers):
+    """`channels.deliver` is urllib. A notification endpoint taking its time used to
+    stall everything else on the tick's loop behind its socket."""
+    import time
+
+    sent: list[str] = []
+
+    def slow_deliver(text, prefer=""):
+        time.sleep(0.15)
+        sent.append(text)
+        return ["telegram"], []
+
+    monkeypatch.setattr(channels, "deliver", slow_deliver)
+    tasks.add_task("Analyse NOMD", "+0m")
+    ticks = asyncio.run(_ticks_while(scheduler.run_due()))
+    assert ticks > 2, "the loop was blocked behind the delivery"
+    assert sent, "and the answer was still delivered"

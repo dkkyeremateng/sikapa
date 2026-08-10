@@ -7,13 +7,19 @@ text of an ingested brokerage statement, a remembered fact about their tax
 situation. And every one of them is rewritten in full on each change, so a crash
 mid-write truncates the whole store rather than one record.
 
-``write_private`` is the two-line answer to both, factored out of ``auth.py`` and
+``write_private`` is the small answer to both, factored out of ``auth.py`` and
 ``tasks.py`` where it was already written twice:
 
 * ``mkstemp`` creates the temporary file ``0600`` in the destination directory,
   so the contents are never briefly world-readable the way ``write_text`` +
   ``chmod`` would leave them, and never on a different filesystem (which would
   make the rename below a copy).
+* ``fsync`` forces the bytes to disk *before* the rename. A rename is atomic with
+  respect to other readers, but it says nothing about durability: the filesystem
+  is free to commit the new directory entry while the data blocks are still in
+  the page cache, so a crash right after ``os.replace`` can leave ``path``
+  present and zero-length. That is the exact shape the atomicity below exists to
+  prevent.
 * ``os.replace`` swaps it in atomically. A reader either sees the whole old file
   or the whole new one — never a half-written one, which for the JSON/JSONL
   stores here parses as "empty" and reads as "you have nothing saved".
@@ -39,6 +45,8 @@ def write_private(path: Path, text: str, prefix: str = ".tmp-") -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
     except BaseException:
         try:

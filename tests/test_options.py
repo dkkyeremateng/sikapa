@@ -106,6 +106,20 @@ def test_explain_option_nearest_expiry_noted(monkeypatch):
     assert "nearest available" in out            # 08-01 → 08-21
 
 
+def test_nearest_expiry_looks_both_ways():
+    """"The first one on/after, else the soonest of all" is not nearest. It walks
+    past a Friday two days before the requested date to reach one nineteen days
+    after it, and for a date past the last listed expiry it falls back to the FRONT
+    month — the furthest available contract from the one asked about."""
+    monthlies = ["2026-08-21", "2026-09-18", "2026-10-16"]
+    assert options._nearest_expiry(monthlies, "2026-08-23") == ("2026-08-21", False)
+    assert options._nearest_expiry(monthlies, "2026-12-01") == ("2026-10-16", False)
+    assert options._nearest_expiry(monthlies, "2026-08-21") == ("2026-08-21", True)
+    # Equidistant: the later expiry, which has more time on it, is the safer stand-in.
+    assert options._nearest_expiry(["2026-08-01", "2026-08-11"], "2026-08-06") == (
+        "2026-08-11", False)
+
+
 def test_explain_option_no_options(monkeypatch):
     monkeypatch.setattr(options, "_fetch_expiries", lambda s: [])
     out = options.explain_option("PRIVATECO")

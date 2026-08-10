@@ -83,6 +83,12 @@ async def traced(
 
     Transparent when tracing is disabled/unavailable or ``fake`` is set, so
     callers can always wrap ``run_turn`` with it.
+
+    Everything written onto a span goes through ``auth.redact`` first — the
+    prompt and the final answer included. Spans leave the machine for a
+    third-party backend and are retained there, and a user pasting a key into
+    the chat ("here's my token, check the balance") is the ordinary case rather
+    than the exotic one.
     """
     tracer = None if (fake or not _enabled()) else _get_tracer()
     if tracer is None:
@@ -97,7 +103,7 @@ async def traced(
         span.set_attribute("gen_ai.agent.name", SERVICE_NAME)
         span.set_attribute("gen_ai.conversation.id", session_id)
         span.set_attribute("gen_ai.request.model", model)
-        span.set_attribute("gen_ai.input.messages", user_msg[:2000])
+        span.set_attribute("gen_ai.input.messages", redact(user_msg[:2000]))
         tool_spans: dict[str, Any] = {}
         final_text = ""
         # usage arrives as per-call deltas; sum them
@@ -140,7 +146,7 @@ async def traced(
                     span.set_status(Status(StatusCode.ERROR, redact(ev.text[:200])))
                 yield ev
             if final_text:
-                span.set_attribute("gen_ai.output.messages", final_text[:2000])
+                span.set_attribute("gen_ai.output.messages", redact(final_text[:2000]))
         finally:
             for ts in tool_spans.values():
                 ts.end()  # close any tool span left open by an error mid-turn

@@ -172,3 +172,56 @@ def test_document_tools_registered():
     names = {getattr(t, "name", getattr(t, "__name__", "")) for t in catalog.TOOLS}
     for n in ("ingest_document", "ask_document", "list_documents", "forget_document"):
         assert n in names
+
+
+# --- concurrency + retrieval holes -------------------------------------------
+def test_an_ingest_during_a_backfill_is_not_clobbered(tmp_path, monkeypatch):
+    """The backfill holds its copy of the index across a network round-trip, and
+    every write is a full rewrite. An ingest that finished inside that window used
+    to be erased by the stale copy — the unit of loss being a whole document."""
+    from financial_research_assistant import embeddings
+
+    # Ingested with no endpoint → keyword-only chunks, ripe for a later backfill.
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts: None)
+    documents.ingest_document(
+        _write(tmp_path, "old.txt", "Cash flow from operations reached a record high.")
+    )
+
+    def embed_and_race(texts):
+        # Stands in for another caller finishing an ingest while this embedding
+        # call is still in flight.
+        monkeypatch.setattr(embeddings, "embed_texts", lambda t: None)
+        documents.ingest_document(
+            _write(tmp_path, "new.txt", "Backlog grew across every region this year.")
+        )
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(embeddings, "embed_texts", embed_and_race)
+    documents.ask_document("record high", doc="old")
+
+    stored = documents._load_index()
+    assert {r["doc"] for r in stored} == {"old", "new"}, "the concurrent ingest survived"
+    assert all(r.get("vec") for r in stored if r["doc"] == "old"), "and the backfill landed"
+
+
+def test_a_chunk_without_an_embedding_stays_searchable(tmp_path, monkeypatch):
+    """A document ingested while the embeddings endpoint was down must not become
+    invisible to every later search just because another document has vectors —
+    the store lists it, and no query could ever reach it."""
+    from financial_research_assistant import embeddings
+
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts: [[1.0, 0.0] for _ in texts])
+    documents.ingest_document(
+        _write(tmp_path, "embedded.txt", "Alpha. The logistics network spans forty centers.")
+    )
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts: None)  # endpoint down
+    documents.ingest_document(
+        _write(tmp_path, "outage.txt", "Beta. Hydroelectric capacity was expanded in the quarter.")
+    )
+    assert "keyword-only" in documents.list_documents()
+
+    # The endpoint is back for queries but still not for texts, so the backfill
+    # cannot rescue the record — retrieval itself has to.
+    monkeypatch.setattr(embeddings, "embed_query", lambda q: [1.0, 0.0])
+    out = documents.ask_document("hydroelectric capacity")
+    assert "[outage]" in out and "Hydroelectric" in out

@@ -16,13 +16,21 @@ the helpers are trivially monkeypatched in tests, keeping them offline.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any
 
-# Same-process caches (cleared at process exit): yfinance's ``.info`` is a slow
-# quoteSummary round-trip, so a tool that touches several holdings (dividend
-# projection) doesn't refetch the same ticker.
-_INFO_CACHE: dict[str, dict[str, Any]] = {}
+# Same-process cache of ``symbol -> (info, fetched_at)``: yfinance's ``.info`` is
+# a slow quoteSummary round-trip, so a tool that touches several holdings
+# (dividend projection) doesn't refetch the same ticker.
+#
+# Entries expire on the same clock as the price-series cache, because ``.info``
+# carries the spot price that `explain_option`'s breakeven, `dcf_valuation`'s
+# upside and `compare_stocks` are all quoted against. Held for the life of the
+# process, a session left open across a trading day would price an option off
+# this morning's quote while the chart beside it showed this afternoon's close —
+# two tools disagreeing about "now" within one conversation.
+_INFO_CACHE: dict[str, tuple[dict[str, Any], float]] = {}
 
 
 def _ticker(symbol: str):
@@ -32,17 +40,22 @@ def _ticker(symbol: str):
 
 
 def _fetch_info(symbol: str) -> dict[str, Any]:
-    """yfinance ``.info`` (valuation/profile/analyst summary) as a dict, cached;
-    ``{}`` on any failure or unknown ticker."""
+    """yfinance ``.info`` (valuation/profile/analyst summary) as a dict, cached
+    for ``FINANCIAL_RESEARCH_PRICE_TTL`` seconds; ``{}`` on any failure or
+    unknown ticker."""
+    from .tools import _price_ttl
+
     sym = symbol.strip().upper()
-    if sym in _INFO_CACHE:
-        return _INFO_CACHE[sym]
+    ttl = _price_ttl()
+    cached = _INFO_CACHE.get(sym)
+    if cached is not None and ttl > 0 and (time.time() - cached[1]) < ttl:
+        return cached[0]
     try:
         info = _ticker(sym).info or {}
     except Exception:  # noqa: BLE001 — network/parse failure degrades to no-data
         info = {}
     if info:
-        _INFO_CACHE[sym] = info
+        _INFO_CACHE[sym] = (info, time.time())
     return info
 
 
@@ -55,12 +68,27 @@ def _fetch_calendar(symbol: str) -> dict[str, Any]:
         return {}
 
 
-def _fetch_earnings_history(symbol: str, limit: int = 6) -> list[dict[str, Any]]:
+#: Scheduled-but-unreported quarters yfinance lists ahead of the reported ones —
+#: it publishes roughly a year of forward dates. A caller that wants N *reported*
+#: quarters has to reach past them, or the upcoming rows eat the whole limit.
+_UPCOMING_QUARTERS = 4
+
+
+def _fetch_earnings_history(
+    symbol: str, limit: int = 6, reported_only: bool = False
+) -> list[dict[str, Any]]:
     """Recent + upcoming earnings as a list of ``{date, estimate, reported,
     surprise}`` dicts (newest first), converting yfinance's DataFrame to plain
-    data and NaN to None; ``[]`` on failure."""
+    data and NaN to None; ``[]`` on failure.
+
+    ``reported_only`` drops the scheduled quarters that have no figure yet, and
+    does so BEFORE ``limit`` is applied. The order matters: yfinance returns
+    upcoming dates first, so ``limit=4`` on a company with four scheduled dates
+    yields four rows with nothing reported in them — and a caller counting a beat
+    streak reads that as "no streak" rather than as "wrong rows"."""
+    want = limit + _UPCOMING_QUARTERS if reported_only else limit
     try:
-        df = _ticker(symbol).get_earnings_dates(limit=limit)
+        df = _ticker(symbol).get_earnings_dates(limit=want)
     except Exception:  # noqa: BLE001
         return []
     if df is None or getattr(df, "empty", True):
@@ -68,7 +96,7 @@ def _fetch_earnings_history(symbol: str, limit: int = 6) -> list[dict[str, Any]]
     # yfinance's own ``limit`` is unreliable (can return many more), so cap the
     # rows here to keep the tool result bounded. The frame is newest-date-first.
     try:
-        df = df.head(limit)
+        df = df.head(want)
     except Exception:  # noqa: BLE001
         pass
     out: list[dict[str, Any]] = []
@@ -81,7 +109,9 @@ def _fetch_earnings_history(symbol: str, limit: int = 6) -> list[dict[str, Any]]
             "reported": _num(row.get("Reported EPS")),
             "surprise": _num(row.get("Surprise(%)")),
         })
-    return out
+    if reported_only:
+        out = [r for r in out if r["reported"] is not None]
+    return out[:limit]
 
 
 def _fetch_price_targets(symbol: str) -> dict[str, Any]:

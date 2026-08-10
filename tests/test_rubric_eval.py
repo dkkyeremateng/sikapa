@@ -95,6 +95,43 @@ def test_the_breakdown_carries_the_requirement(monkeypatch, ev):
     assert breakdown[0]["requirement"] == "uses as-reported filings"
 
 
+def test_a_duplicated_dimension_cannot_push_the_score_above_one(monkeypatch, ev, capsys):
+    """A dataset typo that inflates: the numerator sums once per criterion while
+    the weights collapse into one dict entry, so the repeat is counted twice
+    against a denominator that counted it once — and the item scores above 1.0,
+    dragging the run mean up past a gate floor. It is also unanswerable as
+    written, since the judge replies with a JSON object and an object cannot hold
+    two values under one key."""
+    duped = [
+        {"dimension": "source", "requirement": "uses as-reported filings", "weight": 1.0},
+        {"dimension": "source", "requirement": "and names the filing", "weight": 1.0},
+    ]
+    _stub_judge(monkeypatch, ev, '{"source": 1.0, "source__2": 1.0}')
+    value, breakdown = ev._rubric_judge("q", "an answer", [], duped, fake=False)
+    assert value <= 1.0 and value == pytest.approx(1.0)
+    assert [b["dimension"] for b in breakdown] == ["source", "source__2"]
+    assert "duplicate rubric dimension" in capsys.readouterr().err
+    # Both requirements are still graded — the repeat is renamed, not dropped.
+    assert breakdown[1]["requirement"] == "and names the filing"
+
+
+def test_an_ungraded_duplicate_scores_zero_like_any_other_missed_dimension(monkeypatch, ev):
+    """The judge answering only the original name leaves the repeat unassessed,
+    which scores 0 — never a free pass for the half it did answer."""
+    _stub_judge(monkeypatch, ev, '{"source": 1.0}')
+    duped = [{"dimension": "source", "requirement": "a", "weight": 1.0},
+             {"dimension": "source", "requirement": "b", "weight": 1.0}]
+    value, _breakdown = ev._rubric_judge("q", "an answer", [], duped, fake=False)
+    assert value == pytest.approx(0.5)
+
+
+def test_fake_mode_cannot_exceed_full_marks_either(ev):
+    duped = [{"dimension": "source", "requirement": "a", "weight": 2.0},
+             {"dimension": "source", "requirement": "b", "weight": 3.0}]
+    value, _breakdown = ev._rubric_judge("q", "an answer", [], duped, fake=True)
+    assert value == pytest.approx(1.0)
+
+
 def test_a_model_failure_scores_zero_and_does_not_raise(monkeypatch, ev):
     from financial_research_assistant import llm
 

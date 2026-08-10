@@ -251,6 +251,14 @@ def _hit(verdict: str, change_pct: float) -> bool:
     return abs(change_pct) < _NEUTRAL_BAND_PCT
 
 
+def _due_date(entry: dict[str, Any]) -> date | None:
+    """The date a call was to be judged on, or None when it can't be read."""
+    try:
+        return date.fromisoformat(str(entry.get("due"))[:10])
+    except ValueError:
+        return None
+
+
 def due_entries(now: date | None = None) -> list[dict[str, Any]]:
     """Open calls whose horizon has passed."""
     today = now or _now().date()
@@ -258,11 +266,10 @@ def due_entries(now: date | None = None) -> list[dict[str, Any]]:
     for e in load_entries():
         if e.get("status") != "open":
             continue
-        try:
-            if date.fromisoformat(str(e.get("due"))) <= today:
-                out.append(e)
-        except ValueError:
-            continue  # unreadable due date: leave it open rather than scoring junk
+        due = _due_date(e)
+        # An unreadable due date leaves the call open rather than scoring junk.
+        if due is not None and due <= today:
+            out.append(e)
     return out
 
 
@@ -275,7 +282,13 @@ def score_entry(entry: dict[str, Any], now: date | None = None) -> dict[str, Any
     entry_price = float(entry.get("entry_price") or 0)
     if entry_price <= 0:
         return None
-    price, priced_on = _price_on(sym, today)
+    # Score at the HORIZON, not at whenever the tick happened to run. Scoring is a
+    # background job: the machine sleeps, the scheduler misses a day, a horizon
+    # falls over a holiday. Pricing at `today` would then judge a 90-day call over
+    # 104 days — and the result is written into memory as a lesson stamped "90d",
+    # so the mismatch is permanent and invisible from the record itself.
+    at = min(today, _due_date(entry) or today)
+    price, priced_on = _price_on(sym, at)
     if price is None:
         return None
     change = (price - entry_price) / entry_price * 100.0
@@ -289,7 +302,7 @@ def score_entry(entry: dict[str, Any], now: date | None = None) -> dict[str, Any
         opened = None
     if opened:
         b_start, _ = _price_on(bench, opened)
-        b_end, _ = _price_on(bench, today)
+        b_end, _ = _price_on(bench, at)
         if b_start and b_end:
             bench_change = (b_end - b_start) / b_start * 100.0
 

@@ -27,7 +27,8 @@ a timezone (or a cron job inheriting a different TZ) must not silently shift it.
 **Claiming is atomic.** ``claim_due`` marks a task as running inside the same lock
 that selects it, so two overlapping ticks — a cron run and a ``--watch`` loop, or a
 tick that outlives its interval — cannot both execute the same task and bill two
-model runs for one job.
+model runs for one job. A claim also expires, so a runner killed between claiming
+and recording doesn't leave the task "running" with nothing willing to take it.
 
 **A recurring task reschedules from its due time, not from now.** Rescheduling
 from completion drifts: a daily 09:00 task that runs at 09:04 would creep to 09:08
@@ -71,10 +72,28 @@ MAX_DELIVERY_ATTEMPTS = 8
 #: drains over consecutive ticks instead of firing twenty model runs at once.
 DEFAULT_BATCH = 10
 
+#: How long a task may sit in "running" before another tick may take it back.
+#:
+#: ``release`` covers the interruptions a process can see coming (Ctrl-C, a
+#: cancelled watcher). Nothing covers a SIGKILL, a power cut or an evicted
+#: container between the claim and ``record_result`` — and a task left in
+#: "running" is never claimed again, while still being listed as live. It is the
+#: worst shape of failure this module has: permanently skipped, and silent.
+#:
+#: Generous by default, because the cost of being wrong is asymmetric. Too short
+#: and a genuinely slow turn is run a second time while the first is still going;
+#: too long only delays the recovery of a run that is already dead.
+DEFAULT_CLAIM_TIMEOUT_MINUTES = 30
+
 
 def batch_limit() -> int:
     raw = (os.environ.get("FINANCIAL_RESEARCH_TASK_BATCH") or "").strip()
     return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_BATCH
+
+
+def claim_timeout_minutes() -> int:
+    raw = (os.environ.get("FINANCIAL_RESEARCH_TASK_CLAIM_TIMEOUT") or "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_CLAIM_TIMEOUT_MINUTES
 
 
 def tasks_file() -> Path:
@@ -113,10 +132,10 @@ def _locked():
             os.close(fd)
 
 
-def load_tasks() -> list[dict[str, Any]]:
-    """Every stored task. A missing, unreadable or corrupt file reads as "none"
-    rather than raising — a bad hand-edit must not take down the tick that would
-    have run the other tasks."""
+def _read_records() -> list[Any]:
+    """Every record in the store, recognisable or not. A missing, unreadable or
+    corrupt FILE reads as "none" rather than raising — a bad hand-edit must not
+    take down the tick that would have run the other tasks."""
     path = tasks_file()
     if not path.exists():
         return []
@@ -124,16 +143,35 @@ def load_tasks() -> list[dict[str, Any]]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    if not isinstance(data, list):
-        return []
-    return [t for t in data if isinstance(t, dict) and t.get("id") and t.get("prompt")]
+    return data if isinstance(data, list) else []
+
+
+def _is_task(record: Any) -> bool:
+    """Whether a stored record is something the scheduler can run."""
+    return isinstance(record, dict) and bool(record.get("id")) and bool(record.get("prompt"))
+
+
+def load_tasks() -> list[dict[str, Any]]:
+    """Every stored task the scheduler can act on. Records it doesn't recognise are
+    filtered out here and preserved by ``save_tasks``, so callers never have to
+    defend against them and never destroy them."""
+    return [t for t in _read_records() if _is_task(t)]
 
 
 def save_tasks(items: list[dict[str, Any]]) -> None:
     """Write the store ``0600``, atomically — a prompt naming holdings is never
     briefly world-readable, and a tick reading a half-written file would see "no
-    tasks" and skip everything due. See ``storage.write_private``."""
-    write_private(tasks_file(), json.dumps(items, indent=2) + "\n", prefix=".tasks-")
+    tasks" and skip everything due. See ``storage.write_private``.
+
+    Records ``load_tasks`` filtered out are carried through untouched. Every mutator
+    reads, edits and writes the whole list, so without this the first status update
+    after a hand-edit that dropped a quote would erase that entry permanently — the
+    user's typo silently deleting their task instead of leaving it to be fixed.
+    """
+    unknown = [r for r in _read_records() if not _is_task(r)]
+    write_private(
+        tasks_file(), json.dumps(items + unknown, indent=2) + "\n", prefix=".tasks-"
+    )
 
 
 # --- runner heartbeat ----------------------------------------------------------
@@ -375,12 +413,34 @@ def _parse_due(value: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _add_wall_clock(moment: datetime, step: timedelta) -> datetime:
+    """Add ``step`` to ``moment`` on the LOCAL wall clock, returned in UTC.
+
+    The arithmetic is done on the naive local time and the zone re-attached
+    afterwards, which is the whole trick: adding to the aware value carries the
+    offset that was in force at ``moment`` across a transition, so 09:00 the day
+    before the clocks change becomes 08:00 or 10:00 the day after.
+    """
+    local = moment.astimezone().replace(tzinfo=None)
+    return (local + step).astimezone().astimezone(timezone.utc)
+
+
 def next_due(due: datetime, repeat: str) -> datetime | None:
     """The following occurrence after ``due``, or None when the task is done.
 
     Advanced from the scheduled time and rolled forward until it is in the future:
     a machine that was asleep for three days resumes on the next real occurrence
     rather than firing three catch-up runs of a daily task.
+
+    Day-and-longer repeats step the LOCAL wall clock, honouring this module's
+    promise that a task is scheduled against the clock the user is looking at. A
+    fixed delta on the stored UTC instant would move "daily 09:00" to 08:00 (or
+    10:00) on the day a DST transition falls between two runs — and leave it
+    there, because every later occurrence is computed from the drifted one.
+
+    ``hourly`` is the exception and stays fixed in real time: it names a duration,
+    not a time of day, so on the two transition days a wall-clock hour would mean
+    either a skipped run or the same hour run twice.
     """
     repeat = (repeat or "once").strip().lower()
     if repeat not in REPEATS or repeat == "once":
@@ -391,13 +451,16 @@ def next_due(due: datetime, repeat: str) -> datetime | None:
         "weekdays": timedelta(days=1),
         "weekly": timedelta(weeks=1),
     }[repeat]
-    nxt = due + step
+    advance = (lambda m: m + step) if repeat == "hourly" else (
+        lambda m: _add_wall_clock(m, step)
+    )
+    nxt = advance(due)
     now = now_utc()
     while nxt <= now:
-        nxt += step
+        nxt = advance(nxt)
     if repeat == "weekdays":
         while nxt.astimezone().weekday() >= 5:  # local Sat/Sun -> next Monday
-            nxt += step
+            nxt = advance(nxt)
     return nxt
 
 
@@ -530,16 +593,45 @@ def claim_due(now: datetime | None = None, limit: int | None = None) -> list[dic
     was off should drain over several ticks rather than firing twenty model runs at
     once. Defaults to ``batch_limit()`` (``FINANCIAL_RESEARCH_TASK_BATCH``); pair it
     with ``due_count`` to report what a truncated tick deferred.
+
+    A claim also EXPIRES (``DEFAULT_CLAIM_TIMEOUT_MINUTES``). A runner killed
+    outright between claiming and recording never reaches ``release``, so its task
+    would otherwise stay "running" forever: skipped by every later tick while
+    ``list_scheduled_tasks`` still shows it waiting to run. Reclaiming counts as an
+    attempt, so a task that kills its runner every time — an OOM on a huge
+    document, a turn that always outlives the machine's sleep timer — parks as
+    ``error`` after ``MAX_ATTEMPTS`` instead of being retried forever.
     """
     now = now or now_utc()
     limit = batch_limit() if limit is None else limit
+    stale_before = now - timedelta(minutes=claim_timeout_minutes())
     claimed: list[dict[str, Any]] = []
+    changed = False
     with _locked():
         items = load_tasks()
         for t in sorted(items, key=lambda t: t.get("due") or ""):
             if len(claimed) >= limit:
                 break
-            if t.get("status") != "pending":
+            status = t.get("status")
+            if status == "running":
+                # A claim with no timestamp is from a store written before claims
+                # were stamped: nothing is coming back for it either, so it is
+                # treated as expired rather than left stranded for good.
+                claimed_at = _parse_due(t.get("claimed_at"))
+                if claimed_at is not None and claimed_at > stale_before:
+                    continue
+                changed = True
+                t["attempts"] = int(t.get("attempts") or 0) + 1
+                t["last_ok"] = False
+                t["last_result"] = (
+                    "the run was interrupted and never reported back "
+                    f"(claim expired after {claim_timeout_minutes()} minutes)"
+                )
+                if t["attempts"] >= MAX_ATTEMPTS:
+                    t["status"] = "error"
+                    t.pop("claimed_at", None)
+                    continue
+            elif status != "pending":
                 continue
             due = _parse_due(t.get("due"))
             if due is None or due > now:
@@ -547,7 +639,7 @@ def claim_due(now: datetime | None = None, limit: int | None = None) -> list[dic
             t["status"] = "running"
             t["claimed_at"] = now.isoformat()
             claimed.append(dict(t))
-        if claimed:
+        if claimed or changed:
             save_tasks(items)
     return claimed
 

@@ -132,7 +132,8 @@ def _arm_env(name: str, memory_root: Path, extra: dict | None = None) -> dict:
     mem.mkdir(parents=True, exist_ok=True)
     return {
         # Per-arm memory: without this, arm 1 writes exchanges that arm 2 then
-        # recalls into its prompt, and the arms are no longer independent.
+        # recalls into its prompt, and the arms are no longer independent. Each
+        # --repeat then gets a subdirectory of this one (see _repeat_env).
         "MEMORY_DIR": str(mem),
         # Operator-accepted learned guidance would otherwise ride along on both
         # arms and could paper over a base-prompt regression.
@@ -145,6 +146,23 @@ def _mean(results: list[dict]) -> float:
     return sum(r["score"] for r in results) / len(results) if results else 0.0
 
 
+def _repeat_env(env: dict, run: int) -> dict:
+    """The arm's environment with a memory store private to this repeat.
+
+    ``--repeat`` exists to average out judge noise, and averaging only helps if
+    the runs are independent samples of it. Sharing one store across repeats
+    makes run 2 recall run 1's answers into its prompt: the runs agree with each
+    other more than the arm deserves, the spread shrinks, and the number that was
+    supposed to expose noise hides it instead.
+    """
+    root = env.get("MEMORY_DIR")
+    if not root:
+        return dict(env)
+    mem = Path(root) / f"run{run}"
+    mem.mkdir(parents=True, exist_ok=True)
+    return {**env, "MEMORY_DIR": str(mem)}
+
+
 def _run_arm(
     label: str, items: list[dict], fake: bool, timeout: float,
     repeat: int, env: dict,
@@ -155,7 +173,7 @@ def _run_arm(
     for r in range(1, repeat + 1):
         suffix = f" (run {r}/{repeat})" if repeat > 1 else ""
         print(f"\n=== {label}{suffix} ===", flush=True)
-        runs.append(run_all(items, fake, timeout, env=env))
+        runs.append(run_all(items, fake, timeout, env=_repeat_env(env, r)))
     return [
         statistics.fmean([run[i]["score"] for run in runs])
         for i in range(len(items))

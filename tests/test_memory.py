@@ -38,6 +38,34 @@ async def test_run_turn_recalls_memory_across_sessions(monkeypatch, tmp_path):
     assert any(ev.kind == "final" for ev in events)
 
 
+def test_mem0_backend_outage_degrades_instead_of_raising():
+    """mem0 is a service (vector store plus its own extraction model), reached on
+    the way into every turn and again on the way out. An exception from either
+    escapes into the turn — recall runs before an answer exists, and the write runs
+    after one has been produced and PAID for. Neither is worth a lost turn, which
+    is the trade the adapter's other mem0 methods already make."""
+    from financial_research_assistant.memory import _Mem0Adapter
+
+    class _Down:
+        def search(self, **_kw):
+            raise ConnectionError("qdrant refused the connection")
+
+        def add(self, *_a, **_kw):
+            raise ConnectionError("qdrant refused the connection")
+
+    mem = _Mem0Adapter(_Down(), "alice")
+    assert mem.search("what is my risk tolerance?") == []
+    assert mem.recall("what is my risk tolerance?") == []
+    assert mem.remember("hi", "hello") is None  # a no-op, not a raise
+
+    # A response the API drifted the shape of must not raise either.
+    class _Drifted:
+        def search(self, **_kw):
+            return {"results": "not a list of hits"}
+
+    assert _Mem0Adapter(_Drifted(), "alice").search("anything") == []
+
+
 def _local_mem(monkeypatch, tmp_path, user="curator"):
     monkeypatch.setenv("MEMORY_BACKEND", "local")
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path))
@@ -471,3 +499,98 @@ def test_recall_facts_uses_semantic_ranking(monkeypatch, tmp_path):
 
     get_memory().save("My risk tolerance is high", "preference")
     assert recall_facts("how aggressive should I be") == ["My risk tolerance is high"]
+
+
+# -- dedup scoping ----------------------------------------------------------
+
+
+def test_a_bad_rating_is_not_dropped_as_a_duplicate_of_the_good_one(monkeypatch, tmp_path):
+    """/good then /bad on one answer stores the SAME Q/A text under two kinds. The
+    correction used to be discarded as a near-duplicate, leaving the answer the
+    user had just rejected in the store as an example to emulate."""
+    from financial_research_assistant.feedback import record, recall_feedback
+
+    mem = _local_mem(monkeypatch, tmp_path)
+    q, a = "how risky is my portfolio?", "It is quite risky, broadly speaking."
+    assert record(q, a, good=True) is True
+    assert record(q, a, good=False, note="too vague") is True, "the correction is kept"
+
+    kinds = [e["kind"] for e in mem.all()]
+    assert kinds == ["avoid"], "and the verdict it reversed no longer recalls"
+    exemplars, avoids = recall_feedback(q)
+    assert exemplars == [] and len(avoids) == 1
+    # The reversed verdict is archived, not deleted — the history is auditable.
+    archived = [e for e in mem.all(include_superseded=True) if e.get("superseded")]
+    assert [e["kind"] for e in archived] == ["exemplar"]
+
+
+def test_two_gap_lessons_differing_only_by_section_are_both_kept(monkeypatch, tmp_path):
+    """Gap lessons are one template with the section label substituted in, so
+    nearly every term is boilerplate. At the free-form near-duplicate threshold the
+    second section's lesson was swallowed by the first and only one gap per run was
+    ever learned."""
+    from financial_research_assistant import reflection
+
+    mem = _local_mem(monkeypatch, tmp_path)
+    lessons = reflection._gap_lessons(
+        "AAPL", [("News", "(unavailable)"), ("Peers", "(unavailable)")]
+    )
+    assert len(lessons) == 2
+    assert all(mem.save(lesson, kind="lesson") for lesson in lessons)
+    assert len({e["text"] for e in mem.all()}) == 2
+    # A genuine restatement of one of them is still a no-op.
+    assert mem.save(lessons[0], kind="lesson") is False
+
+
+def test_a_lesson_never_dedups_against_a_plain_fact(monkeypatch, tmp_path):
+    """The kinds are separate channels with their own retrieval and framing, so a
+    lesson must not be suppressed by a fact that happens to share its words."""
+    mem = _local_mem(monkeypatch, tmp_path)
+    text = "When researching AAPL, check the dividend history before writing"
+    assert mem.save(text, kind="note") is True
+    assert mem.save(text, kind="lesson") is True
+    assert sorted(e["kind"] for e in mem.all()) == ["lesson", "note"]
+
+
+def test_the_store_is_read_as_utf8_not_the_platform_default(monkeypatch, tmp_path):
+    """The store is WRITTEN as UTF-8, so it must be read as UTF-8. Left to the
+    platform default, a store holding "€" (a base currency, a European ticker)
+    raised UnicodeDecodeError out of the read itself — outside the per-line guard —
+    on every turn that recalled."""
+    from pathlib import Path
+
+    mem = _local_mem(monkeypatch, tmp_path)
+    assert mem.save("My base currency is € (euro), never $", "preference") is True
+
+    real_read = Path.read_text
+
+    def platform_default_cannot_decode(self, *args, encoding=None, **kwargs):
+        # Stands in for a machine whose default encoding is not UTF-8 — the knob
+        # under test, so a read that doesn't name its encoding fails here.
+        if encoding is None:
+            raise UnicodeDecodeError("charmap", b"\x80", 0, 1, "undefined character")
+        return real_read(self, *args, encoding=encoding, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", platform_default_cannot_decode)
+    assert any("€" in e["text"] for e in mem.all())
+
+
+# -- reflection: a per-field n/a is not a missing section --------------------
+
+
+def test_a_per_field_na_is_not_a_data_gap():
+    """`fundamentals.py` prints "n/a" for ANY missing field, so as a substring
+    marker it fired on healthy output: every company that pays no dividend taught a
+    permanent "the fundamentals data was unavailable" lesson, which was then
+    injected into every later report on it."""
+    from financial_research_assistant import reflection
+
+    healthy = (
+        "AAPL · Apple Inc.\n"
+        "  sector: Technology · industry: Consumer Electronics\n"
+        "  P/E: 31.20 · dividend yield: n/a · payout ratio: n/a\n"
+    )
+    assert reflection._gap_lessons("AAPL", [("Fundamentals", healthy)]) == []
+    # A section that is NOTHING but the marker is still a gap.
+    assert len(reflection._gap_lessons("AAPL", [("Dividends", "n/a")])) == 1
+    assert len(reflection._gap_lessons("AAPL", [("Earnings", "No data available")])) == 1

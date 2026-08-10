@@ -57,6 +57,29 @@ def test_a_failed_write_leaves_the_previous_contents_intact(tmp_path, monkeypatc
     assert leftovers == [], "a failed write must not leave a temporary file behind"
 
 
+def test_the_bytes_are_fsynced_before_the_rename(tmp_path, monkeypatch):
+    """`os.replace` orders the rename, not the data. Without an fsync first, a
+    crash after the rename can leave the destination present and zero-length —
+    which is exactly the "you have nothing saved" outcome the atomic rename was
+    put there to prevent."""
+    order: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        order.append("fsync")
+        return real_fsync(fd)
+
+    def replace(src, dst):
+        order.append("replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    write_private(tmp_path / "store.json", json.dumps({"credential": "kept"}))
+
+    assert order == ["fsync", "replace"]
+
+
 # --- the stores that go through it ----------------------------------------------
 
 

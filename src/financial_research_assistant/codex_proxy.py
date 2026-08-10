@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from typing_extensions import override
 from typing import Any
 import json
+import secrets
 import threading
 import urllib.request
 import uuid
@@ -295,6 +296,21 @@ def _upstream_events(payload: dict[str, Any], cred: dict[str, Any], timeout: flo
                 continue
 
 
+#: Host header values that can only have come from something addressing the
+#: loopback interface by its own name. A browser resolving an attacker's domain to
+#: 127.0.0.1 (DNS rebinding) reaches the same socket but still sends that domain
+#: here, so this is the one field that distinguishes the two.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _hostname(header: str) -> str:
+    """The host part of a ``Host`` header, without the port and IPv6 brackets."""
+    host = (header or "").strip().lower()
+    if host.startswith("["):
+        return host[1 : host.find("]")] if "]" in host else host[1:]
+    return host.split(":", 1)[0]
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -302,9 +318,48 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return  # the proxy is not an access log
 
+    def _rejection(self) -> tuple[int, str] | None:
+        """Why this request may not be served, or None if it may be.
+
+        The proxy holds a credential that can spend money, so "listening only on
+        127.0.0.1" is not by itself an access control: every process on the machine
+        shares that interface, and so does every page in a browser running on it.
+        Three checks, each closing a different way in:
+
+        * **The bearer token.** A per-process secret, given only to the client this
+          process builds. Nothing that merely found the port can present it.
+        * **The Host header.** Loopback-only binding does not stop a page whose
+          domain resolves to 127.0.0.1 from reaching this socket; the name it asks
+          for is what gives it away.
+        * **The content type.** ``application/json`` is not a value a form or a
+          plain ``fetch`` can send without a CORS preflight, and this server answers
+          no preflight. That turns a silent cross-origin POST into a blocked one.
+        """
+        if _hostname(self.headers.get("Host", "")) not in _LOOPBACK_HOSTS:
+            return 403, "unexpected Host header"
+        scheme, _, presented = (self.headers.get("Authorization") or "").partition(" ")
+        if (
+            not _token
+            or scheme.lower() != "bearer"
+            or not secrets.compare_digest(presented.strip(), _token)
+        ):
+            return 401, "missing or invalid proxy token"
+        media_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+        if media_type.lower() != "application/json":
+            return 415, "expected Content-Type: application/json"
+        return None
+
     def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
         if not self.path.rstrip("/").endswith("/chat/completions"):
             self.send_error(404)
+            return
+        rejection = self._rejection()
+        if rejection is not None:
+            # The body is deliberately left unread, so the connection cannot be
+            # reused — whatever is still in the socket would otherwise be parsed as
+            # the next request on it.
+            self.close_connection = True
+            self._json_error(*rejection)
             return
         length = int(self.headers.get("Content-Length") or 0)
         try:
@@ -333,10 +388,15 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             events = _upstream_events(to_responses_request(body), cred)
             if wants_stream:
+                # Nothing has reached the network yet — the generator only calls
+                # upstream once it is iterated, which happens inside `_stream`,
+                # after the status line is committed. So every failure of a
+                # streaming request is a mid-stream one, and reporting it is
+                # `_stream`'s job rather than this handler's.
                 self._stream(events, translator)
-            else:
-                chunks = [c for ev in events for c in translator.event(ev)]
-                self._send_json(200, to_completion(chunks, translator.model, translator.id))
+                return
+            chunks = [c for ev in events for c in translator.event(ev)]
+            self._send_json(200, to_completion(chunks, translator.model, translator.id))
         except UpstreamError as exc:
             self._json_error(502, str(exc))
         except Exception as exc:
@@ -344,16 +404,42 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _stream(self, events: Iterable[dict[str, Any]],
                 translator: ResponseStreamTranslator) -> None:
+        """Relay the translated chunks as SSE, failures included.
+
+        Once the 200 and the event-stream headers are on the wire the response is
+        committed: writing a second status line into the same connection puts an
+        HTTP response in the middle of a body the client is already parsing as
+        events, and it reads as corruption rather than as the error it is. Ending
+        without ``[DONE]`` is no better — clients wait for that terminator, so the
+        turn looks truncated or hangs. A failure here is therefore reported the one
+        way the protocol still allows: a final error event, then the terminator.
+        """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        for event in events:
-            for chunk in translator.event(event):
-                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-                self.wfile.flush()
-        self.wfile.write(b"data: [DONE]\n\n")
+        failure = ""
+        try:
+            for event in events:
+                for chunk in translator.event(event):
+                    self._sse(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            return  # the client hung up mid-answer; there is nobody left to tell
+        except UpstreamError as exc:
+            failure = str(exc)
+        except Exception as exc:
+            failure = f"codex proxy: {exc}"
+        try:
+            if failure:
+                self._sse({"error": {"message": failure, "type": "codex_proxy"}})
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _sse(self, payload: dict[str, Any]) -> None:
+        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
         self.wfile.flush()
 
     def _send_json(self, code: int, payload: dict[str, Any]) -> None:
@@ -389,17 +475,31 @@ def _codex_credential() -> dict[str, Any] | None:
 
 _server = None
 _lock = threading.Lock()
+_token = ""
+
+
+def local_token() -> str:
+    """The bearer the proxy requires, or "" before it has started.
+
+    Not a credential and never persisted: it is minted per process, lives only in
+    memory, and dies with the process — its whole job is to tell the client this
+    process built apart from everything else that can reach a loopback port.
+    """
+    return _token
 
 
 def ensure_running() -> str:
     """Start the proxy once per process; return the base URL to point a client at.
 
-    Bound to loopback only — it forwards a bearer token, so anything that can
-    reach it can spend the account.
+    Bound to loopback only, and gated on ``local_token`` — it forwards a bearer
+    token, so anything that can reach it can spend the account, and on a shared
+    machine "reachable on 127.0.0.1" includes every other process and every page
+    in a running browser.
     """
-    global _server
+    global _server, _token
     with _lock:
         if _server is None:
+            _token = secrets.token_urlsafe(32)
             _server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
             _server.daemon_threads = True
             threading.Thread(target=_server.serve_forever, daemon=True).start()
@@ -408,9 +508,10 @@ def ensure_running() -> str:
 
 def shutdown() -> None:
     """Stop the proxy (tests; process exit does not need this)."""
-    global _server
+    global _server, _token
     with _lock:
         if _server is not None:
             _server.shutdown()
             _server.server_close()
             _server = None
+        _token = ""

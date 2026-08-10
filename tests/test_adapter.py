@@ -1,14 +1,32 @@
 """Adapter, checkpointer, compaction, and real graph-session tests."""
 
+import contextlib
+
 from financial_research_assistant.adapter import run_turn
 
 from .helpers.fakes import fake_ibkr_tools_session as _fake_ibkr_tools_session
 from .helpers.graphs import (
     alerting_tool_graph as _alerting_tool_graph,
+    interleaved_chunk_graph as _interleaved_chunk_graph,
     nested_model_graph as _nested_model_graph,
     scripted_think_graph as _scripted_think_graph,
     scripted_tool_graph as _scripted_tool_graph,
+    subagent_chunk_graph as _subagent_chunk_graph,
+    usage_reporting_graph as _usage_reporting_graph,
 )
+
+
+def _turn_over(monkeypatch, graph):
+    """Make run_turn take its next real-mode turn on ``graph`` — the whole turn
+    pipeline (recall, compaction, healing, streaming, usage reconciliation) with a
+    scripted graph in place of a model."""
+    from financial_research_assistant import adapter
+
+    @contextlib.asynccontextmanager
+    async def ctx(session_id, fake, model, think):
+        yield graph
+
+    monkeypatch.setattr(adapter, "_graph_ctx", ctx)
 
 
 async def test_fired_alerts_surface_as_events_after_their_tool_call():
@@ -71,6 +89,61 @@ async def test_stream_events_pair_tool_start_and_end():
     assert ends[0].ok
     assert ends[0].duration >= 0.0
     assert events.index(starts[0]) < events.index(ends[0])
+
+
+# --- incrementally streamed tool calls -------------------------------------------
+#
+# Every other scripted graph here announces its tool calls WHOLE, which is the shape
+# a non-streaming node produces. Real providers stream them in fragments instead —
+# an opening chunk, then continuations carrying only an index — so the pairing that
+# reassembles them (`by_index` routing, name concatenation, the `_args_complete`
+# gate) is the part of the adapter that runs on every live turn and none of the
+# offline ones.
+
+
+async def test_streamed_call_fragments_stay_with_the_call_they_belong_to():
+    """Two models streaming at once both number their first tool call index 0, and
+    their continuation fragments carry nothing but that index. Keyed on the bare
+    index, the second call to open silently claims the first's fragments: the panel
+    shows one tool's name with another's arguments, and the agent is recorded as
+    having asked for something nobody asked for."""
+    from financial_research_assistant.adapter import _stream_events
+
+    graph = _interleaved_chunk_graph()
+    inputs = {"messages": [{"role": "user", "content": "go"}]}
+    events = [ev async for ev in _stream_events(graph, inputs, {})]
+
+    starts = [ev for ev in events if ev.kind == "tool_start"]
+    assert len(starts) == 2
+    args = {ev.tool: ev.detail for ev in starts}
+    # Names arrived split across two chunks ("price_" + "history") and are rejoined.
+    assert set(args) == {"price_history", "news_search"}
+    assert '"NVDA"' in args["price_history"] and "AAPL" not in args["price_history"]
+    assert '"AAPL"' in args["news_search"] and "NVDA" not in args["news_search"]
+    # Announced once, and only once the arguments parsed as whole JSON.
+    assert len({ev.call_id for ev in starts}) == 2
+    assert all(ev.detail.endswith("}") for ev in starts)
+
+
+async def test_a_tool_that_runs_a_model_does_not_open_a_panel_for_its_calls():
+    """A subagent (or report synthesis) inherits the parent's callbacks, so its
+    tool calls stream into this same channel — but its tool node belongs to another
+    graph, so the matching result never arrives here. Announced, the panel would
+    show a call the user never gets an outcome for and spin "running" for the rest
+    of the session; worse, the name shown would be one of the tools the agent is
+    trusted to call on the user's behalf."""
+    from financial_research_assistant.adapter import _stream_events
+
+    graph = _subagent_chunk_graph()
+    inputs = {"messages": [{"role": "user", "content": "go"}]}
+    events = [ev async for ev in _stream_events(graph, inputs, {})]
+
+    starts = [ev for ev in events if ev.kind == "tool_start"]
+    ends = [ev for ev in events if ev.kind == "tool_end"]
+    assert [ev.tool for ev in starts] == ["dispatch_subagent"]  # the agent's own call
+    assert [ev.tool for ev in ends] == ["dispatch_subagent"]
+    assert all(ev.tool != "schedule_task" for ev in events)
+    assert {ev.call_id for ev in starts} == {ev.call_id for ev in ends}  # every panel closed
 
 
 async def test_checkpointer_ctx_defaults_to_memory(monkeypatch):
@@ -173,6 +246,175 @@ async def test_run_turn_auto_compacts_over_threshold(monkeypatch):
     # The auto-compaction status snapshots context as 0 so the footer's ctx% gauge
     # drops the instant the context shrinks — not only on the next turn.
     assert compacted[0].context_tokens == 0
+
+
+async def test_context_size_is_the_last_call_not_the_turns_sum(monkeypatch):
+    """A ReAct turn re-sends the growing history on every step, so SUMMING the
+    per-call input counts the same context over and over: ten steps at ~20k report
+    200k for a context that never passed 30k. That number drives the ctx% gauge
+    (which then reads over 100%) and the auto-compaction trigger (which then throws
+    away history the window had room for). Billing still counts every call — a
+    subagent's tokens are charged whether or not they sit in this thread."""
+    from financial_research_assistant import adapter
+
+    sid = "ctx-last-call"
+    adapter._last_input.pop(sid, None)
+    monkeypatch.delenv("AGENT_AUTO_COMPACT", raising=False)
+    _turn_over(monkeypatch, _usage_reporting_graph())
+
+    events = [ev async for ev in run_turn("go", sid)]
+    assert not [ev for ev in events if ev.kind == "error"]
+    usage = [ev for ev in events if ev.kind == "usage"]
+    # 20k (step 1) + 90k (the model inside the tool) + 30k (step 2), all billed.
+    assert sum(ev.tokens_in for ev in usage) == 140_000
+    # …but the context this turn ran in is the last own call's input, alone.
+    assert usage[-1].context_tokens == 30_000
+    assert adapter._last_input[sid] == 30_000
+
+
+# --- an optional store must not be able to cancel a turn --------------------------
+
+
+async def test_a_memory_backend_that_is_down_still_answers(monkeypatch):
+    """Recall runs before the model is called, and used to run before the handler
+    that turns a failure into an `error` event — so an unreachable memory backend
+    raised out of the generator entirely, breaking the documented contract (every
+    turn ends in `final` or `error`) and leaving the caller's question unanswered
+    over an OPTIONAL store."""
+    from financial_research_assistant import adapter
+
+    def unreachable():
+        raise RuntimeError("mem0 vector store unreachable")
+
+    monkeypatch.setattr(adapter, "get_memory", unreachable)
+    events = [ev async for ev in run_turn("hi", "mem-down", fake=True)]
+
+    assert not [ev for ev in events if ev.kind == "error"]
+    assert events[-1].kind == "final" and "FAKE-OK" in events[-1].text
+    assert any("long-term memory unavailable" in ev.text
+               for ev in events if ev.kind == "status")
+
+
+async def test_a_failed_memory_write_does_not_discard_the_answer(monkeypatch):
+    """The auto-capture write happens AFTER the model has answered and the tokens
+    are paid for. Letting it raise converted a completed turn into an error and
+    threw the answer away."""
+    from financial_research_assistant import adapter
+
+    class _FullDisk:
+        def remember(self, user_msg, answer=""):
+            raise OSError("No space left on device")
+
+    monkeypatch.setattr(adapter, "get_memory", _FullDisk)
+    monkeypatch.setattr(adapter, "_recall_and_frame", lambda msg: (msg, None))
+    events = [ev async for ev in run_turn("hi", "mem-write-fail", fake=True)]
+
+    assert not [ev for ev in events if ev.kind == "error"]
+    assert "FAKE-OK" in events[-1].text
+    assert any("could not save this exchange" in ev.text
+               for ev in events if ev.kind == "status")
+
+
+async def test_a_failed_auto_compaction_still_answers(monkeypatch):
+    """Compaction is an optimisation. A summarizer outage must cost the compaction,
+    not the turn."""
+    from financial_research_assistant import adapter
+    from financial_research_assistant.pricing import context_cap
+
+    sid = "compact-fail"
+    async for _ in run_turn("hi", sid, fake=True):
+        pass
+
+    async def summarizer_down(*_a, **_k):
+        raise RuntimeError("quick model unreachable")
+
+    monkeypatch.setattr(adapter, "compact_session", summarizer_down)
+    monkeypatch.setenv("AGENT_AUTO_COMPACT", "0.85")
+    adapter._last_input[sid] = int(context_cap("gpt-4.1-mini") * 0.9)
+    events = [ev async for ev in run_turn("y", sid, fake=True)]
+
+    assert not [ev for ev in events if ev.kind == "error"]
+    assert "FAKE-OK" in events[-1].text
+    assert any("auto-compaction failed" in ev.text
+               for ev in events if ev.kind == "status")
+
+
+async def test_a_failed_auto_compaction_is_not_retried_forever(monkeypatch):
+    """The trigger is cleared the moment compaction fails, even if the turn then
+    fails for its own reasons. Left set, it would re-run the same failing
+    compaction before EVERY later turn on the session — one summarizer outage and
+    the thread never answers again, with no way out but /new."""
+    from financial_research_assistant import adapter
+    from financial_research_assistant.pricing import context_cap
+
+    sid = "compact-brick"
+
+    async def summarizer_down(*_a, **_k):
+        raise RuntimeError("quick model unreachable")
+
+    @contextlib.asynccontextmanager
+    async def no_model(*_a, **_k):
+        raise RuntimeError("no model configured")
+        yield  # pragma: no cover - unreachable, makes this a context manager
+
+    monkeypatch.setattr(adapter, "compact_session", summarizer_down)
+    monkeypatch.setattr(adapter, "_graph_ctx", no_model)
+    monkeypatch.setenv("AGENT_AUTO_COMPACT", "0.85")
+    adapter._last_input[sid] = int(context_cap("gpt-4.1-mini") * 0.9)
+
+    events = [ev async for ev in run_turn("y", sid)]
+    assert events[-1].kind == "error"  # the turn failed on its own account…
+    assert adapter._last_input[sid] == 0  # …and still cleared the trigger
+
+
+async def test_switching_model_mid_session_says_the_thread_restarted(monkeypatch):
+    """In-memory conversation state is keyed by (session, model, think), so
+    changing either hands the model an empty thread. It then answers as if the
+    conversation never happened — and nothing on screen explains why, so the user
+    can't undo the change that caused it."""
+    from financial_research_assistant import adapter
+
+    monkeypatch.delenv("FINANCIAL_RESEARCH_CHECKPOINT_DB", raising=False)
+    sid = "model-switch"
+    monkeypatch.setitem(adapter._checkpointers, (sid, "gpt-4.1-mini", True), object())
+
+    assert adapter._memory_reset_note(sid, "gpt-4.1-mini", True) is None  # same thread
+    assert adapter._memory_reset_note("unseen", "gpt-4.1-mini", True) is None  # first turn
+    assert adapter._memory_reset_note(sid, "gpt-4.1-mini", False) is not None  # think toggled
+
+    _turn_over(monkeypatch, _usage_reporting_graph())
+    events = [ev async for ev in run_turn("hi", sid, model="claude-sonnet-5")]
+    assert any("fresh conversation" in ev.text for ev in events if ev.kind == "status")
+
+    # Durable mode keys state by thread id alone, so the history survives the
+    # switch and there is nothing to warn about.
+    monkeypatch.setenv("FINANCIAL_RESEARCH_CHECKPOINT_DB", "1")
+    assert adapter._memory_reset_note(sid, "claude-sonnet-5", True) is None
+
+
+# --- content blocks -------------------------------------------------------------
+
+
+def test_thinking_blocks_never_reach_the_text(monkeypatch):
+    """Anthropic-style providers report content as a list of typed blocks. `str()`
+    on that list is a Python repr — the answer wrapped in dict syntax, carrying the
+    model's raw chain-of-thought and its tool arguments — and it used to be what
+    the summarizer, the subagents, and the state read-back all got."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from financial_research_assistant.graph import _render_transcript, message_text
+
+    reply = AIMessage(content=[
+        {"type": "thinking", "thinking": "the user is probably testing me"},
+        {"type": "text", "text": "NVDA closed at $184.20."},
+        {"type": "tool_use", "name": "get_price", "input": {"symbol": "NVDA"}},
+    ])
+    assert message_text(reply) == "NVDA closed at $184.20."
+    assert message_text(AIMessage(content="plain")) == "plain"
+
+    transcript = _render_transcript([HumanMessage(content="how did NVDA do?"), reply])
+    assert "NVDA closed at $184.20." in transcript
+    assert "thinking" not in transcript and "{'type'" not in transcript
 
 
 def test_quick_llm_tier_resolution(monkeypatch):

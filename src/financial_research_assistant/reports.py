@@ -147,9 +147,11 @@ def output_mode(override: str = "") -> str:
     return name if name in _OUTPUTS else "both"
 
 
-def cover_theme() -> str:
-    """Theme for the image — the artifact that lands in a chat."""
-    return _env_theme("FINANCIAL_RESEARCH_REPORT_THEME")
+def cover_theme(override: str = "") -> str:
+    """Theme for the image — the artifact that lands in a chat. ``override`` is one
+    report's own choice, which wins over the configured default."""
+    name = (override or "").strip().lower()
+    return name if name in _THEMES else _env_theme("FINANCIAL_RESEARCH_REPORT_THEME")
 
 
 def pdf_theme() -> str:
@@ -761,17 +763,45 @@ def page_count(pdf_path: str) -> int:
 # --- orchestration -------------------------------------------------------------
 
 
-def render(html: str, name: str, *, content: dict[str, str] | None = None) -> dict[str, str]:
+def _unique_stem(out_dir: Path, base: str) -> str:
+    """``base``, or the first ``base-2``/``base-3``… nothing has claimed.
+
+    The stem is the title plus a to-the-second timestamp, so two reports on one
+    subject rendered in the same second (a scheduled batch, two tool calls in one
+    turn) resolve to the same name — and every artifact of the first is silently
+    overwritten by the second, including the PDF the user was told was saved.
+    """
+    stem, n = base, 1
+    while any(out_dir.glob(f"{stem}.*")):
+        n += 1
+        stem = f"{base}-{n}"
+    return stem
+
+
+def render(
+    html: str,
+    name: str,
+    *,
+    content: dict[str, str] | None = None,
+    theme: str = "",
+    output: str = "",
+) -> dict[str, str]:
     """Write the HTML, produce the PDF, then rasterise page 1. Never raises.
 
     ``content`` carries the raw fields so the browser-free renderer can draw the
     same sheet; without it only the Chrome path can run. A failure at any stage
     still leaves the earlier artifacts on disk — losing a finished analysis to a
     rendering problem is the one outcome worth engineering against.
+
+    ``theme`` and ``output`` are this report's own choices, overriding the
+    configured defaults. They are arguments rather than environment writes because
+    the adapter runs tools in threads: a report that announced its theme by setting
+    a process-wide variable coloured whatever another report was drawing at the
+    same moment, and got that report's theme back.
     """
     out_dir = reports_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{_slug(name)}-{datetime.now():%Y%m%d-%H%M%S}"
+    stem = _unique_stem(out_dir, f"{_slug(name)}-{datetime.now():%Y%m%d-%H%M%S}")
     paths: dict[str, str] = {}
 
     html_path = out_dir / f"{stem}.html"
@@ -817,11 +847,11 @@ def render(html: str, name: str, *, content: dict[str, str] | None = None) -> di
     # distilled figures read better than the document's first page at any length.
     # It falls back to page 1 if the sheet would be empty or the render fails,
     # since a cover is worth less than the report it introduces.
-    wanted = output_mode()
+    wanted = output_mode(output)
     if wanted == "pdf":
         return paths
     if content is not None and _worth_charting(content):
-        with use_theme(cover_theme()):
+        with use_theme(cover_theme(theme)):
             cover = _build_cover(
                 out_dir, stem, content, pages, chrome, attached=wanted != "image"
             )
@@ -953,24 +983,12 @@ def render_report(
     }
     # A per-report theme overrides the configured one for the COVER only; the
     # document keeps its own default so a dark request never produces a PDF that
-    # prints as a full page of ink.
-    chosen = theme.strip().lower()
-    env_theme = os.environ.get("FINANCIAL_RESEARCH_REPORT_THEME")
-    if chosen in _THEMES:
-        os.environ["FINANCIAL_RESEARCH_REPORT_THEME"] = chosen
-    prior_output = os.environ.get("FINANCIAL_RESEARCH_REPORT_OUTPUT")
-    os.environ["FINANCIAL_RESEARCH_REPORT_OUTPUT"] = wanted
-    try:
-        with use_theme(pdf_theme()):
-            document_html = build_html(title, markdown, highlights, subtitle)
-        paths = render(document_html, title, content=content)
-    finally:
-        for var, prior in (("FINANCIAL_RESEARCH_REPORT_THEME", env_theme),
-                           ("FINANCIAL_RESEARCH_REPORT_OUTPUT", prior_output)):
-            if prior is None:
-                os.environ.pop(var, None)
-            else:
-                os.environ[var] = prior
+    # prints as a full page of ink. Passed down as arguments: these are one call's
+    # choices, and announcing them in the environment leaked them into whatever
+    # other report a concurrent tool call was drawing.
+    with use_theme(pdf_theme()):
+        document_html = build_html(title, markdown, highlights, subtitle)
+    paths = render(document_html, title, content=content, theme=theme, output=wanted)
 
     lines = []
     if "pdf" not in paths:
@@ -988,8 +1006,12 @@ def render_report(
             shape = "; the image is page 1."
         else:
             shape = "."
+        # Counting pages needs pypdfium2, which is optional — and "Rendered 0
+        # page(s)" reads as a failed render of a document that is on disk and about
+        # to be delivered. Without the count, say what is known instead.
+        extent = f"{pages} page(s)" if pages else "a PDF"
         lines.append(
-            f"Rendered {pages} page(s) with {paths.get('renderer', '?')}{shape}"
+            f"Rendered {extent} with {paths.get('renderer', '?')}{shape}"
         )
     lines.append("Saved: " + ", ".join(
         f"{k.upper()} {v}" for k, v in paths.items() if k != "renderer"

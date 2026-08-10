@@ -108,6 +108,39 @@ async def test_once_mode_error_propagates_nonzero_return_code(monkeypatch, tmp_p
         assert app.return_code == 1
 
 
+async def test_a_failed_headless_run_still_writes_its_trace(monkeypatch, tmp_path):
+    """`--trace` is how an eval harness reads a run back. A turn that ends in an
+    error used to return without writing the file, which leaves the harness two
+    ways to be wrong: no file at all (a FileNotFoundError it reports as a harness
+    bug rather than a failed run), or — when the path is reused across runs, which
+    is what a sweep does — the PREVIOUS run's trajectory, silently scored as this
+    one's."""
+    import json as _json
+
+    from financial_research_assistant import adapter, main
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    trace = tmp_path / "trace.json"
+
+    # A run that succeeds writes the trace it always did, error-free…
+    assert await main._headless("hi", "trace-ok", fake=True, trace_path=str(trace)) == 0
+    written = _json.loads(trace.read_text())
+    assert "FAKE-OK" in written["answer"] and "error" not in written
+
+    # …and the next run over the same path fails.
+    async def failing_turn(*_a, **_k):
+        yield AgentEvent("error", "AuthenticationError: no API key configured")
+
+    monkeypatch.setattr(adapter, "run_turn", failing_turn)
+    code = await main._headless("what is NVDA worth?", "trace-err", fake=True,
+                                trace_path=str(trace))
+    assert code == 1
+    written = _json.loads(trace.read_text())
+    assert "AuthenticationError" in written["error"]
+    assert written["query"] == "what is NVDA worth?"
+    assert written["answer"] == ""  # the earlier answer is gone, not re-scored
+
+
 # --- C: data/workflow improvements -----------------------------------------
 
 

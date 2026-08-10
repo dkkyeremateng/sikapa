@@ -491,3 +491,85 @@ def test_edgar_tools_registered():
     assert {"sec_filings", "sec_material_events", "sec_financials",
             "sec_filing_search", "sec_filing_excerpt", "filing_summary",
             "compare_sec_financials", "filing_tone_trend", "sec_metric_rank"} <= names
+
+
+def test_a_non_dict_payload_is_never_cached(monkeypatch):
+    """SEC answering with a JSON list (an error envelope, a changed endpoint) used
+    to be cached while the call reported ``{}``, so the SECOND lookup of the same
+    URL handed the raw list back and the next ``.get()`` raised AttributeError
+    mid-turn — a failure that only appeared on the retry."""
+    edgar._JSON_CACHE.pop("https://example.test/list.json", None)
+
+    class _Resp:
+        def read(self):
+            return b'[{"not": "a dict"}]'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(edgar.urllib.request, "urlopen", lambda *a, **kw: _Resp())
+    url = "https://example.test/list.json"
+    assert edgar._fetch_json(url) == {}
+    assert url not in edgar._JSON_CACHE
+    assert edgar._fetch_json(url) == {}          # and the second call agrees
+    # A cache poisoned by hand is still survivable: the hit path returns dicts only.
+    edgar._JSON_CACHE[url] = ["poison"]          # pyright: ignore[reportArgumentType]
+    try:
+        assert edgar._fetch_json(url) == {}
+    finally:
+        edgar._JSON_CACHE.pop(url, None)
+
+
+def test_the_original_filing_is_preferred_over_its_amendment(monkeypatch):
+    """An amendment is often a cover page and one restated exhibit, so when a
+    10-K/A is the newest matching filing the tearsheet reported it "couldn't locate
+    the usual sections" while the real 10-K sat one row below it."""
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["10-K/A", "10-K"],          # the amendment is newest
+        "filingDate": ["2025-12-02", "2025-11-01"],
+        "accessionNumber": ["0000320193-25-000110", "0000320193-25-000100"],
+        "primaryDocument": ["aapl-10ka.htm", "aapl-10k.htm"],
+        "primaryDocDescription": ["10-K/A", "10-K"],
+        "items": ["", ""],
+    }}}
+    body = (
+        "<html><body><p>The Company depends on a concentrated supply chain in Asia "
+        "and any prolonged disruption to that supply chain could materially and "
+        "adversely affect its results of operations in a given period.</p>"
+        "</body></html>"
+    )
+    docs = {"aapl-10ka.htm": "<html><body><p>Amendment No. 1 cover page.</p></body></html>",
+            "aapl-10k.htm": body}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs})
+    monkeypatch.setattr(
+        edgar, "_fetch_text", lambda url, **kw: next(v for k, v in docs.items() if k in url)
+    )
+
+    out = edgar.sec_filing_excerpt("AAPL", "supply chain disruption", form_type="10-K")
+    assert "10-K filed 2025-11-01" in out and "aapl-10k.htm" in out
+    assert "concentrated supply chain" in out
+
+    # Asked for the amendment explicitly, that is what comes back.
+    amended = edgar.sec_filing_excerpt("AAPL", "cover page", form_type="10-K/A")
+    assert "aapl-10ka.htm" in amended
+
+
+def test_an_amendment_is_still_used_when_it_is_the_only_filing(monkeypatch):
+    """Preferring the original must not mean returning nothing: a filer whose only
+    10-K on file is an amendment still resolves to it."""
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["10-K/A"], "filingDate": ["2025-12-02"],
+        "accessionNumber": ["0000320193-25-000110"], "primaryDocument": ["aapl-10ka.htm"],
+        "primaryDocDescription": ["10-K/A"], "items": [""],
+    }}}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs})
+    monkeypatch.setattr(edgar, "_fetch_text", lambda url, **kw: (
+        "<html><body><p>The Company restated its concentrated supply chain "
+        "disclosure for the period after identifying an error in the original "
+        "filing, which could adversely affect comparability.</p></body></html>"
+    ))
+    out = edgar.sec_filing_excerpt("AAPL", "supply chain", form_type="10-K")
+    assert "aapl-10ka.htm" in out and "restated" in out
