@@ -815,7 +815,8 @@ def query_transactions(
                 params.append(account)
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
             q = f"SELECT * FROM trades{where} ORDER BY import_id DESC, id DESC LIMIT ?"
-            for r in conn.execute(q, [*params, cap]).fetchall():
+            rows = conn.execute(q, [*params, cap]).fetchall()
+            for r in _dedupe_across_imports(rows):
                 out.append({"kind": "trade", **{k: r[k] for k in r.keys()}})
         if kind is None or kind in cash_kinds:
             clauses, params = [], []
@@ -829,8 +830,12 @@ def query_transactions(
                 clauses.append("account = ?")
                 params.append(account)
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            # Overlapping statements repeat the same movement — listing them raw
+            # showed each 2026 deposit twice, so anything summing this view read
+            # $35,000 of transfers against a true $17,500.
             q = f"SELECT * FROM cash{where} ORDER BY import_id DESC, id DESC LIMIT ?"
-            for r in conn.execute(q, [*params, cap]).fetchall():
+            rows = conn.execute(q, [*params, cap]).fetchall()
+            for r in _dedupe_across_imports(rows, key=_cash_key):
                 out.append({k: r[k] for k in r.keys()})
         if kind in (None, "corporate_action"):
             clauses, params = [], []
@@ -1181,20 +1186,40 @@ def _trade_key(row: Any) -> tuple[Any, ...]:
     )
 
 
+#: Cash kinds whose description names a SECURITY, so it belongs in their identity:
+#: two holdings can pay the same amount on the same day, and merging those would
+#: under-count. Everything else — a transfer — has no security, and its
+#: description is only the broker's wording for the mechanism.
+_DESCRIBED_CASH_KINDS = {"dividend", "withholding_tax", "fee"}
+
+
 def _cash_key(row: Any) -> tuple[Any, ...]:
     """The natural identity of a cash movement.
 
-    Same account, date, kind, currency, description and amount is the same
-    dividend, however many statements reported it. Description is part of it
-    because that is where the security lives — two holdings can pay the same
-    amount on the same day, and collapsing those would under-count instead.
+    Same account, date, kind, currency and amount is the same movement, however
+    many statements reported it — plus the description where that names the
+    security.
+
+    Kind-aware because the two exports word transfers differently for the same
+    event: the CSV writes "Electronic Fund Transfer" and the Flex XML writes
+    "CASH RECEIPTS / ELECTRONIC FUND TRANSFERS". Keying deposits on description
+    let every one of them through twice, so YTD deposits read $35,000 against a
+    true $17,500. Dividends survived only because the two spellings differ by
+    case alone and `.upper()` happened to close the gap — which is why the first
+    version of this looked correct: the number being checked was the one that
+    worked.
+
+    Two genuine same-day, same-amount transfers are still both kept: multiplicity
+    WITHIN one import is preserved by `_dedupe_across_imports`, so only
+    cross-import repeats collapse.
     """
+    described = (row["kind"] or "") in _DESCRIBED_CASH_KINDS
     return (
         row["account"],
         row["date"] or "",
         row["kind"] or "",
         row["currency"] or "",
-        (row["description"] or "").strip().upper(),
+        (row["description"] or "").strip().upper() if described else "",
         round(row["amount"] or 0.0, 8),
     )
 

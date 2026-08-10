@@ -1402,3 +1402,34 @@ def test_two_reports_rendered_in_the_same_second_do_not_overwrite(monkeypatch, t
     assert first["html"] != second["html"]
     assert first["pdf"] != second["pdf"]
     assert Path(first["pdf"]).exists() and Path(second["pdf"]).exists()
+
+
+def test_a_series_whose_labels_are_all_the_same_is_not_charted():
+    """Bullets written `- **Problem:** ...` all reduce to the same label, because
+    the split takes the text before the colon — which is where the label lives in
+    the shape this was built for. The result charted six bars reading "Problem":
+    looks like six categories, names none of them, and the reader cannot tell
+    which figure belongs to what. Observed on a delivered sheet."""
+    series = reports.extract_series(
+        "## What the alignment review shows\n"
+        "- **Problem:** Tech concentration 77.0% above target\n"
+        "- **Problem:** Defensive sleeve -20.0% versus policy\n"
+        "- **Problem:** Cash buffer drift 3.7%\n"
+        "- **Problem:** Top-5 concentration 64.2%\n"
+    )
+    assert series == [], "a one-category axis carries no information"
+
+
+def test_repeated_labels_in_a_table_are_rejected_too():
+    assert reports.extract_series(
+        "## Risks\n| Item | Value |\n|---|---|\n"
+        "| Risk | 10.0% |\n| Risk | 20.0% |\n| Risk | 30.0% |\n"
+    ) == []
+
+
+def test_distinct_labels_still_chart():
+    """The guard must not cost the ordinary case."""
+    series = reports.extract_series(
+        "## Weights\n- **VOO:** 27.2%\n- **UNH:** 12.4%\n- **AMZN:** 10.0%\n"
+    )
+    assert [l for l, _v in series[0]["items"]] == ["VOO", "UNH", "AMZN"]

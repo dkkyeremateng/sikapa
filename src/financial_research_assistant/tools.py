@@ -868,7 +868,10 @@ def income_summary(year: int = 0, account: str = "") -> str:
             "No income found. Import statements containing dividends/fees with "
             "`import_ibkr_statement`, or widen the filters."
         )
-    scope = f" · {year}" if year else ""
+    # Name the span even when it is "everything". Headed bare, an all-dates total
+    # was copied onto a sheet as "Net Dividends YTD" — $397.82 of income since
+    # 2024 presented as this year's, because nothing in the output said otherwise.
+    scope = f" · {year}" if year else " · all dates"
     lines = [f"INCOME SUMMARY{scope}:"]
     # Convert each currency's net to the base currency for a combined total (using
     # the year-end rate when a year is given, else the latest). Per-currency
@@ -898,6 +901,63 @@ def income_summary(year: int = 0, account: str = "") -> str:
         top = list(res["dividends_by_symbol"].items())[:10]
         lines.append("  dividends by symbol: " +
                      ", ".join(f"{s} {amt:,.2f}" for s, amt in top))
+    return "\n".join(lines)
+
+
+def portfolio_period_return(start: str = "", end: str = "") -> str:
+    """Your TIME-WEIGHTED return over an exact window — year-to-date, a quarter, a
+    month — chain-linked from the daily returns in the saved IBKR Flex statement.
+
+    USE THIS for 'how am I doing this year / YTD / since January / in Q2'. Do NOT
+    read a year-to-date figure off an imported statement's own TWR: the store
+    keeps one return per import, so a trailing-twelve-month pull reports twelve
+    months. Presenting that as YTD is a different question wearing the right
+    label — 19.35% where the true year-to-date figure was 7.64%.
+
+    ``start``/``end`` are ISO dates; blank ``start`` means 1 January of the latest
+    session (year to date) and blank ``end`` the latest session. Returns the
+    window actually covered, the return, monthly breakdown, drawdown and hit rate,
+    plus a line confirming the arithmetic reproduces the broker's own stated TWR
+    for the whole file. Requires a Flex query with Period = 'Breakout by Day'.
+    """
+    from . import flex
+
+    try:
+        r = flex.period_return(start=start, end=end)
+    except Exception as exc:  # FlexError, unreadable file, bad XML
+        return f"Could not measure the period: {exc}"
+
+    pct = r["return_pct"]
+    lines = [
+        f"TIME-WEIGHTED RETURN · {r['start']} → {r['end']} "
+        f"({r['sessions']} sessions):",
+        f"  return          {pct:+.2f}%",
+        f"  max drawdown    {r['max_drawdown_pct']:.2f}%",
+        f"  best / worst    {r['best_session_pct']:+.2f}% / {r['worst_session_pct']:+.2f}%",
+        f"  winning days    {r['up_sessions']}/{r['sessions']} "
+        f"({r['up_sessions'] / r['sessions'] * 100:.1f}%)",
+        "  monthly: " + ", ".join(
+            f"{m} {v:+.2f}%" for m, v in r["monthly_pct"].items()
+        ),
+    ]
+    # State the check rather than just performing it: a figure the reader is being
+    # asked to trust over the stored one should show why it is the better number.
+    if r["checked"]:
+        share = r["reconciled"] / r["checked"] * 100
+        lines.append(
+            f"  cross-check: {r['reconciled']}/{r['checked']} sessions agree with the "
+            f"NAV movement IBKR reports for the same day (the rest carry cash flows, "
+            f"which the broker times intraday)."
+        )
+        if share < 90:
+            lines.append(
+                "  WARNING: most sessions do NOT reconcile — treat this figure as "
+                "unverified and check the Flex query's NAV fields."
+            )
+    lines.append(
+        f"  whole file {r['file_start']} → {r['file_end']}: {r['file_return_pct']:+.2f}% "
+        f"— this is the trailing figure the store keeps; do not report it as YTD."
+    )
     return "\n".join(lines)
 
 

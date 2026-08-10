@@ -726,3 +726,54 @@ def test_allocation_converts_multi_currency_to_usd(monkeypatch, tmp_path):
     out = t.allocation()
     assert "total 300.00 USD" in out and "converted to USD: EUR" in out
 
+
+
+def test_transfers_dedupe_despite_differing_broker_wording(monkeypatch, tmp_path):
+    """The two exports word the same transfer differently — the CSV writes
+    "Electronic Fund Transfer", the Flex XML writes "CASH RECEIPTS / ELECTRONIC
+    FUND TRANSFERS". Keying deposits on description let every one through twice,
+    so YTD deposits read $35,000 against a true $17,500. Dividends survived only
+    because their two spellings differ by case alone, which `.upper()` closed —
+    so checking dividends alone made a partial fix look complete."""
+    from financial_research_assistant import statements as s
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+
+    def row(import_id, desc):
+        return {"import_id": import_id, "account": "U1", "date": "2026-01-06",
+                "kind": "deposit_withdrawal", "currency": "USD",
+                "description": desc, "amount": 2500.0}
+
+    kept = s._dedupe_across_imports(
+        [row(1, "Electronic Fund Transfer"),
+         row(2, "CASH RECEIPTS / ELECTRONIC FUND TRANSFERS")],
+        key=s._cash_key,
+    )
+    assert len(kept) == 1, "the same transfer, worded two ways"
+
+
+def test_two_transfers_on_one_day_in_one_statement_are_both_kept():
+    """Multiplicity WITHIN an import is what keeps the description-blind key from
+    merging genuinely separate transfers."""
+    from financial_research_assistant import statements as s
+
+    def row(import_id):
+        return {"import_id": import_id, "account": "U1", "date": "2026-01-06",
+                "kind": "deposit_withdrawal", "currency": "USD",
+                "description": "Electronic Fund Transfer", "amount": 2500.0}
+
+    assert len(s._dedupe_across_imports([row(1), row(1)], key=s._cash_key)) == 2
+
+
+def test_listing_transactions_does_not_repeat_overlapping_rows(monkeypatch, tmp_path):
+    """`query_transactions` read cash raw, so anything summing that view counted
+    each overlapping movement twice."""
+    from financial_research_assistant import statements as s
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_BUYSELL_STATEMENT)
+    once = s.query_transactions(kind="dividend", account="U1", limit=500)
+    s.import_statement(
+        'Statement,Data,Period,"April 1, 2025 - April 30, 2025"\n'
+        "Dividends,Header,Currency,Account,Date,Description,Amount\n"
+        "Dividends,Data,USD,U1,2025-04-01,AMZN(US1) Cash Dividend,12\n"
+    )
+    assert len(s.query_transactions(kind="dividend", account="U1", limit=500)) == len(once)
