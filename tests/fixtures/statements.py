@@ -141,3 +141,111 @@ SAMPLE_OFX = (
     "</SECLIST></SECLISTMSGSRSV1>"
     "</OFX>"
 )
+
+
+# --- IBKR Flex Web Service XML ---------------------------------------------
+# Shaped like a real Flex pull with "Breakout by Day" on: one <FlexStatement>
+# per business day, each repeating the full position and security list while
+# carrying only its own day's activity. Two days is enough to prove the merge.
+SAMPLE_FLEX_XML = '''<FlexQueryResponse queryName="research" type="AF">
+<FlexStatements count="2">
+<FlexStatement accountId="U1111111" fromDate="2026-04-01" toDate="2026-04-01" period="LastBusinessDay" whenGenerated="2026-04-02;03:00:00">
+<AccountInformation accountId="U1111111" currency="USD" />
+<ChangeInNAV startingValue="9900" endingValue="10000" twr="1.0" mtm="100" realized="0" changeInUnrealized="100" depositsWithdrawals="0" dividends="5.5" withholdingTax="0" interest="0" otherFees="0" commissions="-1.05" />
+<EquitySummaryInBase>
+<EquitySummaryByReportDateInBase accountId="U1111111" reportDate="2026-04-01" cash="1000" cashLong="1000" cashShort="0" stock="9000" stockLong="9000" stockShort="0" options="0" bonds="0" commodities="0" notes="0" dividendAccruals="0" interestAccruals="0" total="10000" totalLong="10000" totalShort="0" />
+</EquitySummaryInBase>
+<Trades>
+<Order accountId="U1111111" assetCategory="STK" currency="USD" symbol="AMZN" conid="3691937" isin="US0231351067" description="AMAZON COM INC" multiplier="1" dateTime="2026-04-01;12:14:23" tradeDate="2026-04-01" quantity="10" tradePrice="180" closePrice="181" proceeds="-1800" ibCommission="-1.05" cost="1801.05" fifoPnlRealized="0" mtmPnl="10" buySell="BUY" openCloseIndicator="O" notes="P" />
+</Trades>
+<CashTransactions>
+<CashTransaction accountId="U1111111" currency="USD" assetCategory="STK" symbol="AMZN" conid="3691937" isin="US0231351067" description="AMZN(US0231351067) Cash Dividend USD 0.55 per Share" dateTime="2026-04-01" amount="5.5" type="Dividends" code="" />
+</CashTransactions>
+<CorporateActions />
+<OpenPositions>
+<OpenPosition accountId="U1111111" assetCategory="STK" currency="USD" symbol="AMZN" conid="3691937" isin="US0231351067" multiplier="1" reportDate="2026-04-01" position="10" markPrice="181" positionValue="1810" costBasisPrice="180.105" costBasisMoney="1801.05" fifoPnlUnrealized="8.95" side="Long" code="" />
+</OpenPositions>
+<SecuritiesInfo>
+<SecurityInfo assetCategory="STK" symbol="AMZN" conid="3691937" isin="US0231351067" description="AMAZON COM INC" listingExchange="NASDAQ" multiplier="1" underlyingSymbol="" />
+</SecuritiesInfo>
+</FlexStatement>
+<FlexStatement accountId="U1111111" fromDate="2026-04-02" toDate="2026-04-02" period="LastBusinessDay" whenGenerated="2026-04-03;03:00:00">
+<AccountInformation accountId="U1111111" currency="USD" />
+<ChangeInNAV startingValue="10000" endingValue="10700" twr="2.0" mtm="200" realized="40" changeInUnrealized="160" depositsWithdrawals="500" dividends="0" withholdingTax="-0.55" interest="0" otherFees="-2.0" commissions="-1.0" />
+<EquitySummaryInBase>
+<EquitySummaryByReportDateInBase accountId="U1111111" reportDate="2026-04-02" cash="1200" cashLong="1200" cashShort="0" stock="9500" stockLong="9500" stockShort="0" options="0" bonds="0" commodities="0" notes="0" dividendAccruals="0" interestAccruals="0" total="10700" totalLong="10700" totalShort="0" />
+</EquitySummaryInBase>
+<Trades>
+<Order accountId="U1111111" assetCategory="STK" currency="USD" symbol="AMZN" conid="3691937" isin="US0231351067" description="AMAZON COM INC" multiplier="1" dateTime="2026-04-02;10:05:00" tradeDate="2026-04-02" quantity="-4" tradePrice="190" closePrice="189" proceeds="760" ibCommission="-1.0" cost="-720.42" fifoPnlRealized="38.58" mtmPnl="-4" buySell="SELL" openCloseIndicator="C" notes="C" />
+</Trades>
+<CashTransactions>
+<CashTransaction accountId="U1111111" currency="USD" assetCategory="STK" symbol="AMZN" conid="3691937" isin="US0231351067" description="AMZN(US0231351067) Cash Dividend USD 0.55 per Share - US Tax" dateTime="2026-04-02" amount="-0.55" type="Withholding Tax" code="" />
+<CashTransaction accountId="U1111111" currency="USD" assetCategory="" symbol="" conid="" isin="" description="ELECTRONIC FUND TRANSFER" dateTime="2026-04-02" amount="500" type="Deposits/Withdrawals" code="" />
+<CashTransaction accountId="U1111111" currency="USD" assetCategory="" symbol="" conid="" isin="" description="ADR Fee" dateTime="2026-04-02" amount="-2.0" type="Other Fees" code="" />
+<CashTransaction accountId="U1111111" currency="USD" assetCategory="" symbol="" conid="" isin="" description="Credit Interest" dateTime="2026-04-02" amount="3.0" type="Broker Interest Received" code="" />
+</CashTransactions>
+<CorporateActions>
+<CorporateAction accountId="U1111111" assetCategory="STK" currency="USD" symbol="AMZN" conid="3691937" isin="US0231351067" reportDate="2026-04-02" dateTime="2026-04-02;20:25:00" description="AMZN(US0231351067) Split 3 for 1 (AMZN, AMAZON COM INC, US0231351067)" quantity="20" proceeds="0" value="0" fifoPnlRealized="0" mtmPnl="0" type="FS" code="" />
+</CorporateActions>
+<OpenPositions>
+<OpenPosition accountId="U1111111" assetCategory="STK" currency="USD" symbol="AMZN" conid="3691937" isin="US0231351067" multiplier="1" reportDate="2026-04-02" position="6" markPrice="189" positionValue="1134" costBasisPrice="180.105" costBasisMoney="1080.63" fifoPnlUnrealized="53.37" side="Long" code="" />
+<OpenPosition accountId="U1111111" assetCategory="STK" currency="USD" symbol="MSFT" conid="272093" isin="US5949181045" multiplier="1" reportDate="2026-04-02" position="4" markPrice="400" positionValue="1600" costBasisPrice="380" costBasisMoney="1520" fifoPnlUnrealized="80" side="Long" code="" />
+</OpenPositions>
+<SecuritiesInfo>
+<SecurityInfo assetCategory="STK" symbol="AMZN" conid="3691937" isin="US0231351067" description="AMAZON COM INC" listingExchange="NASDAQ" multiplier="1" underlyingSymbol="" />
+<SecurityInfo assetCategory="STK" symbol="MSFT" conid="272093" isin="US5949181045" description="MICROSOFT CORP" listingExchange="NASDAQ" multiplier="1" underlyingSymbol="" />
+</SecuritiesInfo>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>
+'''
+
+# Open Positions configured at BOTH Summary and Lot: the same six shares appear
+# once as a summary and again split across two tax lots.
+FLEX_LOT_LEVEL_XML = '''<FlexQueryResponse queryName="research" type="AF">
+<FlexStatements count="1">
+<FlexStatement accountId="U1111111" fromDate="2026-04-02" toDate="2026-04-02" period="LastBusinessDay">
+<OpenPositions>
+<OpenPosition levelOfDetail="SUMMARY" accountId="U1111111" assetCategory="STK" currency="USD" symbol="AMZN" conid="3691937" multiplier="1" position="6" markPrice="189" positionValue="1134" costBasisPrice="180.105" costBasisMoney="1080.63" fifoPnlUnrealized="53.37" />
+<OpenPosition levelOfDetail="LOT" accountId="U1111111" assetCategory="STK" currency="USD" symbol="AMZN" conid="3691937" multiplier="1" position="4" markPrice="189" positionValue="756" costBasisPrice="175" costBasisMoney="700" openDateTime="2025-01-06;09:31:00" />
+<OpenPosition levelOfDetail="LOT" accountId="U1111111" assetCategory="STK" currency="USD" symbol="AMZN" conid="3691937" multiplier="1" position="2" markPrice="189" positionValue="378" costBasisPrice="190.315" costBasisMoney="380.63" openDateTime="2026-04-01;12:14:23" />
+</OpenPositions>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>
+'''
+
+
+# A NAV snapshot whose `total` exceeds the classes it reports: IBKR folds crypto
+# into the total but the NAV section offers no field for it, so the components
+# under-sum by exactly the crypto holding.
+FLEX_UNREPORTED_CLASS_XML = '''<FlexQueryResponse queryName="research" type="AF">
+<FlexStatements count="1">
+<FlexStatement accountId="U1111111" fromDate="2026-04-01" toDate="2026-04-02" period="LastBusinessDay">
+<EquitySummaryInBase>
+<EquitySummaryByReportDateInBase reportDate="2026-04-01" cash="1000" cashLong="1000" stock="9000" stockLong="9000" options="0" bonds="0" commodities="0" notes="0" dividendAccruals="0" interestAccruals="0" total="11000" />
+<EquitySummaryByReportDateInBase reportDate="2026-04-02" cash="1200" cashLong="1200" stock="9500" stockLong="9500" options="0" bonds="0" commodities="0" notes="0" dividendAccruals="0" interestAccruals="0" total="12000" />
+</EquitySummaryInBase>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>
+'''
+
+
+# Crypto executes in IBKR's segregated Paxos segment, reported as "<account>-P"
+# on the row while the statement itself is only ever for the parent account.
+FLEX_SEGREGATED_ACCOUNT_XML = '''<FlexQueryResponse queryName="research" type="AF">
+<FlexStatements count="1">
+<FlexStatement accountId="U1111111" fromDate="2026-04-01" toDate="2026-04-02" period="LastBusinessDay">
+<Trades>
+<Order accountId="U1111111" assetCategory="STK" currency="USD" symbol="MSFT" conid="272093" dateTime="2026-04-01;12:00:00" tradeDate="2026-04-01" quantity="4" tradePrice="380" closePrice="400" proceeds="-1520" ibCommission="-1" cost="1521" fifoPnlRealized="0" mtmPnl="80" buySell="BUY" />
+<Order accountId="U1111111-P" assetCategory="CRYPTO" currency="USD" symbol="BTC.USD-PAXOS" conid="0" dateTime="2026-04-01;19:09:33" tradeDate="2026-04-01" quantity="0.05" tradePrice="60000" closePrice="61000" proceeds="-3000" ibCommission="-5" cost="3005" fifoPnlRealized="0" mtmPnl="50" buySell="BUY" />
+</Trades>
+<OpenPositions>
+<OpenPosition accountId="U1111111" assetCategory="STK" currency="USD" symbol="MSFT" conid="272093" multiplier="1" position="4" markPrice="400" positionValue="1600" costBasisPrice="380.25" costBasisMoney="1521" fifoPnlUnrealized="79" />
+<OpenPosition accountId="U1111111-P" assetCategory="CRYPTO" currency="USD" symbol="BTC.USD-PAXOS" conid="0" multiplier="1" position="0.05" markPrice="61000" positionValue="3050" costBasisPrice="60100" costBasisMoney="3005" fifoPnlUnrealized="45" />
+</OpenPositions>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>
+'''

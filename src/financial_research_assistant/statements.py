@@ -502,12 +502,21 @@ def _source_head(source: str | Path, n: int = 1024) -> tuple[str, str]:
 
 def _detect_format(source: str | Path) -> str:
     """Route a statement source to a parser key. ``.ofx``/``.qfx`` files and any
-    source whose head carries an OFX header/root tag are ``"ofx"``; everything
-    else defaults to ``"ibkr_csv"`` (preserving the original behavior, so every
-    existing CSV import routes exactly as before)."""
+    source whose head carries an OFX header/root tag are ``"ofx"``; a
+    ``<FlexQueryResponse>`` root is ``"flex_xml"``; everything else defaults to
+    ``"ibkr_csv"`` (preserving the original behavior, so every existing CSV import
+    routes exactly as before).
+
+    Flex is detected by its root tag rather than by the ``.xml`` extension, for
+    the same reason OFX is: the extension describes the container, not the
+    contents, and OFX v2 is itself XML. Content-based routing keeps a file that
+    was merely *saved* as .xml from being handed to the wrong parser.
+    """
     suffix, head = _source_head(source)
     if suffix in {".ofx", ".qfx"} or _looks_like_ofx(head):
         return "ofx"
+    if "<FlexQueryResponse" in head:
+        return "flex_xml"
     return "ibkr_csv"
 
 
@@ -727,11 +736,26 @@ def parse_ofx(source: str | Path) -> dict[str, Any]:
     }
 
 
+def _parse_flex(source: str | Path) -> dict[str, Any]:
+    """Adapt ``flex.parse_flex_xml`` (which takes the document text) to the
+    path-or-text contract every registered parser honors.
+
+    Imported lazily so ``statements`` stays importable without pulling in the
+    Flex module, and so the dependency runs one way only — ``flex`` builds the
+    dict this module stores, never the reverse."""
+    from .flex import parse_flex_xml
+
+    path = _file_source(source)
+    text = path.read_text(encoding="utf-8-sig") if path is not None else str(source)
+    return parse_flex_xml(text)
+
+
 # Statement-format registry: detector key -> parser producing the normalized
-# dict. Extensible — a future Flex-XML parser registers here the same way.
+# dict. Extensible — another broker's format registers here the same way.
 _FORMAT_PARSERS = {
     "ibkr_csv": parse_statement,
     "ofx": parse_ofx,
+    "flex_xml": _parse_flex,
 }
 
 

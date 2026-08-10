@@ -21,9 +21,9 @@ _FLEX_IN_PROGRESS = (
 
 
 _FLEX_STATEMENT = (
-    "<FlexQueryResponse queryName='Activity' type='AF'>"
-    "<FlexStatements count='1'><FlexStatement accountId='U1'/></FlexStatements>"
-    "</FlexQueryResponse>"
+    "<FlexQueryResponse queryName='Activity' type='AF'><FlexStatements count='1'>"
+    "<FlexStatement accountId='U1' fromDate='2026-04-01' toDate='2026-04-02'/>"
+    "</FlexStatements></FlexQueryResponse>"
 )
 
 
@@ -610,28 +610,35 @@ def test_flex_sync_missing_credentials(monkeypatch):
     assert "No Flex query id" in flex.flex_sync()
 
 
-def test_flex_sync_saves_xml_pending_parser(monkeypatch, tmp_path):
-    """flex_sync fetches, saves the XML, and (parser still a stub) reports save-only
-    while pointing at the manual CSV path — without touching the store."""
+def test_flex_sync_saves_the_xml_and_imports_it(monkeypatch, tmp_path):
+    """flex_sync fetches, saves the raw XML, and imports it into the same store
+    the manual CSV path fills — reporting what landed rather than a raw dict."""
     from financial_research_assistant import flex
 
     monkeypatch.setenv("FINANCIAL_RESEARCH_FLEX_DIR", str(tmp_path / "flex"))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
     monkeypatch.setenv("IBKR_FLEX_TOKEN", "TOKEN")
     monkeypatch.setattr(flex, "fetch_flex_xml", lambda *a, **k: _FLEX_STATEMENT)
+
     out = flex.flex_sync(query_id="QID")
-    assert "saved" in out and "import_ibkr_statement" in out
+    assert "saved" in out and "Imported April 01, 2026 - April 02, 2026 for U1" in out
     saved = list((tmp_path / "flex").glob("flex-QID-*.xml"))
     assert len(saved) == 1 and saved[0].read_text() == _FLEX_STATEMENT
 
 
-def test_flex_parse_is_a_seam():
-    """parse_flex_xml is intentionally not implemented yet (documented seam)."""
-    import pytest
-
+def test_a_statement_that_cannot_be_parsed_is_still_kept(monkeypatch, tmp_path):
+    """The XML is written before it is parsed. A statement this parser can't read
+    is the one sample needed to teach it — losing it with the error would mean
+    reproducing the pull to see what went wrong."""
     from financial_research_assistant import flex
 
-    with pytest.raises(NotImplementedError):
-        flex.parse_flex_xml(_FLEX_STATEMENT)
+    monkeypatch.setenv("FINANCIAL_RESEARCH_FLEX_DIR", str(tmp_path / "flex"))
+    monkeypatch.setenv("IBKR_FLEX_TOKEN", "TOKEN")
+    monkeypatch.setattr(flex, "fetch_flex_xml", lambda *a, **k: "<SomethingElse/>")
+
+    out = flex.flex_sync(query_id="QID")
+    assert "could not be imported" in out
+    assert len(list((tmp_path / "flex").glob("flex-QID-*.xml"))) == 1
 
 
 def test_realized_gains_tool_and_empty(monkeypatch, tmp_path):

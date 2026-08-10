@@ -368,7 +368,7 @@ offline deterministic fake mode, and a generic eval harness.
 │   ├── channels.py    # pluggable delivery-channel registry (telegram/desktop/stdout)
 │   ├── reports.py     # render_report: markdown -> typeset PNG/PDF sheet (headless Chrome)
 │   ├── telegram.py    # Bot API client — outbound delivery + allowlisted inbound
-│   ├── flex.py        # IBKR Flex Web Service pull (--flex-sync); XML parser is a seam
+│   ├── flex.py        # IBKR Flex Web Service pull (--flex-sync) + XML → store
 │   ├── statements.py  # IBKR CSV + OFX/QFX parsers, format dispatch, SQLite store
 │   ├── tui.py         # Textual chat app
 │   └── main.py        # CLI entry (argparse): TUI / --prompt / --fake / --login
@@ -571,15 +571,46 @@ financial-research-assistant --flex-sync --flex-query-id 123456   # override the
 It's **model-free** (no API key) and cron-friendly, like `--digest`. The token is
 read only from `IBKR_FLEX_TOKEN` and never passed through the model.
 
-> **Status.** Today `--flex-sync` fetches and **saves the statement XML** (under
-> `~/.financial-research-assistant/flex`, override `FINANCIAL_RESEARCH_FLEX_DIR`).
-> Automatic parsing into the queryable store isn't wired yet: the Flex XML schema
-> differs from the CSV Activity Statement, and the field mapping needs validating
-> against a real statement before it can be trusted. `parse_flex_xml` in
-> [`flex.py`](src/financial_research_assistant/flex.py) is the seam for that step —
-> once implemented, the same command imports automatically. Meanwhile, querying
-> data still works via the manual CSV path (`import_ibkr_statement`), which is
-> unchanged.
+The statement XML is saved `0600` under `~/.financial-research-assistant/flex`
+(override `FINANCIAL_RESEARCH_FLEX_DIR`) and then imported into the same SQLite
+store the CSV path fills, so Flex data is queryable through the identical tools.
+The raw file is written *before* it is parsed, so a statement the parser can't yet
+read is kept rather than lost with the error. A saved `.xml` can also be re-imported
+by hand with `import_ibkr_statement` — the format is detected from its
+`<FlexQueryResponse>` root, not its extension.
+
+### Configuring the Flex Query
+
+Flex names its fields differently from the Activity Statement CSV, so the query has
+to carry the sections the store reads. Create an **Activity Flex Query** with:
+
+| Section | Level | Notes |
+| --- | --- | --- |
+| Trades | **Orders** | `cost`, `proceeds`, `ibCommission` drive every gain figure |
+| Open Positions | **Summary** | Lot rows, if also selected, are ignored so shares aren't counted twice |
+| Cash Transactions | **Detail** | plus the types: dividends, payment in lieu, withholding tax, other/broker fees, deposits & withdrawals |
+| Corporate Actions | Detail | the *description* is what split detection reads |
+| Net Asset Value (NAV) in Base | — | per-asset-class totals |
+| Change in NAV | — | carries `TWR`, the only place a time-weighted return appears |
+| Financial Instrument Information | — | conid/ISIN/exchange for the positions join |
+
+Under General Configuration set **Date Format `yyyy-MM-dd`** — holding-period and
+tax-year classification parse these dates, and IBKR's `yyyyMMdd` default silently
+breaks both. `Period` should be **Last 365 Calendar Days** (Flex's cap for activity):
+a shorter window leaves FIFO with no opening lots, which surfaces as
+`unmatched_proceeds` rather than as an error.
+
+**Breakout by Day** is optional and expensive. With it on, one pull becomes a
+`<FlexStatement>` per business day — each repeating the full position and security
+list — which is why the parser concatenates trades and cash but takes positions,
+instruments and the closing NAV from the last statement alone, and chain-links the
+daily TWRs into one figure. One pull is always one import either way.
+
+Two gaps are worth knowing about. NAV is reconciled against the broker's own total,
+and any shortfall (crypto, which IBKR folds into `total` without offering a field
+for it) is booked as an **Other** asset class rather than dropped. And lots opened
+before the 365-day window have no acquisition record, so their sales land in
+`unmatched_proceeds` — import older Activity Statement CSVs to seed them.
 
 ## Monitoring digest (cron-friendly, no model)
 
