@@ -956,16 +956,39 @@ _UNBACKED_DELIVERY_NOTE = (
 #: Word order matters: "portfolio review" is a request, "review my portfolio" is
 #: an instruction to analyse, and only the first matches.
 _ARTIFACT = (
-    r"(?:report|one[- ]pager|pdf|infographic|tear\s?sheet"
+    r"(?:report|one[- ]pager|pdf|infographic|tear\s?sheet|docs?|document"
     r"|(?:performance|portfolio)\s+review)"
 )
 
+#: Verbs that ask for one. Sourced from what the user actually types, which is how
+#: "show me … as a one-pager" and "generate the docs for telegram" were found to
+#: slip past a list built from imagination.
+_ASK_VERB = (
+    r"(?:produce|generate|create|make|prepare|build|render|send|email|push"
+    r"|give\s+me|show(?:\s+me)?|get\s+me|put\s+together|draw\s+up|write(?:\s+up)?)"
+)
+
 _REPORT_REQUEST = re.compile(
-    rf"(?:\b(?:produce|generate|create|make|prepare|build|render|send|email|push|give\s+me)"
-    rf"\b[^.?!\n]{{0,60}}\b{_ARTIFACT}\b"
-    rf"|\b{_ARTIFACT}\b[^.?!\n]{{0,60}}\b(?:to|via|on)\s+(?:telegram|slack|e-?mail)\b)",
+    rf"(?:\b{_ASK_VERB}\b[^.?!\n]{{0,60}}\b{_ARTIFACT}\b"
+    # "for telegram" as well as "to telegram": naming the channel is the request,
+    # whichever preposition carries it.
+    rf"|\b{_ARTIFACT}\b[^.?!\n]{{0,60}}\b(?:to|via|on|for)\s+(?:telegram|slack|e-?mail)\b)",
     re.IGNORECASE,
 )
+
+#: A request that is being DESCRIBED rather than made. "the agent didn't generate
+#: the report" asks for nothing, and noting an omission against it would answer a
+#: sentence that was already about the omission.
+_NEGATED = re.compile(
+    r"(?:did\s?n[o']t|does\s?n[o']t|do\s?n[o']t|was\s?n[o']t|is\s?n[o']t|never"
+    r"|failed\s+to|could\s?n[o']t|forgot\s+to|without)\W*$",
+    re.IGNORECASE,
+)
+
+
+def _is_a_described_request(text: str, at: int) -> bool:
+    """Whether the request verb at ``at`` sits under a negation."""
+    return bool(_NEGATED.search(text[max(0, at - 30):at]))
 
 _MISSING_REPORT_NOTE = (
     "\n\n---\n"
@@ -993,7 +1016,8 @@ async def settle_delivery_claim(
     found = _DELIVERY_CLAIM.search(answer)
     if found and not _is_an_offer(answer, found.start()):
         return answer + _UNBACKED_DELIVERY_NOTE
-    if user_msg and _REPORT_REQUEST.search(user_msg):
+    asked = _REPORT_REQUEST.search(user_msg or "")
+    if asked and not _is_a_described_request(user_msg, asked.start()):
         return answer + _MISSING_REPORT_NOTE
     return answer
 
