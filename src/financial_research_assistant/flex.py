@@ -616,11 +616,22 @@ def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, An
     deposits = sum(v for d, v in flows.items() if window[0][0] <= d <= window[-1][0])
     nav_start = navs[window[0][0]][0]
     nav_end = navs[window[-1][0]][1]
+    # The counterfactual the reader always reaches for — "and without the best
+    # month?" — computed here because the model kept computing it wrongly: a
+    # delivered sheet said -5.43% where backing April out gives -7.21%. Every
+    # figure a tool supplied on that sheet was right; the ones it derived were not.
+    monthly = {m: chain(rows) for m, rows in sorted(by_month.items())}
+    best_month = max(monthly, key=lambda m: monthly[m]) if monthly else ""
+    ex_best = chain([d for d in window if d[0][:7] != best_month]) if monthly else 0.0
     return {
         "start": window[0][0],
         "end": window[-1][0],
         "sessions": len(window),
         "return_pct": chain(window),
+        "months": len(monthly),
+        "best_month": best_month,
+        "best_month_pct": monthly.get(best_month, 0.0),
+        "return_excluding_best_month_pct": ex_best,
         "nav_start": nav_start,
         "nav_end": nav_end,
         "deposits": deposits,
@@ -629,7 +640,7 @@ def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, An
         "best_session_pct": max(t for _d, t in window),
         "worst_session_pct": min(t for _d, t in window),
         "up_sessions": sum(1 for _d, t in window if t > 0),
-        "monthly_pct": {m: chain(rows) for m, rows in sorted(by_month.items())},
+        "monthly_pct": monthly,
         "file_start": days[0][0],
         "file_end": last,
         "file_return_pct": chain(days),

@@ -266,6 +266,9 @@ purchase.
         "facts": {
             "return_pct": r["return_pct"],
             "monthly_pct": r["monthly_pct"],
+            "best_month": r["best_month"],
+            "best_month_pct": r["best_month_pct"],
+            "return_excluding_best_month_pct": r["return_excluding_best_month_pct"],
             "nav_start": r["nav_start"],
             "nav_end": r["nav_end"],
             "deposits": r["deposits"],
