@@ -494,3 +494,20 @@ def test_period_return_states_the_money_side_of_the_window():
     assert r["deposits"] == 50.0
     # NAV rose 110 -> 119.79 across the window, 50 of which was deposited.
     assert round(r["investment_gain"], 2) == round(r["nav_end"] - 110.0 - 50.0, 2)
+
+
+def test_period_return_states_the_without_the_best_month_counterfactual():
+    """The question every reader asks next — "and without the best month?" — was
+    being worked out by the model and worked out wrongly: a delivered sheet said
+    "-5.43%" where backing April out gives -7.21%. Every figure a tool supplied on
+    that sheet was right; the ones it derived were not."""
+    from financial_research_assistant import flex
+
+    r = flex.period_return(start="2026-01-01", xml=_DAILY_XML)
+    assert r["best_month"] == "2026-01"          # +10.0%, the only positive month
+    assert round(r["best_month_pct"], 4) == 10.0
+    # The window spans two months: January (+10%) and February, whose two
+    # sessions chain to 0.90 * 1.10 - 1 = -1%. Drop the best one and -1% is
+    # what is left.
+    assert r["months"] == 2
+    assert round(r["return_excluding_best_month_pct"], 6) == -1.0

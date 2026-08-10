@@ -971,6 +971,8 @@ def portfolio_period_return(start: str = "", end: str = "") -> str:
         "  monthly: " + ", ".join(
             f"{m} {v:+.2f}%" for m, v in r["monthly_pct"].items()
         ),
+        f"  best month {r['best_month']} at {r['best_month_pct']:+.2f}%; excluding it "
+        f"the period returns {r['return_excluding_best_month_pct']:+.2f}%",
     ]
     # State the check rather than just performing it: a figure the reader is being
     # asked to trust over the stored one should show why it is the better number.
@@ -1036,6 +1038,11 @@ def portfolio_review_brief(period: str = "", account: str = "") -> str:
         f"  winning sessions {f['up_sessions']}/{f['sessions']}; "
         f"realised {f['realized']:,.2f} across {f['closed_lots']} closed lots",
         f"  deposits were {f['deposit_share_pct']:.1f}% of the NAV change",
+        # The counterfactual the reader always reaches for, computed rather than
+        # left to be worked out: a delivered sheet said "-5.43%" where the answer
+        # is -7.21%.
+        f"  best month {f['best_month']} at {f['best_month_pct']:+.2f}%; WITHOUT it "
+        f"the period returns {f['return_excluding_best_month_pct']:+.2f}%",
         f"  cross-check {f['reconciled']} sessions agree with the NAV movement "
         f"IBKR reports for the same day",
         f"  whole imported file ({f['whole_file_window']}) returned "
@@ -1472,11 +1479,15 @@ def portfolio_vs_benchmark(benchmark: str = "SPY", account: str = "") -> str:
             f"figure from a shorter benchmark window would be the difference between "
             f"two different periods, so there is no verdict here."
         )
+    # Stated, because it was being eyeballed wrongly: a 30-month span was
+    # described as a "16-month track record" and as "2.3 years".
+    span_days = (date.fromisoformat(end) - date.fromisoformat(start)).days
     bench_ret = (bench[-1][1] - bench[0][1]) / bench[0][1] * 100.0
     diff = port_ret - bench_ret
     verdict = "outperformed" if diff >= 0 else "underperformed"
     return (
-        f"Portfolio vs {benchmark.upper()} · {start} → {end}:\n"
+        f"Portfolio vs {benchmark.upper()} · {start} → {end} "
+        f"({span_days / 30.44:.0f} months, {span_days / 365.25:.1f} years):\n"
         f"  portfolio (TWRR)   {port_ret:+.2f}%\n"
         f"  {benchmark.upper():<18} {bench_ret:+.2f}%\n"
         f"  you {verdict} by {abs(diff):.2f} percentage points.\n"
