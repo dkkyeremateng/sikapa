@@ -5,6 +5,7 @@ import time
 from typing import cast
 
 from textual.containers import VerticalScroll
+from textual.events import Paste
 from textual.widgets import Input, OptionList, Static
 from textual.worker import Worker
 
@@ -77,6 +78,97 @@ async def test_tui_command_palette(monkeypatch, tmp_path):
         await pilot.press(*"hi")
         await pilot.pause()
         assert not palette.display
+
+
+_MULTILINE = (
+    "Produce my year-to-date portfolio performance review.\n"
+    "\n"
+    "METHOD:\n"
+    "1. Headline the TIME-WEIGHTED return, not the account value.\n"
+    "2. The stored TWR is trailing twelve months, not year-to-date.\n"
+)
+
+
+async def test_a_multiline_paste_keeps_every_line(monkeypatch, tmp_path):
+    """`Input._on_paste` takes `event.text.splitlines()[0]` and DISCARDS the rest,
+    silently. A fifty-line prompt submits its first sentence and the agent answers
+    that — the request looks honoured and the output looks finished, so the loss
+    shows up only in the content. Observed for real: a portfolio review whose
+    whole method section vanished, producing a confident report built on the
+    wrong return figure."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="paste")
+    sent: list[str] = []
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        monkeypatch.setattr(app, "_start_turn", lambda msg: sent.append(msg))
+        box.focus()
+        box.post_message(Paste(_MULTILINE))
+        await pilot.pause()
+        # The box shows a marker — a single-line Input cannot render newlines.
+        assert box.value == "[pasted 5 lines #1]"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert sent == [_MULTILINE.strip()]
+        assert "trailing twelve months" in sent[0], "the tail must survive"
+
+
+async def test_a_single_line_paste_is_inserted_as_typed(monkeypatch, tmp_path):
+    """The common case must not grow a marker."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="paste1")
+    sent: list[str] = []
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        monkeypatch.setattr(app, "_start_turn", lambda msg: sent.append(msg))
+        box.focus()
+        box.post_message(Paste("just one line"))
+        await pilot.pause()
+        assert box.value == "just one line"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert sent == ["just one line"]
+
+
+async def test_text_typed_around_a_paste_marker_is_kept(monkeypatch, tmp_path):
+    """The marker is a placeholder inside an ordinary line, not the whole value."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="paste2")
+    sent: list[str] = []
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        monkeypatch.setattr(app, "_start_turn", lambda msg: sent.append(msg))
+        box.focus()
+        box.post_message(Paste("alpha\nbeta"))
+        await pilot.pause()
+        await pilot.press(*" and more")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert sent == ["alpha\nbeta and more"]
+
+
+async def test_history_recalls_the_marker_not_the_expanded_newlines(monkeypatch, tmp_path):
+    """↑ assigns straight to `Input.value`, which is single-line — recalling the
+    expanded text would put newlines somewhere they cannot render. The marker
+    recalls cleanly and still expands on the next submit."""
+    monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
+    app = AgentApp(fake=True, session_id="paste3")
+    sent: list[str] = []
+    async with app.run_test() as pilot:
+        box = app.query_one(CommandInput)
+        monkeypatch.setattr(app, "_start_turn", lambda msg: sent.append(msg))
+        box.focus()
+        box.post_message(Paste("alpha\nbeta"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("up")
+        await pilot.pause()
+        assert "\n" not in box.value
+        assert box.value == "[pasted 2 lines #1]"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert sent == ["alpha\nbeta", "alpha\nbeta"]
 
 
 async def test_tui_history_recall(monkeypatch, tmp_path):

@@ -1183,6 +1183,45 @@ _DANGLING_RE = re.compile(
 )
 
 
+#: Headings that introduce COMMENTARY, not a breakdown. Bullets under them each
+#: quote whatever figure their sentence is about, so charting the run puts a
+#: month's return, a position weight and a two-month total on one axis — four
+#: bars that share nothing but the % sign. (Observed: "April carried the year
+#: 17.9 / Concentration risk 30.4 / Crypto hedge modest 5.5".) It also collided
+#: with the sheet's own "Key observations" block, printing that heading twice.
+#:
+#: Matched on the heading rather than inferred from the values, because the
+#: numbers alone cannot say whether four percentages are comparable — but a
+#: section called "Key observations" has already said it is not a breakdown.
+_PROSE_HEADINGS = {
+    "key observations", "observations", "key takeaways", "takeaways",
+    "key points", "notes", "summary", "bottom line", "conclusion",
+    "commentary", "analysis", "what stands out", "highlights",
+    "recommendation", "recommendations",
+}
+
+
+def _is_prose_heading(title: str) -> bool:
+    return re.sub(r"[^a-z ]", "", (title or "").lower()).strip() in _PROSE_HEADINGS
+
+
+def _distinct_enough(items: list[tuple[str, float]]) -> bool:
+    """Whether these labels form a category axis at all.
+
+    A run of bullets written ``- **Problem:** ...`` all reduce to the same label,
+    because the split takes the text before the colon — and that is where the
+    label lives in the shape this was built for (``- **Healthcare:** 28.4%``).
+    The result charts six bars reading "Problem", which looks like six categories
+    and names none of them: worse than no chart, since the reader cannot tell
+    which figure belongs to what.
+
+    Rejecting is the right repair rather than guessing a better label. The bullets
+    then fall through to Key Observations, where the full sentence is kept and
+    reads correctly.
+    """
+    return len({label for label, _v in items}) >= _MIN_ITEMS
+
+
 def _is_label(text: str) -> bool:
     """Whether a cleaned label reads as a category rather than a cut sentence.
 
@@ -1298,7 +1337,7 @@ def _table_series(rows: list[list[str]], heading: str) -> dict[str, Any] | None:
         # which drew a loss in the gain colour and dropped the minus from its label.
         signed = signed or value < 0 or bool(re.match(r"\s*[+\-−]", row[col].strip()))
         items.append((label[:_MAX_LABEL], value))
-    if len(items) < _MIN_ITEMS:
+    if len(items) < _MIN_ITEMS or not _distinct_enough(items):
         return None
     return {
         "title": heading or (header[0].strip() or "Breakdown"),
@@ -1384,7 +1423,8 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
         # has to be cut to fit an axis it was never a category, and a "majority"
         # rule let through a bear-case list that charted a drawdown, a geographic
         # share and a volatility figure together on one axis.
-        if len(items) >= _MIN_ITEMS and all(_is_label(l) for l, _v in items):
+        if (len(items) >= _MIN_ITEMS and all(_is_label(l) for l, _v in items)
+                and _distinct_enough(items)):
             series.append({
                 "title": heading or "Breakdown",
                 "signed": signed,
@@ -1438,7 +1478,9 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
             break
         if extra["title"] not in {s["title"] for s in series}:
             series.append(extra)
-    return series[:_MAX_SERIES]
+    # Applied last so it catches every path into `series` — list runs, tables and
+    # inline breakdowns alike.
+    return [s for s in series if not _is_prose_heading(s["title"])][:_MAX_SERIES]
 
 
 _INFO_CSS = """

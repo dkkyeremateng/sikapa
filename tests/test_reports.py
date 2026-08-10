@@ -1402,3 +1402,62 @@ def test_two_reports_rendered_in_the_same_second_do_not_overwrite(monkeypatch, t
     assert first["html"] != second["html"]
     assert first["pdf"] != second["pdf"]
     assert Path(first["pdf"]).exists() and Path(second["pdf"]).exists()
+
+
+def test_a_series_whose_labels_are_all_the_same_is_not_charted():
+    """Bullets written `- **Problem:** ...` all reduce to the same label, because
+    the split takes the text before the colon — which is where the label lives in
+    the shape this was built for. The result charted six bars reading "Problem":
+    looks like six categories, names none of them, and the reader cannot tell
+    which figure belongs to what. Observed on a delivered sheet."""
+    series = reports.extract_series(
+        "## What the alignment review shows\n"
+        "- **Problem:** Tech concentration 77.0% above target\n"
+        "- **Problem:** Defensive sleeve -20.0% versus policy\n"
+        "- **Problem:** Cash buffer drift 3.7%\n"
+        "- **Problem:** Top-5 concentration 64.2%\n"
+    )
+    assert series == [], "a one-category axis carries no information"
+
+
+def test_repeated_labels_in_a_table_are_rejected_too():
+    assert reports.extract_series(
+        "## Risks\n| Item | Value |\n|---|---|\n"
+        "| Risk | 10.0% |\n| Risk | 20.0% |\n| Risk | 30.0% |\n"
+    ) == []
+
+
+def test_distinct_labels_still_chart():
+    """The guard must not cost the ordinary case."""
+    series = reports.extract_series(
+        "## Weights\n- **VOO:** 27.2%\n- **UNH:** 12.4%\n- **AMZN:** 10.0%\n"
+    )
+    assert [l for l, _v in series[0]["items"]] == ["VOO", "UNH", "AMZN"]
+
+
+def test_a_commentary_section_is_not_charted():
+    """Bullets under "Key Observations" each quote whatever figure their sentence
+    is about, so charting the run put a month's return, a position weight and a
+    two-month total on one axis — four bars sharing nothing but the % sign. It
+    also collided with the sheet's own "Key observations" block, printing that
+    heading twice. Observed on a delivered sheet."""
+    md = (
+        "## Key Observations\n"
+        "- **April carried the year:** best month was April with +17.87%\n"
+        "- **Concentration risk:** VOO alone is 27.2% of the book\n"
+        "- **Crypto hedge modest:** Bitcoin allocation 5.5% added little\n"
+        "- **Recent flatness:** June and July returned only +0.61%\n"
+    )
+    assert reports.extract_series(md) == []
+    # The content is not lost — it belongs in the observations block, whole.
+    assert len(reports.extract_notes(md, set())) == 4
+    assert reports.build_infographic_html("t", md).count("<h2>Key observations</h2>") == 1
+
+
+def test_a_real_breakdown_under_a_data_heading_still_charts():
+    """The denylist is on prose headings only; it must not cost a real series."""
+    series = reports.extract_series(
+        "## Sector Exposure\n- **Healthcare:** 27.9%\n- **Technology:** 21.3%\n"
+        "- **Industrials:** 7.8%\n"
+    )
+    assert series and series[0]["title"] == "Sector Exposure"

@@ -404,3 +404,93 @@ def test_a_response_that_is_not_a_statement_fails_loudly(tmp_path):
 
     with pytest.raises(flex.FlexError, match="unparseable"):
         flex.parse_flex_xml("<FlexQueryResponse><oops")
+
+
+# --- period_return: a window the store cannot answer for -------------------------
+
+_DAILY_XML = """<FlexQueryResponse queryName="r" type="AF"><FlexStatements count="4">
+<FlexStatement accountId="U1" fromDate="2025-12-31" toDate="2025-12-31">
+<ChangeInNAV startingValue="100" endingValue="110" twr="10.0" /></FlexStatement>
+<FlexStatement accountId="U1" fromDate="2026-01-02" toDate="2026-01-02">
+<ChangeInNAV startingValue="110" endingValue="121" twr="10.0" /></FlexStatement>
+<FlexStatement accountId="U1" fromDate="2026-02-02" toDate="2026-02-02">
+<ChangeInNAV startingValue="121" endingValue="108.9" twr="-10.0" /></FlexStatement>
+<FlexStatement accountId="U1" fromDate="2026-02-03" toDate="2026-02-03">
+<ChangeInNAV startingValue="108.9" endingValue="119.79" twr="10.0" /></FlexStatement>
+</FlexStatements></FlexQueryResponse>"""
+
+
+def test_period_return_chains_only_the_days_inside_the_window():
+    """The store keeps one TWR per IMPORT, so a trailing-twelve-month pull can only
+    report twelve months; reading that as year-to-date is a different question
+    wearing the right label. The daily breakout is what makes an exact window
+    answerable."""
+    from financial_research_assistant import flex
+
+    r = flex.period_return(start="2026-01-01", xml=_DAILY_XML)
+    assert (r["start"], r["end"], r["sessions"]) == ("2026-01-02", "2026-02-03", 3)
+    # 1.10 * 0.90 * 1.10 - 1 = 8.9%, NOT the whole file's 19.79%.
+    assert round(r["return_pct"], 6) == 8.9
+    assert round(r["file_return_pct"], 6) == 19.79
+
+
+def test_period_return_cross_checks_each_day_against_its_own_nav():
+    """The check must be INDEPENDENT. Comparing our chain of the file against the
+    file's own chained TWR proves nothing — the store derives that figure by
+    chaining these same rows, so it is one computation on both sides. An earlier
+    version did exactly that and called it verification. This compares each day's
+    stated twr against the return implied by that day's NAV attributes, which IBKR
+    reports separately."""
+    from financial_research_assistant import flex
+
+    r = flex.period_return(start="2026-01-01", xml=_DAILY_XML)
+    # File-wide, not window-scoped: it is a property of the SOURCE.
+    assert (r["reconciled"], r["checked"]) == (4, 4)
+
+    # A day whose stated twr contradicts its own NAV numbers is counted as failing.
+    broken = _DAILY_XML.replace(
+        '<ChangeInNAV startingValue="121" endingValue="108.9" twr="-10.0" />',
+        '<ChangeInNAV startingValue="121" endingValue="108.9" twr="-3.0" />',
+    )
+    b = flex.period_return(start="2026-01-01", xml=broken)
+    assert (b["reconciled"], b["checked"]) == (3, 4)
+
+
+def test_period_return_refuses_a_window_the_file_does_not_reach():
+    """Answering for a different span than the one asked for is the failure this
+    whole tool exists to prevent."""
+    from financial_research_assistant import flex
+
+    with pytest.raises(flex.FlexError, match="does not reach"):
+        flex.period_return(start="2020-01-01", end="2020-12-31", xml=_DAILY_XML)
+
+
+def test_period_return_says_so_when_the_query_has_no_daily_breakout():
+    from financial_research_assistant import flex
+
+    xml = ('<FlexQueryResponse queryName="r" type="AF"><FlexStatements count="1">'
+           '<FlexStatement accountId="U1" fromDate="2026-01-01" toDate="2026-08-07">'
+           "<ChangeInNAV startingValue='1' endingValue='2' /></FlexStatement>"
+           "</FlexStatements></FlexQueryResponse>")
+    with pytest.raises(flex.FlexError, match="Breakout by Day"):
+        flex.period_return(xml=xml)
+
+
+def test_period_return_states_the_money_side_of_the_window():
+    """TWR is deposit-independent BY CONSTRUCTION, so capital cannot be recovered
+    from it. A sheet tried anyway — back-solving "capital deployed" as
+    NAV / (1 + TWR) and subtracting — and reported a $13,480 investment gain
+    against a true $3,215. Stating NAV, deposits and the gain leaves nothing to
+    derive."""
+    from financial_research_assistant import flex
+
+    xml = _DAILY_XML.replace(
+        '<ChangeInNAV startingValue="110" endingValue="121" twr="10.0" />',
+        '<ChangeInNAV startingValue="110" endingValue="171" twr="10.0" '
+        'depositsWithdrawals="50" />',
+    )
+    r = flex.period_return(start="2026-01-01", xml=xml)
+    assert r["nav_start"] == 110.0
+    assert r["deposits"] == 50.0
+    # NAV rose 110 -> 119.79 across the window, 50 of which was deposited.
+    assert round(r["investment_gain"], 2) == round(r["nav_end"] - 110.0 - 50.0, 2)

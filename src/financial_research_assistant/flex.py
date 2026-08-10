@@ -487,6 +487,157 @@ def _chain_twr(statements: list[Any]) -> str:
     return f"{(factor - 1) * 100}%" if seen else ""
 
 
+#: How far a day's stated TWR may sit from the return its own NAV attributes
+#: imply before it stops counting as reconciled. Not zero: a day carrying a cash
+#: flow legitimately differs, because the broker times the flow intraday while the
+#: NAV attributes are end-of-day. On a real 261-session file, 251 land inside this
+#: and the 10 that do not are exactly the flow days.
+_RECONCILE_TOLERANCE_PP = 0.01
+
+
+def latest_statement_file() -> Path | None:
+    """The newest saved Flex XML, or None when none has been pulled yet."""
+    try:
+        files = sorted(flex_dir().glob("flex-*.xml"))
+    except OSError:
+        return None
+    return files[-1] if files else None
+
+
+def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, Any]:
+    """Time-weighted return over an arbitrary window, from the daily Flex file.
+
+    The store keeps one TWR per IMPORT, so the finest period it can answer for is
+    whatever window was pulled — for a trailing-twelve-month query that is twelve
+    months, and there is no way to ask it for "this year". Reading it as a
+    year-to-date figure is then a category error that looks like a number: 19.35%
+    against a true 7.64%. That gap is not a rounding difference, it is a different
+    question.
+
+    With Breakout by Day the saved XML holds one ``<ChangeInNAV twr=...>`` per
+    business day, which is enough to answer any window inside the file. Returns
+    compound, so the days are chain-linked rather than summed.
+
+    ``reconciled``/``checked`` is the independent check. Each day's stated ``twr``
+    is compared against the return implied by the SAME day's NAV attributes,
+    ``(endingValue - startingValue - depositsWithdrawals) / startingValue`` —
+    numbers IBKR reports separately. Agreement means we are chaining the field we
+    think we are.
+
+    Comparing our chain of the file against the file's own chained TWR would prove
+    nothing: the store derives that figure by chaining these same daily rows, so
+    it is the same computation on both sides. (An earlier version of this did
+    exactly that and called it verification.) Days carrying a cash flow are
+    expected to differ slightly, since the broker times the flow intraday while
+    the NAV attributes are end-of-day; ``reconciled`` is a ratio, not a demand for
+    perfection.
+
+    ``start`` defaults to 1 January of the file's last session (year to date) and
+    ``end`` to that session. Returns the window actually covered, since a request
+    for dates the file does not reach must not silently answer for a different
+    span.
+    """
+    if not xml:
+        path = latest_statement_file()
+        if path is None:
+            raise FlexError(
+                "no saved Flex statement to measure — run a Flex sync first "
+                "(the daily breakout is what makes an arbitrary window possible)."
+            )
+        xml = path.read_text(encoding="utf-8")
+    root = ET.fromstring(xml)
+    if root.tag != "FlexQueryResponse":
+        raise FlexError(f"not a Flex statement (root <{root.tag}>)")
+
+    days: list[tuple[str, float]] = []
+    flows: dict[str, float] = {}
+    navs: dict[str, tuple[float, float]] = {}
+    checked = reconciled = 0
+    for stmt in root.iter("FlexStatement"):
+        nav = stmt.find("ChangeInNAV")
+        raw = (nav.get("twr") or "").strip() if nav is not None else ""
+        if not raw:
+            continue
+        try:
+            twr = float(raw)
+            day = _iso_date(stmt.get("toDate") or "")
+            days.append((day, twr))
+        except (ValueError, FlexError):
+            continue
+        flows[day] = flows.get(day, 0.0) + _fnum(nav, "depositsWithdrawals")
+        navs[day] = (_fnum(nav, "startingValue"), _fnum(nav, "endingValue"))
+        start_value = _fnum(nav, "startingValue")
+        if start_value > 0:
+            checked += 1
+            implied = (
+                _fnum(nav, "endingValue") - start_value - _fnum(nav, "depositsWithdrawals")
+            ) / start_value * 100
+            if abs(implied - twr) <= _RECONCILE_TOLERANCE_PP:
+                reconciled += 1
+    if not days:
+        raise FlexError(
+            "the saved Flex statement carries no daily returns — switch the query's "
+            "Period to 'Breakout by Day' so each session reports its own TWR."
+        )
+    days.sort()
+
+    def chain(rows: list[tuple[str, float]]) -> float:
+        factor = 1.0
+        for _d, t in rows:
+            factor *= 1 + t / 100
+        return (factor - 1) * 100
+
+    last = days[-1][0]
+    start = start or f"{last[:4]}-01-01"
+    end = end or last
+    window = [d for d in days if start <= d[0] <= end]
+    if not window:
+        raise FlexError(
+            f"the saved statement covers {days[0][0]} to {last}, which does not "
+            f"reach {start}..{end} — pull a Flex query spanning the window you want."
+        )
+
+    peak = cum = 1.0
+    drawdown = 0.0
+    for _d, t in window:
+        cum *= 1 + t / 100
+        peak = max(peak, cum)
+        drawdown = min(drawdown, cum / peak - 1)
+
+    by_month: dict[str, list[tuple[str, float]]] = {}
+    for d, t in window:
+        by_month.setdefault(d[:7], []).append((d, t))
+
+    # The money side of the same window. Reported here because it is the ONE
+    # thing a time-weighted return cannot be asked for: TWR is deposit-independent
+    # by construction, so capital cannot be recovered from it. A sheet tried
+    # anyway — back-solving "capital deployed" as NAV / (1 + TWR) and subtracting
+    # — and produced a $13,480 investment gain against a true $3,215.
+    deposits = sum(v for d, v in flows.items() if window[0][0] <= d <= window[-1][0])
+    nav_start = navs[window[0][0]][0]
+    nav_end = navs[window[-1][0]][1]
+    return {
+        "start": window[0][0],
+        "end": window[-1][0],
+        "sessions": len(window),
+        "return_pct": chain(window),
+        "nav_start": nav_start,
+        "nav_end": nav_end,
+        "deposits": deposits,
+        "investment_gain": nav_end - nav_start - deposits,
+        "max_drawdown_pct": drawdown * 100,
+        "best_session_pct": max(t for _d, t in window),
+        "worst_session_pct": min(t for _d, t in window),
+        "up_sessions": sum(1 for _d, t in window if t > 0),
+        "monthly_pct": {m: chain(rows) for m, rows in sorted(by_month.items())},
+        "file_start": days[0][0],
+        "file_end": last,
+        "file_return_pct": chain(days),
+        "checked": checked,
+        "reconciled": reconciled,
+    }
+
+
 def _nav_rows(statements: list[Any]) -> list[dict[str, Any]]:
     """Build per-asset-class NAV rows spanning every statement in the file.
 

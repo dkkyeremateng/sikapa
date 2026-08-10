@@ -815,7 +815,8 @@ def query_transactions(
                 params.append(account)
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
             q = f"SELECT * FROM trades{where} ORDER BY import_id DESC, id DESC LIMIT ?"
-            for r in conn.execute(q, [*params, cap]).fetchall():
+            rows = conn.execute(q, [*params, cap]).fetchall()
+            for r in _dedupe_across_imports(rows):
                 out.append({"kind": "trade", **{k: r[k] for k in r.keys()}})
         if kind is None or kind in cash_kinds:
             clauses, params = [], []
@@ -829,8 +830,12 @@ def query_transactions(
                 clauses.append("account = ?")
                 params.append(account)
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            # Overlapping statements repeat the same movement — listing them raw
+            # showed each 2026 deposit twice, so anything summing this view read
+            # $35,000 of transfers against a true $17,500.
             q = f"SELECT * FROM cash{where} ORDER BY import_id DESC, id DESC LIMIT ?"
-            for r in conn.execute(q, [*params, cap]).fetchall():
+            rows = conn.execute(q, [*params, cap]).fetchall()
+            for r in _dedupe_across_imports(rows, key=_cash_key):
                 out.append({k: r[k] for k in r.keys()})
         if kind in (None, "corporate_action"):
             clauses, params = [], []
@@ -1181,18 +1186,64 @@ def _trade_key(row: Any) -> tuple[Any, ...]:
     )
 
 
-def _dedupe_across_imports(rows: list[Any]) -> list[Any]:
-    """Drop trades that appear in more than one import of the same period.
+#: Cash kinds whose description names a SECURITY, so it belongs in their identity:
+#: two holdings can pay the same amount on the same day, and merging those would
+#: under-count. Everything else — a transfer — has no security, and its
+#: description is only the broker's wording for the mechanism.
+_DESCRIBED_CASH_KINDS = {"dividend", "withholding_tax", "fee"}
+
+
+def _cash_key(row: Any) -> tuple[Any, ...]:
+    """The natural identity of a cash movement.
+
+    Same account, date, kind, currency and amount is the same movement, however
+    many statements reported it — plus the description where that names the
+    security.
+
+    Kind-aware because the two exports word transfers differently for the same
+    event: the CSV writes "Electronic Fund Transfer" and the Flex XML writes
+    "CASH RECEIPTS / ELECTRONIC FUND TRANSFERS". Keying deposits on description
+    let every one of them through twice, so YTD deposits read $35,000 against a
+    true $17,500. Dividends survived only because the two spellings differ by
+    case alone and `.upper()` happened to close the gap — which is why the first
+    version of this looked correct: the number being checked was the one that
+    worked.
+
+    Two genuine same-day, same-amount transfers are still both kept: multiplicity
+    WITHIN one import is preserved by `_dedupe_across_imports`, so only
+    cross-import repeats collapse.
+    """
+    described = (row["kind"] or "") in _DESCRIBED_CASH_KINDS
+    return (
+        row["account"],
+        row["date"] or "",
+        row["kind"] or "",
+        row["currency"] or "",
+        (row["description"] or "").strip().upper() if described else "",
+        round(row["amount"] or 0.0, 8),
+    )
+
+
+def _dedupe_across_imports(rows: list[Any], key=_trade_key) -> list[Any]:
+    """Drop rows that appear in more than one import of an overlapping period.
 
     Statements OVERLAP. Import an annual statement and any of the monthlies inside
     it and every trade in the covered month is stored twice — which doubles the
     open lots, the realized gains and the harvestable losses computed from them,
     with nothing in the output to hint at it.
 
+    The same is true of CASH, and for a long time only trades were reconciled:
+    a trailing-twelve-month Flex pull sitting alongside a year-to-date CSV of the
+    same months reported every dividend, withholding tax, fee and deposit twice,
+    so ``income_summary`` returned exactly double. Nothing about the output looked
+    wrong — a doubled dividend is still a plausible dividend, which is why it took
+    a reconciliation against the broker's own XML to see it. Hence ``key``: the
+    reconciliation is the same, only the notion of identity differs.
+
     ``query_performance_history`` reconciles the same overlap by DROPPING whole
     periods (finest resolution wins), which is right for chaining returns and
     wrong here: dropping the annual statement in favour of one monthly would
-    discard the other eleven months of trades. So the reconciliation is per-trade
+    discard the other eleven months of rows. So the reconciliation is per-row
     instead.
 
     Multiplicity within a single import is preserved: two genuinely identical
@@ -1202,17 +1253,17 @@ def _dedupe_across_imports(rows: list[Any]) -> list[Any]:
 
     per_import: dict[Any, Counter[tuple[Any, ...]]] = defaultdict(Counter)
     for r in rows:
-        per_import[r["import_id"]][_trade_key(r)] += 1
+        per_import[r["import_id"]][key(r)] += 1
     keep: Counter[tuple[Any, ...]] = Counter()
     for counts in per_import.values():
-        for key, n in counts.items():
-            keep[key] = max(keep[key], n)
+        for k, n in counts.items():
+            keep[k] = max(keep[k], n)
     taken: Counter[tuple[Any, ...]] = Counter()
     out = []
     for r in rows:
-        key = _trade_key(r)
-        if taken[key] < keep[key]:
-            taken[key] += 1
+        k = key(r)
+        if taken[k] < keep[k]:
+            taken[k] += 1
             out.append(r)
     return out
 
@@ -1484,11 +1535,15 @@ def income_summary(year: int | None = None, account: str | None = None) -> dict[
             params.append(account)
         where = " WHERE " + " AND ".join(clauses)
         rows = conn.execute(
-            f"SELECT kind, currency, date, description, amount FROM cash{where}",
+            f"SELECT import_id, account, kind, currency, date, description, amount "
+            f"FROM cash{where} ORDER BY id",
             params,
         ).fetchall()
     finally:
         conn.close()
+    # Overlapping statements report the same dividend twice — see
+    # `_dedupe_across_imports`. Summing raw rows returned exactly double.
+    rows = _dedupe_across_imports(rows, key=_cash_key)
 
     field = {"dividend": "gross_dividends", "withholding_tax": "withholding_tax",
              "fee": "fees"}
