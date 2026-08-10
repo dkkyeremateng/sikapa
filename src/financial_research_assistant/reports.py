@@ -1347,6 +1347,11 @@ _TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 
 
+#: A magnitude suffix immediately after the number: 115.2B, €38.6bn, 980M, 1.2T.
+#: Anchored to the number's end so a stray capital in prose ("$4.98 Beat") is not
+#: read as billions.
+_SCALE_RE = re.compile(r"\d\s*(k|m|bn?|t)\b", re.IGNORECASE)
+
 #: ``(2.30)`` — accounting notation for a negative, and the default in anything
 #: transcribed from a financial statement. Read as positive it does not merely
 #: misstate the magnitude, it points the bar the wrong way: a cash burn charts as
@@ -1377,6 +1382,16 @@ def _cell_number(cell: str) -> tuple[float, str] | None:
     if sign in ("-", "−") or _ACCOUNTING_NEG_RE.match(text):
         value = -value
     unit = "%" if pct else ("$" if "$" in text else "")
+    # The MAGNITUDE travels with the unit. Dropped, "$115.2B" charted as "$115.20"
+    # — a figure a billion times smaller than the source, and one that reads as
+    # perfectly ordinary. The value itself stays as written, so it remains a token
+    # of the source; only the label gains the suffix back.
+    scale = _SCALE_RE.search(text)
+    if scale and not pct:
+        # Normalised to ONE letter: "bn" left a two-character unit that the
+        # formatter's single-character check could not see, so the suffix was
+        # dropped again one layer further on.
+        unit += scale.group(1).upper()[0]
     return value, unit
 
 
@@ -1675,12 +1690,16 @@ def _fmt_value(value: float, unit: str, signed: bool) -> str:
     cent the source did not have, never drop one it did.
     """
     sign = "+" if signed and value > 0 else ("-" if value < 0 else "")
+    # A trailing K/M/B/T is the magnitude the source wrote; it goes back on the
+    # label, and `unit` reduces to the currency or percent it was before.
+    scale = unit[-1] if unit[-1:] in ("K", "M", "B", "T") else ""
+    unit = unit[:-1] if scale else unit
     if unit == "$":
         text = f"{abs(value):,.2f}".removesuffix(".00")
-        return f"{sign}${text}"
+        return f"{sign}${text}{scale}"
     if unit == "%":
         return f"{sign}{abs(value):.1f}%"
-    return f"{sign}{abs(value):,.2f}"
+    return f"{sign}{abs(value):,.2f}{scale}"
 
 
 def _is_diverging(series: dict[str, Any]) -> bool:

@@ -1173,3 +1173,62 @@ async def test_fake_mode_never_retracts():
 
     claim = "✅ Report sent to Telegram."
     assert await settle_delivery_claim(claim, set(), fake=True) == claim
+
+
+async def test_a_requested_report_that_never_appeared_is_noted():
+    """The silent half of the claim problem: a turn can answer in chat and read as
+    complete when a file was asked for. The claim check alone missed it, because
+    there was no claim to check."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    for ask in (
+        "Produce my year-to-date portfolio performance review and send it to Telegram.",
+        "generate a report for last month",
+        "send me a PDF of my holdings",
+        "make me a one-pager on NVO",
+    ):
+        out = await settle_delivery_claim(
+            "Your YTD return is +7.64%.", set(), user_msg=ask
+        )
+        assert "no report was produced" in out.lower(), ask
+
+
+async def test_an_ordinary_question_is_not_a_report_request():
+    """Over-flagging would train the note to be ignored. A bare "review" and
+    "summary" are excluded for that reason, and word order matters: "review my
+    portfolio" is an instruction to analyse, not a request for a sheet."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    answer = "Your YTD return is +7.64%."
+    for ask in (
+        "What is my YTD return?",
+        "Summarise my holdings.",
+        "Review my portfolio concentration.",
+        "Give me the top five holdings by weight.",
+        # Pairs a request verb WITH the word "review" and wants no file — the
+        # case that a bare "review" in the artifact list would misread.
+        "Make sure to review the concentration risk.",
+    ):
+        assert await settle_delivery_claim(answer, set(), user_msg=ask) == answer, ask
+
+
+async def test_a_report_that_was_rendered_draws_no_note():
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    ask = "Produce my year-to-date portfolio performance review and send it to Telegram."
+    answer = "Done — here it is."
+    assert await settle_delivery_claim(
+        answer, {"render_review"}, user_msg=ask
+    ) == answer
+
+
+async def test_a_false_claim_gets_the_retraction_not_the_omission_note():
+    """One note, not two: the retraction already says nothing was produced."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    out = await settle_delivery_claim(
+        "Report sent to Telegram.", set(),
+        user_msg="Produce my portfolio performance review and send it to Telegram.",
+    )
+    assert "no report was produced or sent" in out.lower()
+    assert "You asked for one" not in out

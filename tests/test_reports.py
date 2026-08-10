@@ -47,7 +47,9 @@ def test_an_unsigned_two_digit_table_cell_keeps_its_leading_digit():
     assert reports._cell_number("11.65") == (11.65, "")
     assert reports._cell_number("+11.4%") == (11.4, "%")
     assert reports._cell_number("-4.8%") == (-4.8, "%")
-    assert reports._cell_number("$208.7B") == (208.7, "$")
+    # The unit carries the magnitude now — see the scale test below. The VALUE
+    # is what this test is about, and it is unchanged.
+    assert reports._cell_number("$208.7B") == (208.7, "$B")
     assert reports._cell_number("1,234.5") == (1234.5, "")
 
 
@@ -1622,3 +1624,39 @@ def test_a_bullet_too_short_to_be_an_observation_is_still_skipped():
 def test_a_paragraph_is_not_an_observation():
     """Past a point a "bullet" is a paragraph, and the cover is a summary sheet."""
     assert reports.extract_notes("## Notes\n- " + "word " * 200 + "\n", set()) == []
+
+
+def test_a_magnitude_suffix_survives_onto_the_bar_label():
+    """Dropped, "$115.2B" charted as "$115.20" — a figure a billion times smaller
+    than the source, and one that reads as perfectly ordinary."""
+    assert reports._cell_number("$115.2B") == (115.2, "$B")
+    assert reports._fmt_value(115.2, "$B", False) == "$115.20B"
+    # "bn" normalises to one letter, or the formatter cannot see the suffix.
+    assert reports._cell_number("€38.6bn")[1] == "B"
+    assert reports._fmt_value(38.6, "B", False) == "38.60B"
+    for cell, unit in (("980M", "M"), ("1.2T", "T")):
+        assert reports._cell_number(cell)[1] == unit
+
+
+def test_a_capital_letter_in_prose_is_not_a_magnitude():
+    """Anchored to the number's end, so "$4.98 Beat" is not read as billions."""
+    assert reports._cell_number("$4.98 Beat") == (4.98, "$")
+    assert reports._cell_number("2.5yr coverage") == (2.5, "")
+
+
+def test_a_billions_table_charts_with_its_scale():
+    series = reports.extract_series(
+        "## Segment Revenue\n| Segment | Revenue |\n|---|---|\n"
+        "| Data centre | $115.2B |\n| Gaming | $11.4B |\n| Automotive | $1.7B |\n"
+    )[0]
+    assert series["unit"] == "$B"
+    assert reports._fmt_value(series["items"][0][1], series["unit"], False) == "$115.20B"
+
+
+def test_mixed_magnitudes_in_one_column_do_not_share_an_axis():
+    """$980M drawn beside $115.2B would be the longer bar. Refusing is the honest
+    outcome — the existing mixed-unit rule now sees the scale too."""
+    assert reports.extract_series(
+        "## Revenue\n| Segment | Revenue |\n|---|---|\n"
+        "| Data centre | $115.2B |\n| Gaming | $980.0M |\n| Automotive | $1.7B |\n"
+    ) == []

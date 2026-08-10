@@ -112,18 +112,28 @@ def _yahoo_range(days: int) -> str:
     return "max"
 
 
-def _parse_yahoo_json(text: str) -> list[tuple[str, float]]:
+def _parse_yahoo_json(text: str, adjusted: bool = False) -> list[tuple[str, float]]:
     """Parse the Yahoo chart JSON into an oldest→newest list of ``(date,
     close)``. A missing result (unknown symbol) or a null close yields no row,
-    so a bad ticker returns an empty list rather than raising."""
+    so a bad ticker returns an empty list rather than raising.
+
+    ``adjusted=True`` takes ``adjclose`` instead — the same series with dividends
+    reinvested — which is what a TOTAL-return comparison needs. Falls back to
+    plain closes when the response carries no adjusted array, so a benchmark is
+    never silently dropped for want of one field.
+    """
     chart = (json.loads(text) or {}).get("chart") or {}
     results = chart.get("result")
     if not results:
         return []
     res = results[0]
     timestamps = res.get("timestamp") or []
-    quote = ((res.get("indicators") or {}).get("quote") or [{}])[0]
-    closes = quote.get("close") or []
+    indicators = res.get("indicators") or {}
+    closes = ((indicators.get("quote") or [{}])[0]).get("close") or []
+    if adjusted:
+        adj = ((indicators.get("adjclose") or [{}])[0]).get("adjclose") or []
+        if len(adj) == len(timestamps):
+            closes = adj
     rows: list[tuple[str, float]] = []
     for ts, close in zip(timestamps, closes):
         if close is None:
@@ -161,7 +171,7 @@ def _price_ttl() -> float:
 
 def _fetch_daily(
     symbol: str, days: int, timeout: float = 15.0, *, strict: bool = False,
-    as_of: date | None = None,
+    as_of: date | None = None, adjusted: bool = False,
 ) -> list[tuple[str, float]]:
     """Fetch daily ``(date, close)`` history for ``symbol`` from Yahoo Finance,
     with a same-process TTL cache and one retry on transient failure.
@@ -192,19 +202,24 @@ def _fetch_daily(
     separately."""
     sym = symbol.strip().upper()
     rng = _yahoo_range(lookback_days(days, as_of))
-    key = (sym, rng)
+    # `adjusted` is part of the key: the two series differ by every dividend paid,
+    # and sharing one cache slot would hand a caller asking for total return
+    # whichever kind happened to be fetched first.
+    key = (sym, rng, adjusted)
     ttl = _price_ttl()
     cached = _PRICE_CACHE.get(key)
     if cached is not None and ttl > 0 and (time.time() - cached[1]) < ttl:
         return as_of_series(cached[0], as_of, days)
     url = _YF_URL.format(sym=urllib.parse.quote(sym), rng=rng)
+    if adjusted:
+        url += "&events=div%2Csplit&includeAdjustedClose=true"
     req = urllib.request.Request(url, headers={"User-Agent": _YF_UA})
     last_exc: Exception | None = None
     for _ in range(2):  # one retry — Yahoo occasionally 5xx/timeouts
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
                 text = resp.read().decode("utf-8", "replace")
-            series = _parse_yahoo_json(text)
+            series = _parse_yahoo_json(text, adjusted=adjusted)
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 # Definitive "no such symbol" — a valid answer, not an outage; the
@@ -1435,7 +1450,12 @@ def portfolio_vs_benchmark(benchmark: str = "SPY", account: str = "") -> str:
     # lands entirely after it.
     reach = (date.today() - date.fromisoformat(start)).days + _BENCH_FETCH_MARGIN_DAYS
     try:
-        bench = _fetch_daily(benchmark, max(5, reach), strict=True)
+        # TOTAL return, not price return. A time-weighted portfolio return already
+        # includes the dividends it received, so comparing it against a benchmark's
+        # price alone charges the benchmark nothing for its own payouts and flatters
+        # it by roughly its yield each year — about 1.2%/yr for SPY, which over a
+        # 2.5-year window is most of a percentage point of a gap being read as skill.
+        bench = _fetch_daily(benchmark, max(5, reach), strict=True, adjusted=True)
     except PriceDataUnavailable:
         return (
             f"Portfolio return over {start} → {end} was {port_ret:+.2f}%, but the "
@@ -1460,8 +1480,9 @@ def portfolio_vs_benchmark(benchmark: str = "SPY", account: str = "") -> str:
         f"  portfolio (TWRR)   {port_ret:+.2f}%\n"
         f"  {benchmark.upper():<18} {bench_ret:+.2f}%\n"
         f"  you {verdict} by {abs(diff):.2f} percentage points.\n"
-        f"(TWRR is deposit-independent; benchmark is price return, dividends not "
-        f"reinvested — treat as an approximate comparison.)"
+        f"(Both sides are TOTAL return: TWRR is deposit-independent and includes "
+        f"the dividends your holdings paid; the benchmark is dividend-adjusted so "
+        f"it is charged for its own.)"
     )
 
 
