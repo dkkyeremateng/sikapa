@@ -142,6 +142,80 @@ def test_the_cover_and_the_document_both_show_the_verdict():
         assert "$32.00 – $38.00" in html.split('<div class="body">')[0]
 
 
+# --- the call: buy, sell or hold ------------------------------------------------
+
+
+def test_a_stance_carries_its_tone_and_reason():
+    assert reports.parse_stance("HOLD") == {"label": "HOLD", "tone": "hold", "note": ""}
+    assert reports.parse_stance("buy")["tone"] == "pos"
+    assert reports.parse_stance("underweight")["tone"] == "neg"
+    got = reports.parse_stance("Strong Buy | franchise intact")
+    assert got["label"] == "STRONG BUY", "the longest phrase wins over a prefix of it"
+    assert got["note"] == "franchise intact"
+
+
+def test_a_stance_we_cannot_colour_is_refused_rather_than_guessed():
+    """Badging the wrong tone on this field is worse than omitting it, so an
+    unknown word produces no badge — and `render_report` says why."""
+    assert reports.parse_stance("maybe") is None
+    assert reports.parse_stance("") is None
+
+
+def test_an_unrecognised_stance_is_reported_not_swallowed():
+    out = reports.render_report(
+        "t", "- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n",
+        stance="probably fine", deliver=False,
+    )
+    assert "No stance badge" in out and "probably fine" in out
+
+
+def test_a_stance_heading_is_read_but_a_stance_bullet_is_not():
+    """The NVO report carried `Rating: BUY` as a bullet under Analyst Consensus —
+    the street's view, which it argued was stale before concluding HOLD. Reading
+    bullets would badge the sheet with the opinion it existed to disagree with."""
+    assert reports.stance_of("", "## Rating: HOLD (trim 50%)")["label"] == "HOLD"
+    assert reports.stance_of("", "- Rating: BUY (consensus 2.43)") is None
+
+
+def test_an_explicit_stance_beats_a_heading():
+    assert reports.stance_of("SELL", "## Rating: BUY")["label"] == "SELL"
+
+
+def test_the_badge_is_drawn_on_both_the_cover_and_the_document():
+    md = "## Fear Price: $32.00\n\n- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+    for html in (reports.build_html("NVO", md, stance="HOLD | trim 50% at $40"),
+                 reports.build_infographic_html("NVO", md, stance="HOLD | trim 50% at $40")):
+        assert '<span class="pill hold">HOLD</span>' in html
+        assert "trim 50% at $40" in html.split('<div class="rule">')[0]
+
+
+def test_the_emitted_stylesheet_survives_templating():
+    """The badge's markup can be perfect while its CSS is dead. `_STANCE_CSS` is
+    spliced in as a `.format()` VALUE, and a value is not re-processed — doubled
+    braces reached the stylesheet as `.stance{{...}}`, so every rule was dropped
+    and the badge rendered as unstyled text run together with its reason. Asserting
+    on the markup alone passed throughout."""
+    for html in (reports.build_html("t", "x", stance="BUY"),
+                 reports.build_infographic_html("t", "x", stance="BUY")):
+        assert ".stance{display:flex" in html
+        assert ".stance .pill.pos{color:var(--pos)" in html
+        assert "{{" not in html and "}}" not in html, "unprocessed format braces"
+
+
+def test_the_badge_tone_follows_the_verdict():
+    for verdict, tone in (("BUY", "pos"), ("SELL", "neg"), ("HOLD", "hold")):
+        html = reports.build_infographic_html("t", "x", stance=verdict)
+        assert f'<span class="pill {tone}">{verdict}</span>' in html
+
+
+def test_a_stance_is_escaped_like_every_other_model_supplied_string():
+    html = reports.build_infographic_html("t", "x", stance="BUY | <script>alert(1)</script>")
+    # Scoped to the badge: the template ends with its own measuring <script>, so a
+    # whole-document check would pass on that and prove nothing about the stance.
+    badge = html.split('<div class="stance">')[1].split("</div>")[0]
+    assert "<script>" not in badge and "&lt;script&gt;" in badge
+
+
 # --- the document ---------------------------------------------------------------
 
 

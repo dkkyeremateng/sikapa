@@ -851,6 +851,21 @@ rendering bug.
 The body is ordinary markdown: headings, tables, and `>` for a warning callout.
 Files land in `~/.financial-research-assistant/reports`.
 
+**The call gets a badge.** `stance="HOLD | trim 50% at $40–$42"` puts a
+colour-coded pill under the title on both the image and the PDF — buy /
+accumulate / overweight read positive, sell / reduce / trim / underweight
+negative, hold / neutral / watch neutral. What to do about a stock is the
+reader's first question, and a stance is the one thing on the sheet that is not a
+figure, so it gets its own element rather than a stat tile. A stance written as a
+heading (`## Rating: SELL`) is picked up automatically; a word the palette cannot
+tone is refused outright and reported back, because badging the wrong colour on
+this field is worse than leaving it off.
+
+The badge is **this report's own call**, not the street's. When they disagree —
+the interesting case — put the consensus in a tile
+(`Analyst Consensus | BUY | 12 analysts, mean $47.28`) and the sheet shows both
+instead of quietly picking one.
+
 **A verdict written as a heading still reaches the cover.** A heading shaped
 `## Fear Price: $32.00 – $38.00` — a fear price, fair value, or price target —
 is promoted to a stat tile on both the image and the PDF, taking the last tile's
