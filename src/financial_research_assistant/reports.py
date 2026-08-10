@@ -1737,8 +1737,11 @@ def _bars_html(series: dict[str, Any]) -> str:
 _MIN_NOTE = 24
 #: Past this a "bullet" is a paragraph, and the cover is a summary sheet.
 _MAX_NOTE = 420
-#: How much of one reaches the cover; the rest is in the document.
-_NOTE_DISPLAY = 190
+#: How much of one reaches the cover; the rest is in the document. Sized from real
+#: output rather than guessed: the agent's observations run 185-215 characters, so
+#: 190 clipped almost every one of them a few words from the end — "Top-5
+#: concentration is…" cut immediately before its number. All five fit at this.
+_NOTE_DISPLAY = 240
 
 
 def extract_notes(markdown: str, used_titles: set[str]) -> list[str]:

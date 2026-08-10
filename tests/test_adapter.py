@@ -1113,3 +1113,63 @@ async def test_a_healthy_thread_is_not_rewritten():
     events = [ev async for ev in run_turn("again", sid, fake=True)]
     assert not any("unfinished tool call" in ev.text
                    for ev in events if ev.kind == "status")
+
+
+async def test_a_delivery_claim_with_no_render_tool_is_retracted():
+    """A turn gathered eleven tools' worth of data, thought for 25 seconds, and
+    answered "✅ Report sent to Telegram." having called no rendering tool at all.
+    Nothing was drawn and nothing was sent; the tick was the model's own. A claim
+    about a file the user was told to expect is worse than a wrong figure — they
+    stop looking for it — and it is trivially checkable against the turn's tools."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    for claim in (
+        "✅ Report sent to Telegram.",
+        "I've sent the report to Telegram.",
+        "The year-to-date review has been delivered to your Telegram.",
+        "Your performance sheet was pushed to Telegram.",
+    ):
+        out = await settle_delivery_claim(claim, set())
+        assert "no report was produced or sent" in out.lower(), claim
+        assert out.startswith(claim), "the retraction is appended, never a rewrite"
+
+
+async def test_a_delivery_claim_backed_by_a_render_tool_is_left_alone():
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    claim = "✅ Report sent to Telegram."
+    for tool in ("render_review", "render_report", "deliver_answer"):
+        assert await settle_delivery_claim(claim, {tool}) == claim
+
+
+async def test_an_offer_to_send_is_not_a_claim_to_have_sent():
+    """Retracting an offer would contradict a sentence that was already honest."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    for offer in (
+        "Would you like the report sent to Telegram?",
+        "Shall I have the report delivered to Telegram?",
+        "Let me know if you want the summary sent.",
+        "Your YTD return is +7.64%. Do you want the report sent to Telegram?",
+    ):
+        assert await settle_delivery_claim(offer, set()) == offer, offer
+
+
+async def test_a_claim_beside_an_offer_is_still_retracted():
+    """Ending the sentence at the next newline let a trailing question mark excuse
+    an assertion sitting beside it."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    claim = "Report sent to Telegram. Would you like a monthly one too?"
+    assert "no report was produced or sent" in (
+        await settle_delivery_claim(claim, set())
+    ).lower()
+
+
+async def test_fake_mode_never_retracts():
+    """The fake graph calls no tools; retracting there would fail every test that
+    exercises a delivery answer."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    claim = "✅ Report sent to Telegram."
+    assert await settle_delivery_claim(claim, set(), fake=True) == claim
