@@ -1232,3 +1232,43 @@ async def test_a_false_claim_gets_the_retraction_not_the_omission_note():
     )
     assert "no report was produced or sent" in out.lower()
     assert "You asked for one" not in out
+
+
+# Phrasings taken verbatim from real use, because a list built from imagination
+# missed three of the four ways this user actually asks for a file.
+_REAL_FILE_REQUESTS = [
+    "Produce my year-to-date portfolio performance review and send it to Telegram.",
+    "generate performance review for last month",
+    # "docs" for the artifact, "for telegram" for the channel, and a typo in the
+    # verb — none of which the first pattern covered.
+    "analyse portfolio YTD performance and genrate the docs for telegram",
+    # "show me … as a one-pager": the artifact was listed, the verb was not.
+    "Show me my portfolio allocation as a one-pager",
+]
+
+_REAL_NON_REQUESTS = [
+    "here is the report from this prompt",
+    "check the new report with the same prompt",
+    "What's my YTD return?",
+    # Describes an omission rather than asking for anything; noting one against it
+    # would answer a sentence that was already about the omission.
+    "look into this, the agent didn't generate the report but it says it did",
+    "confirm everthing is working as expected and merge changes to main",
+    "review the llm provider integration and find out why I can't use claude opus",
+]
+
+
+async def test_the_ways_a_file_is_actually_asked_for_are_all_flagged():
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    for ask in _REAL_FILE_REQUESTS:
+        out = await settle_delivery_claim("Here you go.", set(), user_msg=ask)
+        assert "no report was produced" in out.lower(), ask
+
+
+async def test_talking_about_a_report_is_not_asking_for_one():
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    answer = "Here you go."
+    for text in _REAL_NON_REQUESTS:
+        assert await settle_delivery_claim(answer, set(), user_msg=text) == answer, text
