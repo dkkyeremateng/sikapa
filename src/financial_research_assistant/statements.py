@@ -1338,6 +1338,41 @@ def open_lots(
     }
 
 
+def lot_coverage(account: str | None = None) -> list[dict[str, Any]]:
+    """Holdings whose open lots don't account for all the shares held.
+
+    A broker's activity export reaches back a limited window — IBKR's Flex caps
+    activity at a year — so a position opened before it is *held* without the
+    purchase that opened it ever being imported. The position still shows up (it
+    is a current snapshot), and every figure derived from it renders normally;
+    only cost basis, holding period and realized gains are quietly computed from
+    the fraction of the shares that happen to be covered.
+
+    That is the failure this reports: not an error, but the difference between
+    what is held and what the lot book can explain. Returns one entry per short
+    symbol as ``{symbol, held, lots, missing}``, empty when everything reconciles.
+    Uncovered *sells* surface separately as ``realized_gains``'
+    ``unmatched_proceeds``.
+    """
+    held = {p["symbol"]: p["quantity"] for p in query_positions(account=account)}
+    if not held:
+        return []
+    lots = open_lots(account=account)
+    gaps = []
+    for symbol, quantity in sorted(held.items()):
+        covered = sum(lot["qty"] for lot in lots.get(symbol, ()))
+        # Tolerance is a fractional share: brokers report reinvested dividends to
+        # eight decimals and the sums drift in the last place.
+        if quantity - covered > 1e-6:
+            gaps.append({
+                "symbol": symbol,
+                "held": quantity,
+                "lots": covered,
+                "missing": quantity - covered,
+            })
+    return gaps
+
+
 def realized_gains(
     year: int | None = None,
     symbol: str | None = None,

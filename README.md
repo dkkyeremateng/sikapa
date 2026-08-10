@@ -594,11 +594,23 @@ to carry the sections the store reads. Create an **Activity Flex Query** with:
 | Change in NAV | — | carries `TWR`, the only place a time-weighted return appears |
 | Financial Instrument Information | — | conid/ISIN/exchange for the positions join |
 
-Under General Configuration set **Date Format `yyyy-MM-dd`** — holding-period and
-tax-year classification parse these dates, and IBKR's `yyyyMMdd` default silently
-breaks both. `Period` should be **Last 365 Calendar Days** (Flex's cap for activity):
-a shorter window leaves FIFO with no opening lots, which surfaces as
-`unmatched_proceeds` rather than as an error.
+Under General Configuration set **Date Format `yyyy-MM-dd`**. IBKR's `yyyyMMdd`
+default is converted automatically; a day-first or month-first format is refused
+outright, because `03/04/2026` is two different days depending on a setting the file
+doesn't carry and guessing would misdate trades near the start of a month rather
+than fail. `Period` should be **Last 365 Calendar Days** (Flex's cap for activity).
+
+Getting a section wrong is not silent. A section that is selected but empty still
+emits its container, so an absent one means the query never asked — and `--flex-sync`
+names it:
+
+```
+warning: Corporate Actions not in the Flex query — splits will not adjust lots,
+         silently distorting cost basis per share
+```
+
+That one matters most: without it, a year containing an unapplied 3-for-1 looks
+exactly like a year with no splits, and that position's basis per share is trebled.
 
 **Breakout by Day** is optional and expensive. With it on, one pull becomes a
 `<FlexStatement>` per business day — each repeating the full position and security
@@ -606,11 +618,18 @@ list — which is why the parser concatenates trades and cash but takes position
 instruments and the closing NAV from the last statement alone, and chain-links the
 daily TWRs into one figure. One pull is always one import either way.
 
-Two gaps are worth knowing about. NAV is reconciled against the broker's own total,
-and any shortfall (crypto, which IBKR folds into `total` without offering a field
-for it) is booked as an **Other** asset class rather than dropped. And lots opened
-before the 365-day window have no acquisition record, so their sales land in
-`unmatched_proceeds` — import older Activity Statement CSVs to seed them.
+NAV is reconciled against the broker's own total, and any shortfall (crypto, which
+IBKR folds into `total` without offering a field for it) is booked as an **Other**
+asset class rather than dropped.
+
+Lots opened before the 365-day window have no acquisition record. Sales of those
+shares surface as `unmatched_proceeds`; shares still *held* are reported by
+`statements.lot_coverage()` and noted by the `realized_gains` tool, since otherwise
+the position renders normally while its cost basis is computed from whatever
+fraction of the shares happens to be covered. Import older Activity Statement CSVs
+(Reports → Statements → Activity supports a multi-year custom range) to close the
+gap — the store keys imports by `(account, period)`, so overlapping windows dedupe
+rather than double-count.
 
 ## Monitoring digest (cron-friendly, no model)
 

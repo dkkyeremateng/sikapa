@@ -248,6 +248,103 @@ def test_a_genuinely_different_account_keeps_its_own_identity():
     assert accounts == {"U1111111", "U77770000"}
 
 
+# --- query misconfiguration -------------------------------------------------
+
+def test_the_compact_date_format_is_converted_rather_than_sliced():
+    """IBKR's Date Format default is `yyyyMMdd`. Downstream everything takes the
+    first ten characters of a date, so that default slices to `2026-04-0` — a
+    string that is wrong in every comparison and raises in none of them."""
+    from financial_research_assistant import flex
+
+    compact = _FLEX.replace('dateTime="2026-04-01;12:14:23"', 'dateTime="20260401;12:14:23"')
+    compact = compact.replace('fromDate="2026-04-01"', 'fromDate="20260401"')
+    parsed = flex.parse_flex_xml(compact)
+
+    buy = next(t for t in parsed["trades"] if t["quantity"] > 0)
+    assert buy["datetime"] == "2026-04-01, 12:14:23"
+    assert parsed["period"].startswith("April 01, 2026")
+
+
+def test_an_ambiguous_date_format_is_refused_rather_than_guessed():
+    """`03/04/2026` is March 4th or April 3rd depending on a setting the file
+    doesn't carry. Picking one would misdate every trade near the start of a
+    month — wrong holding periods, wrong tax years, and nothing to notice."""
+    from financial_research_assistant import flex
+
+    ambiguous = _FLEX.replace('dateTime="2026-04-01;12:14:23"', 'dateTime="03/04/2026;12:14:23"')
+    with pytest.raises(flex.FlexError, match="yyyy-MM-dd"):
+        flex.parse_flex_xml(ambiguous)
+
+
+def test_a_section_left_out_of_the_query_is_named(parsed):
+    """A section that IS selected but has no activity still emits its container,
+    so an absent one means the query never asked. Corporate Actions is the costly
+    case: without it a year with an unapplied 3-for-1 looks exactly like a year
+    with no splits, and that position's basis per share is silently trebled."""
+    from financial_research_assistant import flex
+
+    assert parsed["warnings"] == []  # the full fixture selects everything
+
+    without = _FLEX.replace("<CorporateActions />", "").replace(
+        "<CorporateActions>", "<Ignored>").replace("</CorporateActions>", "</Ignored>")
+    warnings = flex.parse_flex_xml(without)["warnings"]
+    assert len(warnings) == 1
+    assert "Corporate Actions" in warnings[0] and "splits" in warnings[0]
+
+
+def test_an_empty_section_is_not_mistaken_for_a_missing_one(parsed):
+    """The first statement's `<CorporateActions />` is empty — a real year with no
+    splits. Warning about that would train the reader to ignore the warning."""
+    assert not any("Corporate Actions" in w for w in parsed["warnings"])
+
+
+def test_shares_held_without_an_imported_purchase_are_reported(monkeypatch, tmp_path):
+    """A broker's activity window is finite — Flex caps it at a year — so a
+    position opened before it is held with no purchase on record. The holding
+    still renders and every derived figure looks ordinary; only the basis is
+    computed from whichever fraction of the shares is covered. That silence is
+    what the report exists to break."""
+    from financial_research_assistant import statements
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    # Ten shares held, but only the four bought inside the window were imported.
+    partial = _FLEX_SEGREGATED.replace('symbol="MSFT"', 'symbol="MSFT"').replace(
+        'position="4" markPrice="400"', 'position="10" markPrice="400"')
+    statements.import_statement(partial)
+
+    gaps = {g["symbol"]: g for g in statements.lot_coverage()}
+    assert gaps["MSFT"]["held"] == 10.0
+    assert gaps["MSFT"]["lots"] == 4.0
+    assert gaps["MSFT"]["missing"] == 6.0
+    assert "BTC.USD-PAXOS" not in gaps  # fully covered by its own trade
+
+
+def test_a_fully_covered_book_reports_no_gap(monkeypatch, tmp_path):
+    """The report has to stay quiet when the history is complete, or it becomes
+    noise that gets ignored on the day it matters."""
+    from financial_research_assistant import statements
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    statements.import_statement(_FLEX_SEGREGATED)
+    assert statements.lot_coverage() == []
+
+
+def test_the_gains_tool_surfaces_the_missing_history(monkeypatch, tmp_path):
+    """The gap has to reach the reader, not just the API — realized gains is
+    where an incomplete cost basis actually costs something."""
+    import financial_research_assistant.tools as t
+    from financial_research_assistant import statements
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    partial = _FLEX_SEGREGATED.replace('position="4" markPrice="400"',
+                                       'position="10" markPrice="400"')
+    statements.import_statement(partial)
+    statements.import_statement(_FLEX)  # a sell, so the tool has something to report
+
+    out = t.realized_gains()
+    assert "no imported opening trade" in out and "MSFT" in out
+
+
 # --- routing and failure ----------------------------------------------------
 
 def test_flex_xml_is_detected_by_its_root_tag_not_its_extension(tmp_path):

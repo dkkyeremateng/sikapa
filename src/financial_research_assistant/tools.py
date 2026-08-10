@@ -840,6 +840,17 @@ def realized_gains(year: int = 0, symbol: str = "", account: str = "") -> str:
             f"note: {res['unmatched_proceeds']:,.2f} of sell proceeds had no imported "
             f"opening lot (import the earlier statement for an accurate cost basis)."
         )
+    # The same missing history, seen from the other side: shares still held whose
+    # purchase predates every imported statement. Silent otherwise — the position
+    # renders normally and only its basis is computed from a fraction of it.
+    gaps = statements.lot_coverage(account=account or None)
+    if gaps:
+        detail = ", ".join(f"{g['symbol']} {g['missing']:,.4g} of {g['held']:,.4g}" for g in gaps)
+        lines.append(
+            f"note: some held shares have no imported opening trade ({detail}). "
+            f"Their cost basis and holding period are computed from the covered "
+            f"shares only — import the earlier statements to complete them."
+        )
     return "\n".join(lines)
 
 
