@@ -141,3 +141,95 @@ def test_the_brief_reports_the_money_side_it_was_given(monkeypatch):
     assert "+$329.00" in built["highlights"]
     assert "$-" not in built["highlights"], "the sign belongs outside the $"
     assert "$+" not in built["highlights"], "and never inside it"
+
+
+# --- render_review: the figures are not the model's to write ---------------------
+
+
+def _capture(monkeypatch):
+    """Stand in for `render_report`, recording exactly what it was handed."""
+    from financial_research_assistant import reports, tools
+    seen = {}
+
+    def fake(title, markdown, highlights="", subtitle="", deliver=True,
+             allow_prose=False, theme="", output="", stance=""):
+        seen.update(title=title, markdown=markdown, highlights=highlights,
+                    subtitle=subtitle, deliver=deliver, stance=stance)
+        return "Rendered 1 page(s)."
+
+    monkeypatch.setattr(reports, "render_report", fake)
+    monkeypatch.setattr(tools, "render_review", tools.render_review)  # keep the real one
+    return seen
+
+
+def _brief(monkeypatch):
+    from financial_research_assistant import reviews as rv
+    monkeypatch.setattr(rv, "build_review", lambda period="", account="": {
+        "period_label": "2026 year to date",
+        "title": "Portfolio Performance — 2026 year to date",
+        "subtitle": "2026-01-01 to 2026-08-07 · time-weighted, deposit-independent",
+        "highlights": "Return | +7.64% | time-weighted\nUnrealised P/L | +$7,412.61 | since purchase",
+        "markdown": "## Holdings by Weight\n- **VOO:** 27.2% — $12,530.40\n",
+        "facts": {},
+    })
+
+
+def test_the_figures_come_from_the_brief_not_the_caller(monkeypatch):
+    """Three delivered sheets in a row put $7,410.61 where the source said
+    $7,412.61 — each time because the model rewrote a figure by hand. Here it has
+    no opportunity to: the tiles and body are generated, and `observations` is the
+    only text it supplies."""
+    from financial_research_assistant import tools
+    seen = _capture(monkeypatch)
+    _brief(monkeypatch)
+
+    tools.render_review(period="ytd", observations="April carried the year.")
+    assert "+$7,412.61" in seen["highlights"]
+    assert seen["title"] == "Portfolio Performance — 2026 year to date"
+    assert "## Holdings by Weight" in seen["markdown"]
+    # The signature has no parameter through which a figure could arrive.
+    import inspect
+    params = set(inspect.signature(tools.render_review).parameters)
+    assert params == {"period", "observations", "stance", "deliver", "theme", "account"}
+
+
+def test_observations_are_appended_as_their_own_section(monkeypatch):
+    from financial_research_assistant import tools
+    seen = _capture(monkeypatch)
+    _brief(monkeypatch)
+
+    tools.render_review(observations="- April carried the year\n- Deposits dominated")
+    assert "## Observations" in seen["markdown"]
+    assert "- April carried the year" in seen["markdown"]
+    assert "- Deposits dominated" in seen["markdown"]
+
+
+def test_a_paragraph_of_observations_becomes_bullets(monkeypatch):
+    """Prose sinks into a paragraph the cover cannot use; bullets reach the
+    observations block."""
+    from financial_research_assistant import tools
+    seen = _capture(monkeypatch)
+    _brief(monkeypatch)
+
+    tools.render_review(observations="April carried the year.\nDeposits dominated.")
+    assert "- April carried the year." in seen["markdown"]
+    assert "- Deposits dominated." in seen["markdown"]
+
+
+def test_a_review_with_no_observations_says_so(monkeypatch):
+    """Figures alone are a table, not a review — the omission is reported rather
+    than shipped silently."""
+    from financial_research_assistant import tools
+    _capture(monkeypatch)
+    _brief(monkeypatch)
+
+    assert "No observations were supplied" in tools.render_review()
+
+
+def test_an_unknown_period_is_reported_not_rendered(monkeypatch):
+    from financial_research_assistant import reports, tools
+    called = []
+    monkeypatch.setattr(reports, "render_report",
+                        lambda *a, **k: called.append(1) or "rendered")
+    out = tools.render_review(period="whenever")
+    assert "Could not build the review" in out and not called

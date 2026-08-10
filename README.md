@@ -851,13 +851,20 @@ rendering bug.
 The body is ordinary markdown: headings, tables, and `>` for a warning callout.
 Files land in `~/.financial-research-assistant/reports`.
 
-**Performance reviews are a template, not a prompt.** Ask for one in a sentence —
-*"produce my year-to-date portfolio performance review and send it to Telegram"*,
-*"generate a performance review for last month"* — and `portfolio_review_brief`
-resolves the window and returns every figure already computed and formatted: the
-`highlights` block and the markdown body, ready to pass through to
-`render_report` verbatim. The agent adds the observations; it does not retype the
-numbers.
+**Performance reviews are one call, not a prompt.** Ask in a sentence — *"produce
+my year-to-date portfolio performance review and send it to Telegram"*, *"generate
+a performance review for last month"* — and `render_review(period, observations,
+stance)` computes every figure, renders the sheet and delivers it. The agent
+supplies only `observations`: three to six bullets on what the numbers mean.
+
+That split is the point. It has no parameter through which a figure could arrive,
+so it cannot get one wrong. Three delivered sheets in a row printed `$7,410.61`
+where the source said `$7,412.61` — each time because the model had rewritten a
+figure by hand, and twice while under explicit instruction not to. Docstrings ask
+for compliance; a signature removes the choice.
+
+`portfolio_review_brief(period=...)` returns the same figures **without**
+rendering, for shaping a report by hand or answering in chat.
 
 `period` takes `ytd` (default), `last month`, `this month`, `last quarter`,
 `Q2 2026`, `2025`, `last 90 days`, or `2026-01-01..2026-06-30`. Windows anchor on
