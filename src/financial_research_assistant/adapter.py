@@ -947,21 +947,55 @@ _UNBACKED_DELIVERY_NOTE = (
 )
 
 
-async def settle_delivery_claim(
-    answer: str, called_tools: set[str], fake: bool = False
-) -> str:
-    """Retract an answer's delivery claim when no rendering tool ran.
+#: An artifact the user can only have as a FILE. Excludes "summary" and a BARE
+#: "review", which are as often a request for chat text as for a sheet —
+#: over-flagging an ordinary answer would train the note to be ignored. But
+#: "performance review" and "portfolio review" are named artifacts here, and
+#: leaving them out missed the one prompt this exists for: "produce my
+#: year-to-date portfolio performance review and send it to Telegram".
+#: Word order matters: "portfolio review" is a request, "review my portfolio" is
+#: an instruction to analyse, and only the first matches.
+_ARTIFACT = (
+    r"(?:report|one[- ]pager|pdf|infographic|tear\s?sheet"
+    r"|(?:performance|portfolio)\s+review)"
+)
 
-    A claim about a file the user was supposed to receive is worse than a wrong
-    figure: they stop looking for it. And it is trivially checkable — either a
-    render tool ran this turn or the sentence is false.
+_REPORT_REQUEST = re.compile(
+    rf"(?:\b(?:produce|generate|create|make|prepare|build|render|send|email|push|give\s+me)"
+    rf"\b[^.?!\n]{{0,60}}\b{_ARTIFACT}\b"
+    rf"|\b{_ARTIFACT}\b[^.?!\n]{{0,60}}\b(?:to|via|on)\s+(?:telegram|slack|e-?mail)\b)",
+    re.IGNORECASE,
+)
+
+_MISSING_REPORT_NOTE = (
+    "\n\n---\n"
+    "⚠️ **Note — no report was produced.** You asked for one, but no rendering tool "
+    "ran this turn, so no file was created or sent. The answer above is chat text "
+    "only. Ask again if you want the sheet."
+)
+
+
+async def settle_delivery_claim(
+    answer: str, called_tools: set[str], fake: bool = False, user_msg: str = ""
+) -> str:
+    """Reconcile what the answer says about a file against what the turn did.
+
+    Two failures, one check. A CLAIM that no tool backs is retracted: a report the
+    user was told to expect is worse than a wrong figure, because they stop looking
+    for it. And a REQUEST that produced nothing is noted, since the turn can
+    otherwise answer in chat and read as complete — the silent half of the same
+    problem, and the reason the claim check alone was not enough.
+
+    Either way the answer is only appended to, never rewritten.
     """
     if fake or not answer or _DELIVERY_TOOLS & called_tools:
         return answer
     found = _DELIVERY_CLAIM.search(answer)
-    if not found or _is_an_offer(answer, found.start()):
-        return answer
-    return answer + _UNBACKED_DELIVERY_NOTE
+    if found and not _is_an_offer(answer, found.start()):
+        return answer + _UNBACKED_DELIVERY_NOTE
+    if user_msg and _REPORT_REQUEST.search(user_msg):
+        return answer + _MISSING_REPORT_NOTE
+    return answer
 
 
 def _is_an_offer(answer: str, at: int) -> bool:
@@ -1186,7 +1220,7 @@ async def run_turn(
             )
             yield AgentEvent(
                 "final",
-                await settle_delivery_claim(settled, called_tools, fake),
+                await settle_delivery_claim(settled, called_tools, fake, user_msg),
             )
     except Exception as e:  # surface as an event, never raise into the UI
         yield AgentEvent("error", describe_error(e))

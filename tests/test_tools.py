@@ -1016,8 +1016,10 @@ def test_price_cache_expires(monkeypatch):
     t._fetch_daily("AAPL", 5)               # within TTL → served from cache
     assert calls["n"] == 1
     # Backdate the cached entry beyond the TTL → the next call must re-fetch.
-    series, _ts = t._PRICE_CACHE[("AAPL", "5d")]
-    t._PRICE_CACHE[("AAPL", "5d")] = (series, t.time.time() - 100_000)
+    # The key carries `adjusted` too, so plain and total-return series cannot
+    # share a slot.
+    series, _ts = t._PRICE_CACHE[("AAPL", "5d", False)]
+    t._PRICE_CACHE[("AAPL", "5d", False)] = (series, t.time.time() - 100_000)
     t._fetch_daily("AAPL", 5)
     assert calls["n"] == 2
 
@@ -1075,3 +1077,89 @@ def test_position_listings_state_their_own_totals(monkeypatch, tmp_path):
     listing = t.query_portfolio()
     assert "TOTAL" in listing and "unrealized P/L +15.00" in listing
     assert "total unrealized P/L +15.00" in t.allocation()
+
+
+# --- benchmark comparison: total return on both sides ----------------------------
+
+def _yahoo_payload(closes, adj=None):
+    import json as _json
+    ind = {"quote": [{"close": closes}]}
+    if adj is not None:
+        ind["adjclose"] = [{"adjclose": adj}]
+    return _json.dumps({"chart": {"result": [{
+        "timestamp": [1704067200 + i * 86400 for i in range(len(closes))],
+        "indicators": ind,
+    }]}})
+
+
+def test_adjusted_parsing_takes_the_dividend_reinvested_series():
+    """A time-weighted portfolio return already includes the dividends the holdings
+    paid. Comparing it against a benchmark's PRICE alone charges the benchmark
+    nothing for its own payouts — about 1.2%/yr for SPY, which turned a real 17.5pp
+    gap into a reported 12.7pp."""
+    from financial_research_assistant import tools as t
+
+    payload = _yahoo_payload([100.0, 110.0], adj=[100.0, 112.0])
+    assert t._parse_yahoo_json(payload) == [("2024-01-01", 100.0), ("2024-01-02", 110.0)]
+    assert t._parse_yahoo_json(payload, adjusted=True)[-1][1] == 112.0
+
+
+def test_adjusted_parsing_falls_back_when_the_field_is_absent():
+    """A benchmark is never dropped for want of one field."""
+    from financial_research_assistant import tools as t
+
+    plain = _yahoo_payload([100.0, 110.0])
+    assert t._parse_yahoo_json(plain, adjusted=True)[-1][1] == 110.0
+    # A mismatched-length array is not usable either.
+    ragged = _yahoo_payload([100.0, 110.0], adj=[100.0])
+    assert t._parse_yahoo_json(ragged, adjusted=True)[-1][1] == 110.0
+
+
+def test_the_price_cache_keeps_adjusted_and_plain_series_apart(monkeypatch):
+    """The two differ by every dividend paid; one cache slot would hand a caller
+    asking for total return whichever kind was fetched first."""
+    from financial_research_assistant import tools as t
+
+    monkeypatch.setattr(t, "_PRICE_CACHE", {})
+    monkeypatch.setattr(t, "_price_ttl", lambda: 999)
+    calls: list[bool] = []
+
+    def fake_parse(text, adjusted=False):
+        calls.append(adjusted)
+        return [("2024-01-01", 112.0 if adjusted else 100.0)]
+
+    monkeypatch.setattr(t, "_parse_yahoo_json", fake_parse)
+
+    class _Resp:
+        def read(self): return b"{}"
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(t.urllib.request, "urlopen", lambda *a, **k: _Resp())
+
+    assert t._fetch_daily("SPY", 30)[-1][1] == 100.0
+    assert t._fetch_daily("SPY", 30, adjusted=True)[-1][1] == 112.0, (
+        "the adjusted request must not be served the cached plain series"
+    )
+    assert calls == [False, True]
+
+
+def test_the_benchmark_comparison_asks_for_total_return(monkeypatch):
+    from financial_research_assistant import statements, tools as t
+
+    monkeypatch.setattr(statements, "query_performance_history", lambda account=None: {
+        "points": [{"date": "2024-01-01", "index": 100.0},
+                   {"date": "2024-03-01", "index": 147.01}],
+        "dropped": [], "gaps": [],
+    })
+    seen: dict = {}
+
+    def fake_fetch(sym, days, **kw):
+        seen.update(kw)
+        return [("2024-01-01", 100.0), ("2024-03-01", 164.55)]
+
+    monkeypatch.setattr(t, "_fetch_daily", fake_fetch)
+    out = t.portfolio_vs_benchmark(benchmark="SPY")
+    assert seen.get("adjusted") is True, "price return would flatter the benchmark"
+    assert "+64.55%" in out and "17.54 percentage points" in out
+    assert "dividend-adjusted" in out
