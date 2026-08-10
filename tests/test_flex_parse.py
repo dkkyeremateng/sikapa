@@ -11,6 +11,7 @@ import pytest
 
 from .fixtures.statements import (
     FLEX_LOT_LEVEL_XML as _FLEX_LOTS,
+    FLEX_SEGREGATED_ACCOUNT_XML as _FLEX_SEGREGATED,
     FLEX_UNREPORTED_CLASS_XML as _FLEX_GAP,
     SAMPLE_FLEX_XML as _FLEX,
     SAMPLE_STATEMENT as _CSV,
@@ -215,6 +216,36 @@ def test_lot_rows_do_not_double_the_position_they_belong_to():
     positions = flex.parse_flex_xml(_FLEX_LOTS)["positions"]
     assert len(positions) == 1
     assert positions[0]["quantity"] == 6.0
+
+
+# --- segregated sub-accounts ------------------------------------------------
+
+def test_a_crypto_lot_is_not_stranded_in_its_paxos_segment(monkeypatch, tmp_path):
+    """Crypto executes in a "<account>-P" segment that never appears as a
+    statement account. Positions are scoped by import so the coins show up in the
+    portfolio either way — but the trade that bought them is filtered out of lot
+    matching by account, leaving a holding whose cost basis silently doesn't
+    exist. Both belong to the account the statement is for."""
+    from financial_research_assistant import statements
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    statements.import_statement(_FLEX_SEGREGATED)
+
+    held = {p["symbol"]: p["quantity"] for p in statements.query_positions()}
+    lots = statements.open_lots()
+    assert held["BTC.USD-PAXOS"] == 0.05
+    assert sum(lot["qty"] for lot in lots["BTC.USD-PAXOS"]) == 0.05
+
+
+def test_a_genuinely_different_account_keeps_its_own_identity():
+    """The fold is prefix-scoped on purpose. A consolidated statement covering a
+    second account must not have its trades absorbed into the first — that would
+    pool two books into one and quietly corrupt both sides' FIFO."""
+    from financial_research_assistant import flex
+
+    other = _FLEX_SEGREGATED.replace('accountId="U1111111-P"', 'accountId="U77770000"')
+    accounts = {t["account"] for t in flex.parse_flex_xml(other)["trades"]}
+    assert accounts == {"U1111111", "U77770000"}
 
 
 # --- routing and failure ----------------------------------------------------

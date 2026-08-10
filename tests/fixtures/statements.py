@@ -230,3 +230,22 @@ FLEX_UNREPORTED_CLASS_XML = '''<FlexQueryResponse queryName="research" type="AF"
 </FlexStatements>
 </FlexQueryResponse>
 '''
+
+
+# Crypto executes in IBKR's segregated Paxos segment, reported as "<account>-P"
+# on the row while the statement itself is only ever for the parent account.
+FLEX_SEGREGATED_ACCOUNT_XML = '''<FlexQueryResponse queryName="research" type="AF">
+<FlexStatements count="1">
+<FlexStatement accountId="U1111111" fromDate="2026-04-01" toDate="2026-04-02" period="LastBusinessDay">
+<Trades>
+<Order accountId="U1111111" assetCategory="STK" currency="USD" symbol="MSFT" conid="272093" dateTime="2026-04-01;12:00:00" tradeDate="2026-04-01" quantity="4" tradePrice="380" closePrice="400" proceeds="-1520" ibCommission="-1" cost="1521" fifoPnlRealized="0" mtmPnl="80" buySell="BUY" />
+<Order accountId="U1111111-P" assetCategory="CRYPTO" currency="USD" symbol="BTC.USD-PAXOS" conid="0" dateTime="2026-04-01;19:09:33" tradeDate="2026-04-01" quantity="0.05" tradePrice="60000" closePrice="61000" proceeds="-3000" ibCommission="-5" cost="3005" fifoPnlRealized="0" mtmPnl="50" buySell="BUY" />
+</Trades>
+<OpenPositions>
+<OpenPosition accountId="U1111111" assetCategory="STK" currency="USD" symbol="MSFT" conid="272093" multiplier="1" position="4" markPrice="400" positionValue="1600" costBasisPrice="380.25" costBasisMoney="1521" fifoPnlUnrealized="79" />
+<OpenPosition accountId="U1111111-P" assetCategory="CRYPTO" currency="USD" symbol="BTC.USD-PAXOS" conid="0" multiplier="1" position="0.05" markPrice="61000" positionValue="3050" costBasisPrice="60100" costBasisMoney="3005" fifoPnlUnrealized="45" />
+</OpenPositions>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>
+'''

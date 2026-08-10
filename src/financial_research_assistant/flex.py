@@ -278,7 +278,31 @@ def _summary_only(elements: list[Any]) -> list[Any]:
     return [e for e in elements if (e.get("levelOfDetail") or "SUMMARY").upper() == "SUMMARY"]
 
 
-def _flex_trade(el: Any) -> dict[str, Any]:
+def _stmt_account(stmt: Any) -> str:
+    """The account a ``<FlexStatement>`` block is for."""
+    return (stmt.get("accountId") or "").strip()
+
+
+def _own_account(el: Any, statement_account: str) -> str:
+    """The account a row belongs to, folding IBKR's segregated segments into the
+    account the statement is for.
+
+    Crypto executes in a Paxos segment reported as ``<accountId>-P``, and it never
+    appears as a statement account of its own. Left alone, the holding shows up in
+    the portfolio (positions are scoped by import, not by account) while the trade
+    that opened it is filtered out of lot matching — so the coins are held with no
+    cost basis and nothing says why. A genuinely different account, which shares no
+    prefix, is left as it is.
+    """
+    raw = (el.get("accountId") or "").strip()
+    if not raw:
+        return statement_account
+    if statement_account and raw.startswith(f"{statement_account}-"):
+        return statement_account
+    return raw
+
+
+def _flex_trade(el: Any, statement_account: str = "") -> dict[str, Any]:
     """Map one Flex ``<Order>``/``<Trade>`` onto a normalized trade row."""
     qty = _fnum(el, "quantity")
     # Flex already signs quantity (a SELL arrives negative), but the sign is what
@@ -289,7 +313,7 @@ def _flex_trade(el: Any) -> dict[str, Any]:
     return {
         "asset_category": _fstr(el, "assetCategory"),
         "currency": _fstr(el, "currency"),
-        "account": _fstr(el, "accountId"),
+        "account": _own_account(el, statement_account),
         "symbol": _fstr(el, "symbol"),
         "datetime": _flex_datetime(_fstr(el, "dateTime") or _fstr(el, "tradeDate")),
         "quantity": qty,
@@ -304,7 +328,7 @@ def _flex_trade(el: Any) -> dict[str, Any]:
     }
 
 
-def _flex_cash(el: Any) -> dict[str, Any] | None:
+def _flex_cash(el: Any, statement_account: str = "") -> dict[str, Any] | None:
     """Map one ``<CashTransaction>`` onto a normalized cash row, or None when its
     type isn't one the store models."""
     kind = _CASH_KINDS.get(_fstr(el, "type").lower())
@@ -313,7 +337,7 @@ def _flex_cash(el: Any) -> dict[str, Any] | None:
     return {
         "kind": kind,
         "currency": _fstr(el, "currency"),
-        "account": _fstr(el, "accountId"),
+        "account": _own_account(el, statement_account),
         "date": _flex_datetime(_fstr(el, "dateTime", "settleDate", "reportDate"))[:10],
         "description": _fstr(el, "description"),
         "amount": _fnum(el, "amount"),
@@ -354,7 +378,7 @@ def _flex_instrument(el: Any) -> dict[str, Any]:
     }
 
 
-def _flex_corporate_action(el: Any) -> dict[str, Any]:
+def _flex_corporate_action(el: Any, statement_account: str = "") -> dict[str, Any]:
     """Map one ``<CorporateAction>`` onto a normalized corporate-action row.
 
     ``description`` is the load-bearing field: split detection reads the factor
@@ -362,7 +386,7 @@ def _flex_corporate_action(el: Any) -> dict[str, Any]:
     return {
         "asset_category": _fstr(el, "assetCategory"),
         "currency": _fstr(el, "currency"),
-        "account": _fstr(el, "accountId"),
+        "account": _own_account(el, statement_account),
         "report_date": _flex_datetime(_fstr(el, "reportDate"))[:10],
         "datetime": _flex_datetime(_fstr(el, "dateTime")),
         "description": _fstr(el, "description"),
@@ -483,7 +507,7 @@ def parse_flex_xml(xml: str) -> dict[str, Any]:
     last = statements[-1]
 
     trades = [
-        _flex_trade(el)
+        _flex_trade(el, _stmt_account(stmt))
         for stmt in statements
         for tag in ("Order", "Trade")
         for el in _summary_only(list(stmt.iter(tag)))
@@ -492,10 +516,10 @@ def parse_flex_xml(xml: str) -> dict[str, Any]:
         row
         for stmt in statements
         for el in stmt.iter("CashTransaction")
-        if (row := _flex_cash(el)) is not None
+        if (row := _flex_cash(el, _stmt_account(stmt))) is not None
     ]
     corporate_actions = [
-        _flex_corporate_action(el)
+        _flex_corporate_action(el, _stmt_account(stmt))
         for stmt in statements
         for el in stmt.iter("CorporateAction")
     ]

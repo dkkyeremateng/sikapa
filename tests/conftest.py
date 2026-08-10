@@ -20,6 +20,31 @@ def _never_read_the_real_credential_store(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_write_to_the_real_portfolio(tmp_path_factory, monkeypatch):
+    """Point every test at a throwaway statements DB and Flex directory.
+
+    Most tests that store a statement already redirect the DB themselves, which
+    is exactly why this was easy to miss: the one that didn't was a Flex test
+    written when `flex_sync` only saved a file and touched no store. Teaching it
+    to import turned that test into a writer, and a fixture account landed in the
+    developer's real portfolio — alongside genuine imports, indistinguishable
+    from them at a glance and silently feeding every position and gain figure.
+
+    Suite-wide and autouse because the hazard follows the *code* changing under a
+    test, not the test's own subject. Redirecting the Flex directory too keeps a
+    fetch test from writing into the real statement archive.
+    """
+    monkeypatch.setenv(
+        "FINANCIAL_RESEARCH_STATEMENTS_DB",
+        str(tmp_path_factory.mktemp("statements") / "statements.db"),
+    )
+    monkeypatch.setenv(
+        "FINANCIAL_RESEARCH_FLEX_DIR",
+        str(tmp_path_factory.mktemp("flex")),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _never_actually_play_audio(monkeypatch):
     """Stop any test from making noise or raising a desktop notification.
 
