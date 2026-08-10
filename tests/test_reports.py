@@ -37,6 +37,185 @@ def test_tiles_are_capped_so_they_stay_scannable():
     assert len(reports.parse_highlights("\n".join(f"L{i} | V{i}" for i in range(12)))) == 6
 
 
+def test_an_unsigned_two_digit_table_cell_keeps_its_leading_digit():
+    """`[+-−]` is a RANGE spanning every digit, not three literals, so the sign
+    group ate the leading digit and `74.1%` charted as `4.1%` — a plausible wrong
+    number on a sheet whose whole promise is that it cannot invent one. Signed and
+    thousands-separated cells backtracked into the right answer, which is why only
+    the unsigned two-digit case ever showed it."""
+    assert reports._cell_number("74.1%") == (74.1, "%")
+    assert reports._cell_number("11.65") == (11.65, "")
+    assert reports._cell_number("+11.4%") == (11.4, "%")
+    assert reports._cell_number("-4.8%") == (-4.8, "%")
+    assert reports._cell_number("$208.7B") == (208.7, "$")
+    assert reports._cell_number("1,234.5") == (1234.5, "")
+
+
+def test_a_charted_table_reports_the_figures_the_table_states():
+    series = reports.extract_series(
+        "## Guidance\n"
+        "| Metric | Guided |\n|---|---|\n"
+        "| Q4 revenue | 5.2% |\n| Gross margin | 74.1% |\n| Opex growth | 9.4% |\n"
+    )
+    assert series[0]["items"] == [
+        ("Q4 revenue", 5.2), ("Gross margin", 74.1), ("Opex growth", 9.4)
+    ]
+
+
+# --- verdict figures promoted from headings -------------------------------------
+#
+# The NVO report that prompted these: five highlight tiles of context, and the
+# one number the whole second half argued for — a fear price — written as a
+# heading, so it reached the PDF body and never the cover image at all.
+
+
+def test_a_verdict_written_as_a_heading_becomes_a_tile():
+    figures = reports.heading_figures(
+        "## Fear Price: $32.00 – $38.00\n\nScenario 1: earnings recession.\n"
+    )
+    assert figures == [{"label": "Fear Price", "value": "$32.00 – $38.00", "note": ""}]
+
+
+def test_a_promoted_figure_keeps_its_parenthetical_as_the_note():
+    figures = reports.heading_figures("**Fair Value: $61.40 (DCF, 9% WACC)**")
+    assert figures[0]["value"] == "$61.40"
+    assert figures[0]["note"] == "DCF, 9% WACC"
+
+
+def test_a_heading_that_is_prose_is_not_promoted():
+    """The anchors are what separate a tile value from a sentence that happens to
+    contain a number. Without them "Coverage: 12 analysts" becomes a stat tile."""
+    assert reports.heading_figures(
+        "## Analyst Consensus\n"
+        "## Coverage: 12 analysts\n"
+        "## Q2 2026: A Massive Beat\n"
+        "## Bottom Line\n"
+    ) == []
+
+
+def test_bullets_are_not_promoted_only_headings():
+    """A number in a heading is a verdict; the same number in a bullet is one of
+    many, and promoting those would fill the sheet with whatever came first."""
+    assert reports.heading_figures("- Mean Target: $47.28\n- Median Target: $45.06\n") == []
+
+
+def test_the_verdict_displaces_the_least_important_tile_when_all_six_are_full():
+    tiles = reports.cover_tiles(
+        "\n".join(f"L{i} | V{i}" for i in range(6)),
+        "## Fear Price: $32.00 – $38.00\n",
+    )
+    assert len(tiles) == 6
+    assert tiles[-1]["label"] == "Fear Price"
+    assert [t["label"] for t in tiles[:5]] == [f"L{i}" for i in range(5)]
+    assert "L5" not in {t["label"] for t in tiles}
+
+
+def test_a_verdict_the_model_already_tiled_is_not_duplicated():
+    tiles = reports.cover_tiles(
+        "Fear Price | $32–$38 | capitulation zone",
+        "## Fear Price: $32.00 – $38.00\n",
+    )
+    assert [t["label"] for t in tiles] == ["Fear Price"]
+    assert tiles[0]["note"] == "capitulation zone", "the model's own wording wins"
+
+
+def test_promotion_is_bounded_so_scenarios_cannot_evict_every_tile():
+    tiles = reports.cover_tiles(
+        "\n".join(f"L{i} | V{i}" for i in range(6)),
+        "".join(f"## Scenario {i}: ${i}0.00\n" for i in range(5)),
+    )
+    assert len(tiles) == 6
+    assert sum(1 for t in tiles if t["label"].startswith("Scenario")) == 2
+
+
+def test_the_cover_and_the_document_both_show_the_verdict():
+    """Same tiles on both surfaces: the image is what gets read on a phone, and a
+    figure that differs between the two reads as one of them being wrong."""
+    md = "## Fear Price: $32.00 – $38.00\n\n- **Healthcare:** 28.4%\n- **Tech:** 21.0%\n- **Energy:** 9.4%\n"
+    hl = "Current Price | $47.20 | -24.2% YTD"
+    for html in (reports.build_html("NVO", md, highlights=hl),
+                 reports.build_infographic_html("NVO", md, highlights=hl)):
+        # The tile markup, not the string: the heading is in the rendered body of
+        # both documents either way, so a bare `"Fear Price" in html` passes with
+        # the promotion removed entirely — it did, until this was tightened.
+        assert '<div class="lab">Fear Price</div>' in html
+        assert "$32.00 – $38.00" in html.split('<div class="body">')[0]
+
+
+# --- the call: buy, sell or hold ------------------------------------------------
+
+
+def test_a_stance_carries_its_tone_and_reason():
+    assert reports.parse_stance("HOLD") == {"label": "HOLD", "tone": "hold", "note": ""}
+    assert reports.parse_stance("buy")["tone"] == "pos"
+    assert reports.parse_stance("underweight")["tone"] == "neg"
+    got = reports.parse_stance("Strong Buy | franchise intact")
+    assert got["label"] == "STRONG BUY", "the longest phrase wins over a prefix of it"
+    assert got["note"] == "franchise intact"
+
+
+def test_a_stance_we_cannot_colour_is_refused_rather_than_guessed():
+    """Badging the wrong tone on this field is worse than omitting it, so an
+    unknown word produces no badge — and `render_report` says why."""
+    assert reports.parse_stance("maybe") is None
+    assert reports.parse_stance("") is None
+
+
+def test_an_unrecognised_stance_is_reported_not_swallowed():
+    out = reports.render_report(
+        "t", "- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n",
+        stance="probably fine", deliver=False,
+    )
+    assert "No stance badge" in out and "probably fine" in out
+
+
+def test_a_stance_heading_is_read_but_a_stance_bullet_is_not():
+    """The NVO report carried `Rating: BUY` as a bullet under Analyst Consensus —
+    the street's view, which it argued was stale before concluding HOLD. Reading
+    bullets would badge the sheet with the opinion it existed to disagree with."""
+    assert reports.stance_of("", "## Rating: HOLD (trim 50%)")["label"] == "HOLD"
+    assert reports.stance_of("", "- Rating: BUY (consensus 2.43)") is None
+
+
+def test_an_explicit_stance_beats_a_heading():
+    assert reports.stance_of("SELL", "## Rating: BUY")["label"] == "SELL"
+
+
+def test_the_badge_is_drawn_on_both_the_cover_and_the_document():
+    md = "## Fear Price: $32.00\n\n- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+    for html in (reports.build_html("NVO", md, stance="HOLD | trim 50% at $40"),
+                 reports.build_infographic_html("NVO", md, stance="HOLD | trim 50% at $40")):
+        assert '<span class="pill hold">HOLD</span>' in html
+        assert "trim 50% at $40" in html.split('<div class="rule">')[0]
+
+
+def test_the_emitted_stylesheet_survives_templating():
+    """The badge's markup can be perfect while its CSS is dead. `_STANCE_CSS` is
+    spliced in as a `.format()` VALUE, and a value is not re-processed — doubled
+    braces reached the stylesheet as `.stance{{...}}`, so every rule was dropped
+    and the badge rendered as unstyled text run together with its reason. Asserting
+    on the markup alone passed throughout."""
+    for html in (reports.build_html("t", "x", stance="BUY"),
+                 reports.build_infographic_html("t", "x", stance="BUY")):
+        assert ".stance{display:flex" in html
+        assert ".stance .pill.pos{color:var(--pos)" in html
+        assert "{{" not in html and "}}" not in html, "unprocessed format braces"
+
+
+def test_the_badge_tone_follows_the_verdict():
+    for verdict, tone in (("BUY", "pos"), ("SELL", "neg"), ("HOLD", "hold")):
+        html = reports.build_infographic_html("t", "x", stance=verdict)
+        assert f'<span class="pill {tone}">{verdict}</span>' in html
+
+
+def test_a_stance_is_escaped_like_every_other_model_supplied_string():
+    html = reports.build_infographic_html("t", "x", stance="BUY | <script>alert(1)</script>")
+    # Scoped to the badge: the template ends with its own measuring <script>, so a
+    # whole-document check would pass on that and prove nothing about the stance.
+    badge = html.split('<div class="stance">')[1].split("</div>")[0]
+    assert "<script>" not in badge and "&lt;script&gt;" in badge
+
+
 # --- the document ---------------------------------------------------------------
 
 

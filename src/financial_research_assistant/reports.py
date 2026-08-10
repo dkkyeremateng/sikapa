@@ -289,6 +289,7 @@ body{{width:{w}px;background:var(--page);color:var(--ink);
 .eyebrow{{font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:600}}
 h1.doc{{font-size:44px;line-height:1.1;font-weight:650;letter-spacing:-.02em;margin-top:10px}}
 .sub{{font-size:18px;color:var(--ink2);margin-top:10px}}
+{stance_css}
 .rule{{height:1px;background:var(--grid);margin:26px 0}}
 .tiles{{display:grid;gap:2px;background:var(--grid);margin-bottom:4px}}
 .tile{{background:var(--surface);padding:20px 18px}}
@@ -326,12 +327,40 @@ h1,h2,h3,.body h1,.body h2,.body h3{{break-after:avoid;page-break-after:avoid}}
 .body tr{{break-inside:avoid;page-break-inside:avoid}}
 """
 
+#: The stance badge, shared by both sheets so the call cannot look like a
+#: different thing on the image than in the document.
+#:
+#: 20px/700 is a contrast decision as much as a typographic one. `pos` and `neg`
+#: are validated at >= 3:1 against their own surface, which WCAG accepts for LARGE
+#: text (>= 18.66px bold) but not for normal text — light-theme `pos` measures
+#: 4.30:1 and `neg` 3.85:1, both under the 4.5:1 body-text bar. Sizing the badge
+#: to what it should be anyway is what makes those colours legitimate on it;
+#: shrinking it would quietly put the sheet out of conformance.
+#:
+#: Outlined rather than filled: a filled pill puts text on `pos` instead of on the
+#: surface, and that pairing is not what the palette validated.
+#:
+#: SINGLE braces, unlike the sheets this is spliced into. Those are `.format()`
+#: templates and double their braces to survive it; this block is a substituted
+#: VALUE, and a value is not re-processed — doubled braces reached the stylesheet
+#: literally as `.stance{{...}}`, which every rule in the block then silently
+#: dropped. The badge still emitted correct markup, so it rendered as unstyled
+#: text run together with its reason.
+_STANCE_CSS = """.stance{display:flex;align-items:center;gap:14px;margin-top:18px;flex-wrap:wrap}
+.stance .pill{font-size:20px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
+ padding:6px 18px;border-radius:999px;border:2px solid;line-height:1.25}
+.stance .pill.pos{color:var(--pos);border-color:var(--pos)}
+.stance .pill.neg{color:var(--neg);border-color:var(--neg)}
+.stance .pill.hold{color:var(--ink2);border-color:var(--rule)}
+.stance .why{font-size:16px;color:var(--ink2)}"""
+
 _DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>{title}</title><style>{css}</style></head><body>
 <div class="sheet">
   <div class="eyebrow">{eyebrow}</div>
   <h1 class="doc">{title}</h1>
   {subtitle}
+  {stance}
   <div class="rule"></div>
   {tiles}
   <div class="body">{body}</div>
@@ -365,13 +394,14 @@ def build_html(
     subtitle: str = "",
     eyebrow: str = "",
     page_height: int = _PAGE_H,
+    stance: str = "",
 ) -> str:
     """The full HTML document. Pure — no filesystem, no Chrome, so it is testable.
 
     ``page_height`` sizes ``@page``: the measured content height for a single-page
     sheet, or the default to paginate.
     """
-    tiles = parse_highlights(highlights)
+    tiles = cover_tiles(highlights, markdown)
     tiles_html = ""
     if tiles:
         cols = min(len(tiles), 4)
@@ -386,10 +416,14 @@ def build_html(
             f'<div class="tiles" style="grid-template-columns:repeat({cols},1fr)">{cells}</div>'
         )
     return _DOC.format(
-        css=_CSS.format(w=_WIDTH, h=max(200, min(int(page_height), _MAX_H)), vars=_css_vars()),
+        css=_CSS.format(
+            w=_WIDTH, h=max(200, min(int(page_height), _MAX_H)), vars=_css_vars(),
+            stance_css=_STANCE_CSS,
+        ),
         title=_html.escape(title or "Report"),
         eyebrow=_html.escape(eyebrow or _EYEBROW),
         subtitle=f'<div class="sub">{_html.escape(subtitle)}</div>' if subtitle else "",
+        stance=_stance_html(stance_of(stance, markdown)),
         tiles=tiles_html,
         body=_markdown_html(markdown),
         footer=_stamp(),
@@ -492,6 +526,37 @@ def _chrome_pdf(
 def _ink(role: str) -> tuple[int, int, int]:
     """A theme colour as RGB, for the browser-free renderer."""
     return _rgb(_palette()[role])
+
+
+def _draw_stance(pdf: Any, stance: dict[str, str] | None, x: float, family: str,
+                 conv: Callable[[str], str], inner: float) -> None:
+    """Draw the stance badge at the cursor, in the same shape the CSS produces.
+
+    Shared by both fpdf sheets: the fallback renderer is what runs with no browser
+    installed, and a call that appeared only under Chrome would be a call the
+    reader sometimes does not get.
+    """
+    if not stance:
+        return
+    label = conv(stance["label"])
+    pdf.set_font(family, "B", 15)  # 20px CSS at 0.75pt/px
+    text_w = pdf.get_string_width(label)
+    pad, height = 13.0, 26.0
+    top = pdf.get_y()
+    colour = _ink("ink2" if stance["tone"] == "hold" else stance["tone"])
+    pdf.set_draw_color(*(_ink("rule") if stance["tone"] == "hold" else colour))
+    pdf.set_line_width(1.5)
+    pdf.rect(x, top, text_w + 2 * pad, height, style="D",
+             round_corners=True, corner_radius=height / 2)
+    pdf.set_xy(x, top + 6)
+    pdf.set_text_color(*colour)
+    pdf.cell(text_w + 2 * pad, 14, label, align="C")
+    if stance["note"]:
+        pdf.set_xy(x + text_w + 2 * pad + 11, top + 6)
+        pdf.set_font(family, "", 12)
+        pdf.set_text_color(*_ink("ink2"))
+        pdf.cell(inner - (text_w + 2 * pad + 11), 14, conv(stance["note"]), align="L")
+    pdf.set_y(top + height)
 
 #: System fonts carrying the punctuation a report actually uses (— · ▼ ✓ →). The
 #: core PDF fonts are Latin-1 only and RAISE on an em dash, so without one of these
@@ -601,7 +666,7 @@ def _unicode_font() -> tuple[str, str]:
 
 def _fpdf_pdf(
     pdf_path: Path, title: str, markdown: str, highlights: str = "",
-    subtitle: str = "", eyebrow: str = "",
+    subtitle: str = "", eyebrow: str = "", stance: str = "",
 ) -> bool:
     """Draw the sheet without a browser. Same content, plainer typography.
 
@@ -617,6 +682,7 @@ def _fpdf_pdf(
     font_regular, font_bold = _unicode_font()
     width_pt = _WIDTH * _PT
     margin = 36.0
+    call = stance_of(stance, markdown)
 
     class Sheet(FPDF):
         """Footer as an override, not a manual write at the end.
@@ -680,13 +746,16 @@ def _fpdf_pdf(
             pdf.set_font(family, "", 11)
             pdf.set_text_color(*_ink("ink2"))
             pdf.multi_cell(width_pt - 2 * margin, 15, conv(subtitle), align="L")
+        if call:
+            pdf.ln(12)
+            _draw_stance(pdf, call, margin, family, conv, width_pt - 2 * margin)
         pdf.ln(10)
         pdf.set_draw_color(*_ink("grid"))
         pdf.set_line_width(0.6)
         pdf.line(margin, pdf.get_y(), width_pt - margin, pdf.get_y())
         pdf.ln(12)
 
-        tiles = parse_highlights(highlights)
+        tiles = cover_tiles(highlights, markdown)
         if tiles:
             col = (width_pt - 2 * margin) / len(tiles)
             top = pdf.get_y()
@@ -818,7 +887,7 @@ def render(
             html = build_html(
                 content.get("title", ""), content.get("markdown", ""),
                 content.get("highlights", ""), content.get("subtitle", ""),
-                content.get("eyebrow", ""),
+                content.get("eyebrow", ""), stance=content.get("stance", ""),
             )
         html_path.write_text(html, encoding="utf-8")
         paths["html"] = str(html_path)
@@ -834,6 +903,7 @@ def render(
                 content.get("highlights", ""),
                 content.get("subtitle", ""),
                 content.get("eyebrow", ""),
+                content.get("stance", ""),
             )
             if made:
                 paths["renderer"] = "fpdf2"
@@ -873,7 +943,7 @@ def _worth_charting(content: dict[str, str]) -> bool:
     strictly beats it.
     """
     return bool(
-        parse_highlights(content.get("highlights", ""))
+        cover_tiles(content.get("highlights", ""), content.get("markdown", ""))
         or extract_series(content.get("markdown", ""))
     )
 
@@ -888,18 +958,21 @@ def _build_cover(
     markdown = content.get("markdown", "")
     highlights = content.get("highlights", "")
     subtitle = content.get("subtitle", "")
+    stance = content.get("stance", "")
     if chrome:
         info_html = out_dir / f"{stem}-cover.html"
         info_html.write_text(
             build_infographic_html(
-                title, markdown, highlights, subtitle, pages=pages, attached=attached
+                title, markdown, highlights, subtitle, pages=pages, attached=attached,
+                stance=stance,
             ),
             encoding="utf-8",
         )
         if _chrome_pdf(chrome, info_html, info_pdf, single_page=True):
             return info_pdf
     if _fpdf_infographic(
-        info_pdf, title, markdown, highlights, subtitle, pages, attached=attached
+        info_pdf, title, markdown, highlights, subtitle, pages, attached=attached,
+        stance=stance,
     ):
         return info_pdf
     return None
@@ -917,6 +990,7 @@ def render_report(
     allow_prose: bool = False,
     theme: str = "",
     output: str = "",
+    stance: str = "",
 ) -> str:
     """Typeset a summary as a PDF + cover image and send it to the user's channels.
 
@@ -940,7 +1014,24 @@ def render_report(
     "key observations" block.
     ``highlights`` is optional stat tiles, ONE PER LINE as ``label | value | note``
     (up to 6), e.g. "Adjusted EPS | $1.84 | vs $1.91 consensus". Put the numbers
-    that matter there, not in the body. ``subtitle`` is one line under the title.
+    that matter there, not in the body — INCLUDING the report's verdict figure
+    (fear price, fair value, price target) if it has one, since that is the number
+    the reader looks for first. A verdict you instead write as a heading
+    (``## Fear Price: $32.00 – $38.00``) is promoted onto the sheet automatically,
+    taking the last tile's slot if all six are full — but a tile you write
+    yourself keeps the label and note you chose. ``subtitle`` is one line under
+    the title.
+
+    ``stance`` is THIS REPORT'S CALL on the stock, badged under the title on both
+    the image and the PDF — pass it whenever the report reaches one, since what to
+    do about a stock is the reader's first question. Write the verdict, optionally
+    a short reason after a pipe: ``"HOLD | trim 50% at $40–$42"``. Buy / accumulate
+    / overweight / outperform badge positive, sell / reduce / trim / underweight
+    negative, hold / neutral / watch neutral. It is YOUR conclusion, not the
+    street's — when analysts disagree with you, put their rating in a
+    ``highlights`` tile ("Analyst Consensus | BUY | 12 analysts, mean $47.28") so
+    the sheet shows the disagreement instead of hiding it. A stance written as a
+    heading (``## Rating: HOLD``) is picked up automatically.
     ``theme`` is "light" or "dark" for the IMAGE — use it when the user asks for a
     dark (or light) one-pager; blank follows the configured default, and the PDF
     stays print-friendly either way. ``output`` is "both" (default), "image" for a
@@ -979,7 +1070,7 @@ def render_report(
     wanted = output_mode(output)
     content = {
         "title": title, "markdown": markdown,
-        "highlights": highlights, "subtitle": subtitle,
+        "highlights": highlights, "subtitle": subtitle, "stance": stance,
     }
     # A per-report theme overrides the configured one for the COVER only; the
     # document keeps its own default so a dark request never produces a PDF that
@@ -1016,6 +1107,15 @@ def render_report(
     lines.append("Saved: " + ", ".join(
         f"{k.upper()} {v}" for k, v in paths.items() if k != "renderer"
     ))
+    # Say so rather than dropping it. A stance we cannot tone is left off the
+    # sheet, and silence there reads as "rendered fine" while the one thing the
+    # reader looks for first is missing.
+    if (stance or "").strip() and not parse_stance(stance):
+        lines.append(
+            f"No stance badge: {stance.strip()!r} is not a verdict this can colour. "
+            f"Use one of {', '.join(sorted(_STANCE_TONES))} — optionally with a "
+            f"reason after a pipe, e.g. \"HOLD | trim 50% at $40\"."
+        )
 
     if deliver:
         from . import channels
@@ -1103,7 +1203,15 @@ def _clean_label(text: str) -> str:
 
 
 #: A single number in a table cell: currency, percent or bare, sign preserved.
-_NUM_RE = re.compile(r"([+-−]?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(%?)")
+#
+# The dash is ESCAPED. Written `[+-−]` it is a range operator, not a literal, so
+# the class spans U+002B to U+2212 — every digit included. The sign group then
+# matched the leading digit of any unsigned multi-digit number and the rest still
+# parsed, so `74.1%` charted as `4.1%`: a plausible figure, silently wrong, on a
+# sheet whose whole promise is that it cannot invent a number. Signed cells
+# (`+11.4%`) and thousands-separated ones happened to survive, which is why this
+# stood for so long.
+_NUM_RE = re.compile(r"([+\-−]?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(%?)")
 _TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 
@@ -1330,6 +1438,7 @@ body{{width:{w}px;background:var(--surface);color:var(--ink);
 .eyebrow{{font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:600}}
 h1{{font-size:46px;line-height:1.06;font-weight:650;letter-spacing:-.025em;margin-top:12px}}
 .sub{{font-size:18px;color:var(--ink2);margin-top:10px}}
+{stance_css}
 .rule{{height:1px;background:var(--grid);margin:28px 0}}
 .tiles{{display:grid;gap:2px;background:var(--grid)}}
 .tile{{background:var(--surface);padding:20px 18px}}
@@ -1368,6 +1477,7 @@ _INFO_DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   <div class="eyebrow">{eyebrow}</div>
   <h1>{title}</h1>
   {subtitle}
+  {stance}
   <div class="rule"></div>
   {tiles}
   {charts}
@@ -1457,6 +1567,186 @@ def extract_notes(markdown: str, used_titles: set[str]) -> list[str]:
     return picks[:5]
 
 
+#: A figure a tile can carry: money, a plain number, a percentage, a multiple.
+_FIGURE = r"[+\-−]?\s*\$?\s*\d[\d,]*(?:\.\d+)?\s*(?:%|[xX]\b)?"
+#: A heading whose text is ``Label: figure`` — the figure optionally a range, and
+#: optionally trailed by a parenthetical that becomes the tile's note. Anchored at
+#: both ends on purpose: "Coverage: 12 analysts" is a sentence, not a tile value,
+#: and only the anchor tells them apart.
+_HEADING_FIGURE_RE = re.compile(
+    rf"^(?P<label>[^:]{{2,32}}):\s*"
+    rf"(?P<value>{_FIGURE}(?:\s*(?:[-–—/]|to)\s*{_FIGURE})*)"
+    rf"(?:\s*\((?P<note>[^)]{{1,48}})\))?$"
+)
+
+#: How many heading figures may be promoted. A report that prices several
+#: scenarios as headings should not be able to evict every tile the model chose.
+_MAX_PROMOTED = 2
+
+#: Tiles past six stop being scannable — the cap ``parse_highlights`` already
+#: applies, restated here because promotion has to respect the same budget.
+_MAX_TILES = 6
+
+
+def heading_figures(markdown: str) -> list[dict[str, str]]:
+    """Tiles promoted from headings shaped ``Label: figure``.
+
+    A model puts a number in a *heading* only when that number is the section's
+    answer — a fear price, a fair value, a price target. Those are the figures a
+    reader wants first, and they were the one place the cover could not reach:
+    tiles come from ``highlights``, charts from list and table shapes,
+    observations from bullets. A verdict written as a heading matched none of
+    them, so it landed on page 2 of the PDF and nowhere on the image at all
+    (observed: an NVO report whose entire second half priced a
+    ``Fear Price: $32.00 – $38.00`` the cover never mentioned).
+
+    Deterministic like the rest of this section: it re-reads what the model
+    already wrote rather than asking a second model what mattered, so it costs
+    nothing and cannot invent a number.
+    """
+    out: list[dict[str, str]] = []
+    for raw in (markdown or "").splitlines():
+        head = _HEADING_RE.match(raw) or _BOLD_HEADING_RE.match(raw)
+        if not head:
+            continue
+        text = re.sub(r"\*\*|__|`", "", head.group(1)).strip()
+        found = _HEADING_FIGURE_RE.match(text)
+        if not found:
+            continue
+        out.append({
+            "label": found.group("label").strip(),
+            "value": re.sub(r"\s+", " ", found.group("value")).strip(),
+            "note": (found.group("note") or "").strip(),
+        })
+        if len(out) == _MAX_PROMOTED:
+            break
+    return out
+
+
+def cover_tiles(highlights: str, markdown: str = "") -> list[dict[str, str]]:
+    """The stat tiles a sheet shows: the model's ``highlights``, plus any verdict
+    figure it wrote as a heading instead of as a tile.
+
+    A promoted figure DISPLACES the last highlight when all six slots are taken.
+    The model orders highlights most-important-first, so the last one is its own
+    least-important choice, whereas a figure it promoted into a heading is the
+    report's conclusion — dropping the conclusion to keep a sixth context figure
+    is the failure this exists to fix.
+    """
+    tiles = parse_highlights(highlights)
+    seen = {t["label"].strip().lower() for t in tiles if t["label"].strip()}
+    promoted: list[dict[str, str]] = []
+    for extra in heading_figures(markdown):
+        key = extra["label"].lower()
+        if key in seen:  # the model already gave this figure a tile of its own
+            continue
+        seen.add(key)
+        promoted.append(extra)
+    if not promoted:
+        return tiles
+    # Trim the MODEL'S tiles, never what was already promoted. Dropping the last
+    # entry one promotion at a time instead made a second verdict evict the first,
+    # so a report pricing two scenarios showed only the later one.
+    if len(tiles) + len(promoted) > _MAX_TILES:
+        tiles = tiles[: _MAX_TILES - len(promoted)]
+    return tiles + promoted
+
+
+# --- the call: buy, sell or hold ------------------------------------------------
+#
+# A stance is the one thing on the sheet that is not a figure, so it does not
+# belong in a tile — tile values are numbers, which is why `_TILE_STEPS` exists at
+# all. It gets its own badge: the reader's first question about a stock is what to
+# do about it, and a sheet that answers it in prose on page 3 has buried the lede.
+#
+# Tone, not verdict. The badge colours the stance and states it; it does not
+# decide it. Whatever the report concluded is what shows.
+
+#: Stance vocabulary → tone. Ordered longest-phrase-first at use, so "strong buy"
+#: is not read as "buy" with "strong" left dangling in the note.
+_STANCE_TONES = {
+    "strong buy": "pos", "buy": "pos", "accumulate": "pos", "add": "pos",
+    "overweight": "pos", "outperform": "pos", "long": "pos",
+    "strong sell": "neg", "sell": "neg", "reduce": "neg", "trim": "neg",
+    "underweight": "neg", "underperform": "neg", "avoid": "neg", "exit": "neg",
+    "hold": "hold", "neutral": "hold", "market perform": "hold",
+    "equal weight": "hold", "market weight": "hold", "watch": "hold", "wait": "hold",
+}
+
+_STANCE_RE = re.compile(
+    r"^(?P<label>"
+    + "|".join(re.escape(p) for p in sorted(_STANCE_TONES, key=len, reverse=True))
+    + r")\b[\s:,|(—–-]*(?P<note>.*)$",
+    re.IGNORECASE,
+)
+
+#: Headings that introduce a stance. Same heading-only rule the figure promotion
+#: uses, and for the same reason: the NVO report carried "Rating: BUY" as a BULLET
+#: under Analyst Consensus — the street's view, not its own, which it argued was
+#: stale before concluding HOLD. Reading bullets would have badged the sheet with
+#: the opinion the report existed to disagree with.
+_STANCE_HEADING_RE = re.compile(
+    r"^(?:rating|recommendation|verdict|stance|call|position|action)\s*:\s*(?P<rest>.+)$",
+    re.IGNORECASE,
+)
+
+
+def parse_stance(raw: str) -> dict[str, str] | None:
+    """``BUY`` / ``HOLD | trim 50% at $40`` -> ``{label, tone, note}``, else None.
+
+    Unrecognised words return None rather than an uncoloured badge: a stance whose
+    tone we cannot name is one we would have to guess at, and guessing wrong on
+    this particular field is worse than leaving it off. ``render_report`` says so
+    in its result, so a model that writes "maybe" learns it rather than shipping a
+    sheet quietly missing the call.
+    """
+    text = re.sub(r"[*_`]", "", raw or "").strip()
+    if not text:
+        return None
+    found = _STANCE_RE.match(text)
+    if not found:
+        return None
+    label = re.sub(r"\s+", " ", found.group("label")).strip()
+    note = found.group("note").strip().rstrip(")").strip()
+    return {
+        "label": label.upper(),
+        "tone": _STANCE_TONES[label.lower()],
+        "note": re.sub(r"\s+", " ", note)[:64],
+    }
+
+
+def stance_of(stance: str = "", markdown: str = "") -> dict[str, str] | None:
+    """The sheet's call: what the caller passed, else a stance written as a heading.
+
+    The explicit argument wins — it is the model saying so deliberately, with the
+    note it chose — and the heading is the fallback that makes an existing report
+    work without being rewritten.
+    """
+    explicit = parse_stance(stance)
+    if explicit:
+        return explicit
+    for raw in (markdown or "").splitlines():
+        head = _HEADING_RE.match(raw) or _BOLD_HEADING_RE.match(raw)
+        if not head:
+            continue
+        text = re.sub(r"\*\*|__|`", "", head.group(1)).strip()
+        intro = _STANCE_HEADING_RE.match(text)
+        if intro:
+            found = parse_stance(intro.group("rest"))
+            if found:
+                return found
+    return None
+
+
+def _stance_html(stance: dict[str, str] | None) -> str:
+    if not stance:
+        return ""
+    note = (f'<span class="why">{_html.escape(stance["note"])}</span>'
+            if stance["note"] else "")
+    return (f'<div class="stance"><span class="pill {stance["tone"]}">'
+            f'{_html.escape(stance["label"])}</span>{note}</div>')
+
+
 def _notes_html(markdown: str, used_titles: set[str]) -> str:
     picks = extract_notes(markdown, used_titles)
     if not picks:
@@ -1490,9 +1780,10 @@ def build_infographic_html(
     pages: int = 0,
     page_height: int = _PAGE_H,
     attached: bool = True,
+    stance: str = "",
 ) -> str:
     """A one-page visual summary of a multi-page report. Pure and testable."""
-    tiles = parse_highlights(highlights)
+    tiles = cover_tiles(highlights, markdown)
     tiles_html = ""
     if tiles:
         cols = min(len(tiles), 3 if len(tiles) in (3, 5, 6) else 4)
@@ -1525,10 +1816,12 @@ def build_infographic_html(
         css=_INFO_CSS.format(
             w=_WIDTH, h=max(200, min(int(page_height), _MAX_H)),
             cols=2 if len(series) > 1 else 1, vars=_css_vars(),
+            stance_css=_STANCE_CSS,
         ),
         title=_html.escape(title or "Report"),
         eyebrow=_html.escape(eyebrow or _EYEBROW),
         subtitle=(f'<div class="sub">{_html.escape(subtitle)}</div>' if subtitle else ""),
+        stance=_stance_html(stance_of(stance, markdown)),
         tiles=tiles_html,
         charts=charts_html,
         notes=notes,
@@ -1539,7 +1832,7 @@ def build_infographic_html(
 
 def _fpdf_infographic(
     pdf_path: Path, title: str, markdown: str, highlights: str = "",
-    subtitle: str = "", pages: int = 0, attached: bool = True,
+    subtitle: str = "", pages: int = 0, attached: bool = True, stance: str = "",
 ) -> bool:
     """The same summary sheet without a browser: tiles, then bars drawn as rects."""
     try:
@@ -1551,7 +1844,8 @@ def _fpdf_infographic(
     width_pt = _WIDTH * _PT
     margin = 39.0
     series = extract_series(markdown)
-    tiles = parse_highlights(highlights)
+    tiles = cover_tiles(highlights, markdown)
+    call = stance_of(stance, markdown)
 
     def draw(height_pt: float | None):
         pdf = FPDF(unit="pt", format=(width_pt, height_pt or (_PAGE_H * _PT)))
@@ -1586,6 +1880,9 @@ def _fpdf_infographic(
             pdf.set_font(family, "", 11)
             pdf.set_text_color(*_ink("ink2"))
             pdf.multi_cell(inner, 15, conv(subtitle), align="L")
+        if call:
+            pdf.ln(12)
+            _draw_stance(pdf, call, margin, family, conv, inner)
         pdf.ln(10)
         pdf.set_draw_color(*_ink("grid"))
         pdf.set_line_width(0.6)
