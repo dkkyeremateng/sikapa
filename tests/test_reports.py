@@ -37,6 +37,86 @@ def test_tiles_are_capped_so_they_stay_scannable():
     assert len(reports.parse_highlights("\n".join(f"L{i} | V{i}" for i in range(12)))) == 6
 
 
+# --- verdict figures promoted from headings -------------------------------------
+#
+# The NVO report that prompted these: five highlight tiles of context, and the
+# one number the whole second half argued for — a fear price — written as a
+# heading, so it reached the PDF body and never the cover image at all.
+
+
+def test_a_verdict_written_as_a_heading_becomes_a_tile():
+    figures = reports.heading_figures(
+        "## Fear Price: $32.00 – $38.00\n\nScenario 1: earnings recession.\n"
+    )
+    assert figures == [{"label": "Fear Price", "value": "$32.00 – $38.00", "note": ""}]
+
+
+def test_a_promoted_figure_keeps_its_parenthetical_as_the_note():
+    figures = reports.heading_figures("**Fair Value: $61.40 (DCF, 9% WACC)**")
+    assert figures[0]["value"] == "$61.40"
+    assert figures[0]["note"] == "DCF, 9% WACC"
+
+
+def test_a_heading_that_is_prose_is_not_promoted():
+    """The anchors are what separate a tile value from a sentence that happens to
+    contain a number. Without them "Coverage: 12 analysts" becomes a stat tile."""
+    assert reports.heading_figures(
+        "## Analyst Consensus\n"
+        "## Coverage: 12 analysts\n"
+        "## Q2 2026: A Massive Beat\n"
+        "## Bottom Line\n"
+    ) == []
+
+
+def test_bullets_are_not_promoted_only_headings():
+    """A number in a heading is a verdict; the same number in a bullet is one of
+    many, and promoting those would fill the sheet with whatever came first."""
+    assert reports.heading_figures("- Mean Target: $47.28\n- Median Target: $45.06\n") == []
+
+
+def test_the_verdict_displaces_the_least_important_tile_when_all_six_are_full():
+    tiles = reports.cover_tiles(
+        "\n".join(f"L{i} | V{i}" for i in range(6)),
+        "## Fear Price: $32.00 – $38.00\n",
+    )
+    assert len(tiles) == 6
+    assert tiles[-1]["label"] == "Fear Price"
+    assert [t["label"] for t in tiles[:5]] == [f"L{i}" for i in range(5)]
+    assert "L5" not in {t["label"] for t in tiles}
+
+
+def test_a_verdict_the_model_already_tiled_is_not_duplicated():
+    tiles = reports.cover_tiles(
+        "Fear Price | $32–$38 | capitulation zone",
+        "## Fear Price: $32.00 – $38.00\n",
+    )
+    assert [t["label"] for t in tiles] == ["Fear Price"]
+    assert tiles[0]["note"] == "capitulation zone", "the model's own wording wins"
+
+
+def test_promotion_is_bounded_so_scenarios_cannot_evict_every_tile():
+    tiles = reports.cover_tiles(
+        "\n".join(f"L{i} | V{i}" for i in range(6)),
+        "".join(f"## Scenario {i}: ${i}0.00\n" for i in range(5)),
+    )
+    assert len(tiles) == 6
+    assert sum(1 for t in tiles if t["label"].startswith("Scenario")) == 2
+
+
+def test_the_cover_and_the_document_both_show_the_verdict():
+    """Same tiles on both surfaces: the image is what gets read on a phone, and a
+    figure that differs between the two reads as one of them being wrong."""
+    md = "## Fear Price: $32.00 – $38.00\n\n- **Healthcare:** 28.4%\n- **Tech:** 21.0%\n- **Energy:** 9.4%\n"
+    hl = "Current Price | $47.20 | -24.2% YTD"
+    for html in (reports.build_html("NVO", md, highlights=hl),
+                 reports.build_infographic_html("NVO", md, highlights=hl)):
+        # The tile markup, not the string: the heading is in the rendered body of
+        # both documents either way, so a bare `"Fear Price" in html` passes with
+        # the promotion removed entirely — it did, until this was tightened.
+        assert '<div class="lab">Fear Price</div>' in html
+        assert "$32.00 – $38.00" in html.split('<div class="body">')[0]
+
+
 # --- the document ---------------------------------------------------------------
 
 

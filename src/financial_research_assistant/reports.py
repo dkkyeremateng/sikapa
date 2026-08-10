@@ -371,7 +371,7 @@ def build_html(
     ``page_height`` sizes ``@page``: the measured content height for a single-page
     sheet, or the default to paginate.
     """
-    tiles = parse_highlights(highlights)
+    tiles = cover_tiles(highlights, markdown)
     tiles_html = ""
     if tiles:
         cols = min(len(tiles), 4)
@@ -686,7 +686,7 @@ def _fpdf_pdf(
         pdf.line(margin, pdf.get_y(), width_pt - margin, pdf.get_y())
         pdf.ln(12)
 
-        tiles = parse_highlights(highlights)
+        tiles = cover_tiles(highlights, markdown)
         if tiles:
             col = (width_pt - 2 * margin) / len(tiles)
             top = pdf.get_y()
@@ -873,7 +873,7 @@ def _worth_charting(content: dict[str, str]) -> bool:
     strictly beats it.
     """
     return bool(
-        parse_highlights(content.get("highlights", ""))
+        cover_tiles(content.get("highlights", ""), content.get("markdown", ""))
         or extract_series(content.get("markdown", ""))
     )
 
@@ -940,7 +940,13 @@ def render_report(
     "key observations" block.
     ``highlights`` is optional stat tiles, ONE PER LINE as ``label | value | note``
     (up to 6), e.g. "Adjusted EPS | $1.84 | vs $1.91 consensus". Put the numbers
-    that matter there, not in the body. ``subtitle`` is one line under the title.
+    that matter there, not in the body — INCLUDING the report's verdict figure
+    (fear price, fair value, price target) if it has one, since that is the number
+    the reader looks for first. A verdict you instead write as a heading
+    (``## Fear Price: $32.00 – $38.00``) is promoted onto the sheet automatically,
+    taking the last tile's slot if all six are full — but a tile you write
+    yourself keeps the label and note you chose. ``subtitle`` is one line under
+    the title.
     ``theme`` is "light" or "dark" for the IMAGE — use it when the user asks for a
     dark (or light) one-pager; blank follows the configured default, and the PDF
     stays print-friendly either way. ``output`` is "both" (default), "image" for a
@@ -1457,6 +1463,91 @@ def extract_notes(markdown: str, used_titles: set[str]) -> list[str]:
     return picks[:5]
 
 
+#: A figure a tile can carry: money, a plain number, a percentage, a multiple.
+_FIGURE = r"[+\-−]?\s*\$?\s*\d[\d,]*(?:\.\d+)?\s*(?:%|[xX]\b)?"
+#: A heading whose text is ``Label: figure`` — the figure optionally a range, and
+#: optionally trailed by a parenthetical that becomes the tile's note. Anchored at
+#: both ends on purpose: "Coverage: 12 analysts" is a sentence, not a tile value,
+#: and only the anchor tells them apart.
+_HEADING_FIGURE_RE = re.compile(
+    rf"^(?P<label>[^:]{{2,32}}):\s*"
+    rf"(?P<value>{_FIGURE}(?:\s*(?:[-–—/]|to)\s*{_FIGURE})*)"
+    rf"(?:\s*\((?P<note>[^)]{{1,48}})\))?$"
+)
+
+#: How many heading figures may be promoted. A report that prices several
+#: scenarios as headings should not be able to evict every tile the model chose.
+_MAX_PROMOTED = 2
+
+#: Tiles past six stop being scannable — the cap ``parse_highlights`` already
+#: applies, restated here because promotion has to respect the same budget.
+_MAX_TILES = 6
+
+
+def heading_figures(markdown: str) -> list[dict[str, str]]:
+    """Tiles promoted from headings shaped ``Label: figure``.
+
+    A model puts a number in a *heading* only when that number is the section's
+    answer — a fear price, a fair value, a price target. Those are the figures a
+    reader wants first, and they were the one place the cover could not reach:
+    tiles come from ``highlights``, charts from list and table shapes,
+    observations from bullets. A verdict written as a heading matched none of
+    them, so it landed on page 2 of the PDF and nowhere on the image at all
+    (observed: an NVO report whose entire second half priced a
+    ``Fear Price: $32.00 – $38.00`` the cover never mentioned).
+
+    Deterministic like the rest of this section: it re-reads what the model
+    already wrote rather than asking a second model what mattered, so it costs
+    nothing and cannot invent a number.
+    """
+    out: list[dict[str, str]] = []
+    for raw in (markdown or "").splitlines():
+        head = _HEADING_RE.match(raw) or _BOLD_HEADING_RE.match(raw)
+        if not head:
+            continue
+        text = re.sub(r"\*\*|__|`", "", head.group(1)).strip()
+        found = _HEADING_FIGURE_RE.match(text)
+        if not found:
+            continue
+        out.append({
+            "label": found.group("label").strip(),
+            "value": re.sub(r"\s+", " ", found.group("value")).strip(),
+            "note": (found.group("note") or "").strip(),
+        })
+        if len(out) == _MAX_PROMOTED:
+            break
+    return out
+
+
+def cover_tiles(highlights: str, markdown: str = "") -> list[dict[str, str]]:
+    """The stat tiles a sheet shows: the model's ``highlights``, plus any verdict
+    figure it wrote as a heading instead of as a tile.
+
+    A promoted figure DISPLACES the last highlight when all six slots are taken.
+    The model orders highlights most-important-first, so the last one is its own
+    least-important choice, whereas a figure it promoted into a heading is the
+    report's conclusion — dropping the conclusion to keep a sixth context figure
+    is the failure this exists to fix.
+    """
+    tiles = parse_highlights(highlights)
+    seen = {t["label"].strip().lower() for t in tiles if t["label"].strip()}
+    promoted: list[dict[str, str]] = []
+    for extra in heading_figures(markdown):
+        key = extra["label"].lower()
+        if key in seen:  # the model already gave this figure a tile of its own
+            continue
+        seen.add(key)
+        promoted.append(extra)
+    if not promoted:
+        return tiles
+    # Trim the MODEL'S tiles, never what was already promoted. Dropping the last
+    # entry one promotion at a time instead made a second verdict evict the first,
+    # so a report pricing two scenarios showed only the later one.
+    if len(tiles) + len(promoted) > _MAX_TILES:
+        tiles = tiles[: _MAX_TILES - len(promoted)]
+    return tiles + promoted
+
+
 def _notes_html(markdown: str, used_titles: set[str]) -> str:
     picks = extract_notes(markdown, used_titles)
     if not picks:
@@ -1492,7 +1583,7 @@ def build_infographic_html(
     attached: bool = True,
 ) -> str:
     """A one-page visual summary of a multi-page report. Pure and testable."""
-    tiles = parse_highlights(highlights)
+    tiles = cover_tiles(highlights, markdown)
     tiles_html = ""
     if tiles:
         cols = min(len(tiles), 3 if len(tiles) in (3, 5, 6) else 4)
@@ -1551,7 +1642,7 @@ def _fpdf_infographic(
     width_pt = _WIDTH * _PT
     margin = 39.0
     series = extract_series(markdown)
-    tiles = parse_highlights(highlights)
+    tiles = cover_tiles(highlights, markdown)
 
     def draw(height_pt: float | None):
         pdf = FPDF(unit="pt", format=(width_pt, height_pt or (_PAGE_H * _PT)))

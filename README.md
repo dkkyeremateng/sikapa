@@ -851,6 +851,18 @@ rendering bug.
 The body is ordinary markdown: headings, tables, and `>` for a warning callout.
 Files land in `~/.financial-research-assistant/reports`.
 
+**A verdict written as a heading still reaches the cover.** A heading shaped
+`## Fear Price: $32.00 – $38.00` — a fear price, fair value, or price target —
+is promoted to a stat tile on both the image and the PDF, taking the last tile's
+slot if all six are full. Without it the one number a report exists to produce
+could sit on page 2 while the cover showed six context figures, which is exactly
+what happened to an NVO sheet whose entire second half priced a fear zone the
+image never mentioned. Promotion is deterministic — it re-reads the heading the
+model wrote rather than asking a second model what mattered, so it costs nothing
+and cannot invent a figure. It only fires when the text after the colon *is* a
+figure, so `## Coverage: 12 analysts` stays prose; write the tile yourself in
+`highlights` when you want a different label or note.
+
 **Light or dark, per artifact.** `FINANCIAL_RESEARCH_REPORT_THEME=dark` renders
 the **cover image** on a dark surface; the **PDF stays light** unless you also set
 `FINANCIAL_RESEARCH_REPORT_PDF_THEME=dark`. They are separate on purpose: the image
