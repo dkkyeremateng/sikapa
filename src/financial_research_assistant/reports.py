@@ -978,6 +978,76 @@ def _build_cover(
     return None
 
 
+# --- the portfolio-review guard -------------------------------------------------
+#
+# Routing a performance review to `render_review` was asked for in the system
+# prompt AND in this module's docstring, and three runs with both loaded ignored
+# both. The last one did not merely retype a figure: it invented the entire
+# monthly series (January "+5.2%" against a real +0.10%, April "+1.9%" against a
+# real +17.87%), invented the annual track record, and put the trailing-twelve-
+# month return back on the sheet as year-to-date. Every number a reader would act
+# on was wrong, on a sheet that looked exactly as authoritative as a correct one.
+#
+# Prompts request; a refusal decides. This is the same shape as the chartless-body
+# refusal below — it declines and says precisely what to call instead.
+
+#: Set while `render_review` is driving, so the sheet it builds is not refused.
+_rendering_review: ContextVar[bool] = ContextVar("fra_rendering_review", default=False)
+
+
+@contextmanager
+def reviewing():
+    """Mark this render as coming FROM `render_review` — see `_looks_like_a_review`."""
+    token = _rendering_review.set(True)
+    try:
+        yield
+    finally:
+        _rendering_review.reset(token)
+
+
+_PORTFOLIO_WORDS = ("portfolio", "my holdings", "account performance")
+_REVIEW_WORDS = ("review", "performance", "year-to-date", "year to date", "ytd",
+                 "quarter", "monthly", "annual", "recap")
+#: Tile labels that mark a sheet as a PERFORMANCE review rather than, say, a
+#: portfolio risk or allocation sheet — which stay allowed.
+_REVIEW_TILES = ("return", "unrealised", "unrealized", "drawdown", "dividend",
+                 "investment gain", "portfolio value", "deposit", "nav")
+
+
+def _looks_like_a_review(title: str, subtitle: str, highlights: str) -> bool:
+    """Whether this call is a portfolio performance review built by hand.
+
+    Deliberately narrow, and requiring all three: the words for a portfolio, the
+    words for a review of one, and at least two performance figures in the tiles.
+    A single-stock sheet has no portfolio word; a portfolio RISK or ALLOCATION
+    sheet has no review word and different tiles. Both keep working.
+    """
+    head = f"{title} {subtitle}".lower()
+    if not any(w in head for w in _PORTFOLIO_WORDS):
+        return False
+    if not any(w in head for w in _REVIEW_WORDS):
+        return False
+    labels = " ".join(t["label"] for t in parse_highlights(highlights)).lower()
+    return sum(1 for w in _REVIEW_TILES if w in labels) >= 2
+
+
+_REVIEW_REFUSAL = (
+    "NOT RENDERED — this is a portfolio performance review, and building one here "
+    "means writing its figures by hand.\n"
+    "Call `render_review(period=..., observations=..., stance=...)` instead. It "
+    "computes the return, deposits, investment gain, drawdown, monthly path, "
+    "holdings, income and concentration, renders the sheet and delivers it. You "
+    "supply only `observations` — 3-6 bullets on what the numbers mean.\n"
+    "This is refused rather than warned about because a hand-built review last "
+    "shipped an entire monthly series that was invented: January '+5.2%' where the "
+    "account returned +0.10%, April '+1.9%' where it returned +17.87%, and a "
+    "trailing-twelve-month return labelled year-to-date.\n"
+    "If you genuinely need a custom portfolio sheet that is NOT a performance "
+    "review — an allocation breakdown, a risk profile, a tax-lot summary — title it "
+    "for what it is and it will render."
+)
+
+
 # --- Model-facing tool ---------------------------------------------------------
 
 
@@ -993,6 +1063,12 @@ def render_report(
     stance: str = "",
 ) -> str:
     """Typeset a summary as a PDF + cover image and send it to the user's channels.
+
+    NOT FOR A PORTFOLIO PERFORMANCE REVIEW — call `render_review(period,
+    observations, stance)` instead, which computes the figures and renders in one
+    step. Building one here means writing the tiles by hand, and every delivered
+    review that carried a wrong number carried one that had been typed rather than
+    read.
 
     Use when the user asks for a report/infographic/PDF/one-pager, or wants
     something "sent"/"pushed" to them as a file rather than as chat text — and for
@@ -1044,6 +1120,11 @@ def render_report(
     """
     if not (title or "").strip() and not (markdown or "").strip():
         return "Nothing to render — give at least a title or some body text."
+
+    # Before anything is drawn: a performance review assembled by hand is refused,
+    # because its figures were typed rather than read. See `_looks_like_a_review`.
+    if not _rendering_review.get() and _looks_like_a_review(title, subtitle, highlights):
+        return _REVIEW_REFUSAL
 
     # Refuse a chartless body rather than shipping a cover of tiles and text.
     # A narrative report is a legitimate outcome, but it should be a decision:
@@ -1139,6 +1220,15 @@ def render_report(
                 "No channel accepted a file — check TELEGRAM_BOT_TOKEN / "
                 "TELEGRAM_CHAT_ID, or read the saved file directly."
             )
+    else:
+        # Said outright, because silence here reads as success. With deliver=False
+        # the result was "Rendered … Saved: …" and nothing else, which is
+        # indistinguishable from a delivered report — so a report that was never
+        # sent could be reported to the user as sent.
+        lines.append(
+            "NOT SENT — deliver=False, so this is on disk only and the user has "
+            "NOT received it. Call again with deliver=True if they asked for it."
+        )
     return "\n".join(lines)
 
 
@@ -1159,6 +1249,8 @@ REPORT_TOOLS = [render_report]
 
 #: A percentage anywhere in a list item, sign preserved.
 _PCT_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)\s*%")
+#: A parenthetical aside — context hung off a figure, never the figure itself.
+_ASIDE_RE = re.compile(r"\s*\([^)]*\)")
 #: Where a label stops: a dash/colon separator, or the figure itself.
 _LABEL_SPLIT = re.compile(r"\s*[–—:|]\s*|\s+(?=[+-]?\d+(?:\.\d+)?\s*%)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
@@ -1382,6 +1474,12 @@ def _inline_series(line: str, heading: str) -> dict[str, Any] | None:
         clean = label.strip(" .:-–—,").strip()
         # Drop leading connectives the regex may have swallowed.
         clean = re.sub(r"^(?:and|or|with|plus|vs\.?)\s+", "", clean, flags=re.I).strip()
+        # And the trailing one the pattern swallowed on its way to the figure:
+        # "Healthcare is 27.9%" yields the label "Healthcare is", which charts as a
+        # sentence cut mid-phrase. The list path already refuses those via
+        # `_is_label`; this path had no equivalent. (Observed on a delivered sheet:
+        # bars reading "Healthcare is" and "Consumer Cyclical at".)
+        clean = _DANGLING_RE.sub("", clean).strip()
         if len(clean) < 2 or len(clean) > _MAX_LABEL:
             return None
         items.append((clean, float(digits)))
@@ -1456,12 +1554,31 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
             flush()  # prose ends a run
             continue
         text = item.group(1)
-        found = _PCT_RE.search(text)
-        if not found:
+        if not _PCT_RE.search(text):
             continue
+        # An EMBEDDED breakdown is tried first, and on the whole line, because it
+        # habitually lives inside the parentheses: "(North America ~65%, Europe
+        # ~35%)". Stripping asides before this point erased those breakdowns
+        # entirely — the fix below, applied one step too early.
         embedded = _inline_series(text, heading)
         if embedded:
-            inline.append(embedded)
+            # Filtered on the SOURCE heading, not the series title: an inline
+            # breakdown names itself after the sentence it came from, so a
+            # commentary section slipped past the prose-heading check that already
+            # governs list and table series. It shipped a chart headed
+            # "Concentration risk is material and rising. VOO a" — a sentence, cut
+            # at the title limit — with bars labelled "VOO alone" and "AMZN
+            # together represent".
+            if not _is_prose_heading(heading):
+                inline.append(embedded)
+            continue
+        # For a SINGLE measure, though, an aside cannot be it. Searched over the
+        # whole line, "Sharpe ratio: 1.06 (risk-free rate = 0%)" charts as 0.0% —
+        # the first percent sign belongs to the aside, and a ratio is not a
+        # percentage at all, so the bar reads as the metric while showing a number
+        # from its own footnote. (Observed on a delivered risk profile.)
+        found = _PCT_RE.search(_ASIDE_RE.sub("", text))
+        if not found:
             continue
         label = _clean_label(text)
         if not label:

@@ -709,6 +709,15 @@ def query_portfolio(symbol: str = "", account: str = "") -> str:
                 f"      qty {p['quantity']} · cost basis {p['cost_basis']:.2f} · "
                 f"value {p['value']:.2f} · unrealized P/L {p['unrealized_pl']:+.2f}"
             )
+        # TOTALLED HERE, not left to the reader. Listing eleven P/L figures and no
+        # sum meant every report that wanted a portfolio total added them up by
+        # hand — and three delivered sheets in a row got it wrong by a couple of
+        # dollars, quietly, under line items that were individually correct.
+        lines.append(
+            f"  TOTAL  cost basis {sum(p['cost_basis'] or 0 for p in positions):.2f} · "
+            f"value {sum(p['value'] or 0 for p in positions):.2f} · "
+            f"unrealized P/L {sum(p['unrealized_pl'] or 0 for p in positions):+.2f}"
+        )
     if nav["rows"]:
         lines.append("")
         lines.append("NET ASSET VALUE (asset class · prior → current · change):")
@@ -969,6 +978,123 @@ def portfolio_period_return(start: str = "", end: str = "") -> str:
     return "\n".join(lines)
 
 
+def portfolio_review_brief(period: str = "", account: str = "") -> str:
+    """EVERY figure a portfolio performance review needs, already computed and
+    formatted for `render_report`.
+
+    USE THIS FIRST for any 'performance review / portfolio review / how did I do'
+    request — year-to-date, last month, a quarter, a year. It resolves the period,
+    pulls the time-weighted return, deposits, investment gain, drawdown, monthly
+    path, holdings, income, realised gains and concentration in one call, and
+    returns a ready `highlights` block and markdown body.
+
+    PASS THEM THROUGH VERBATIM. Copy the HIGHLIGHTS block into `render_report`'s
+    ``highlights`` and the MARKDOWN block into ``markdown``, then ADD your own
+    observations section — what the shape means, what stands out, what is
+    unflattering. Do not retype the figures: they are correct here, and a
+    delivered sheet once printed a total two dollars off the line items directly
+    above it.
+
+    ``period`` accepts 'ytd' (default), 'last month', 'this month', 'last
+    quarter', 'Q2 2026', '2025', 'last 90 days', or '2026-01-01..2026-06-30'.
+    Windows are anchored on the statement's last session, not today.
+    """
+    from . import reviews
+
+    try:
+        brief = reviews.build_review(period=period, account=account)
+    except Exception as exc:  # unknown period, no Flex file, window out of range
+        return f"Could not build the review: {exc}"
+
+    f = brief["facts"]
+    return "\n".join([
+        f"REVIEW BRIEF · {brief['period_label']}",
+        f"  title: {brief['title']}",
+        f"  subtitle: {brief['subtitle']}",
+        "",
+        "HIGHLIGHTS (pass verbatim as `highlights`):",
+        brief["highlights"],
+        "",
+        "MARKDOWN (pass as `markdown`, then append your own observations):",
+        brief["markdown"],
+        "CONTEXT for your commentary — do not restate mechanically:",
+        f"  winning sessions {f['up_sessions']}/{f['sessions']}; "
+        f"realised {f['realized']:,.2f} across {f['closed_lots']} closed lots",
+        f"  deposits were {f['deposit_share_pct']:.1f}% of the NAV change",
+        f"  cross-check {f['reconciled']} sessions agree with the NAV movement "
+        f"IBKR reports for the same day",
+        f"  whole imported file ({f['whole_file_window']}) returned "
+        f"{f['whole_file_pct']:+.2f}% — a DIFFERENT window; never report it as this one",
+    ])
+
+
+def render_review(
+    period: str = "",
+    observations: str = "",
+    stance: str = "",
+    deliver: bool = True,
+    theme: str = "",
+    account: str = "",
+) -> str:
+    """Render AND send a portfolio performance review for a period, in one call.
+
+    THIS IS THE DEFAULT for 'performance review / portfolio review / how did I do'
+    — year-to-date, last month, a quarter, a year. Every figure on the sheet is
+    computed here: the return, deposits, investment gain, drawdown, monthly path,
+    holdings, income, concentration. You do not supply any of them, and cannot get
+    one wrong.
+
+    What YOU write is ``observations`` — markdown bullets saying what the numbers
+    mean. That is the whole job: which month carried the period, whether growth
+    came from deposits or returns, what the concentration implies, what looks
+    unflattering. Write 3-6 bullets, one insight each, and reference figures
+    without restating long lists of them.
+
+    ``period`` accepts 'ytd' (default), 'last month', 'this month', 'last
+    quarter', 'Q2 2026', '2025', 'last 90 days', or '2026-01-01..2026-06-30'.
+    ``stance`` badges your call ('HOLD | concentration is the standing risk').
+    ``deliver=False`` renders without sending. Use `portfolio_review_brief`
+    instead only when you need the figures for a report you are shaping yourself.
+    """
+    from . import reports, reviews
+
+    try:
+        brief = reviews.build_review(period=period, account=account)
+    except Exception as exc:  # unknown period, no Flex file, window out of range
+        return f"Could not build the review: {exc}"
+
+    body = brief["markdown"]
+    notes = (observations or "").strip()
+    if notes:
+        # Normalised to bullets so a paragraph still charts as observations rather
+        # than sinking into prose the cover cannot use.
+        lines = [ln.strip() for ln in notes.splitlines() if ln.strip()]
+        bullets = "\n".join(
+            ln if ln.startswith(("-", "*", "#")) else f"- {ln}" for ln in lines
+        )
+        body += f"\n## Observations\n{bullets}\n"
+
+    # `reviewing()` exempts this from the guard in `render_report`: the sheet it
+    # refuses is a hand-built one, and this one's figures came from the brief.
+    with reports.reviewing():
+        out = reports.render_report(
+            brief["title"],
+            body,
+            highlights=brief["highlights"],
+            subtitle=brief["subtitle"],
+            stance=stance,
+            deliver=deliver,
+            theme=theme,
+        )
+    lines = [f"Rendered the {brief['period_label']} review.", out]
+    if not notes:
+        lines.append(
+            "No observations were supplied, so the sheet is figures only — call "
+            "again with `observations` to say what they mean."
+        )
+    return "\n".join(lines)
+
+
 def allocation(account: str = "") -> str:
     """Portfolio allocation & concentration from the newest imported statement's
     open positions: each position's weight as a % of the book, the largest
@@ -1007,9 +1133,13 @@ def allocation(account: str = "") -> str:
             f"  {p['symbol']:<6} {p['weight_pct']:>5.1f}%  "
             f"value {p['value']:>12,.2f}  {p['description']}"
         )
+    # Stated here too, because this is the tool a portfolio report reaches for and
+    # it previously reported values with no P/L at all — leaving the total to be
+    # assembled by hand from somewhere else.
     lines.append(
         f"largest position {res['largest_weight_pct']:.1f}% · "
-        f"top-5 concentration {res['top5_concentration_pct']:.1f}%"
+        f"top-5 concentration {res['top5_concentration_pct']:.1f}% · "
+        f"total unrealized P/L {res['unrealized_pl']:+,.2f} (since purchase)"
     )
     cats = ", ".join(f"{c} {v['weight_pct']:.1f}%" for c, v in res["by_category"].items())
     lines.append(f"by asset category: {cats}")

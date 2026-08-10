@@ -851,6 +851,34 @@ rendering bug.
 The body is ordinary markdown: headings, tables, and `>` for a warning callout.
 Files land in `~/.financial-research-assistant/reports`.
 
+**Performance reviews are one call, not a prompt.** Ask in a sentence — *"produce
+my year-to-date portfolio performance review and send it to Telegram"*, *"generate
+a performance review for last month"* — and `render_review(period, observations,
+stance)` computes every figure, renders the sheet and delivers it. The agent
+supplies only `observations`: three to six bullets on what the numbers mean.
+
+That split is the point. It has no parameter through which a figure could arrive,
+so it cannot get one wrong. Three delivered sheets in a row printed `$7,410.61`
+where the source said `$7,412.61` — each time because the model had rewritten a
+figure by hand, and twice while under explicit instruction not to. Docstrings ask
+for compliance; a signature removes the choice.
+
+`portfolio_review_brief(period=...)` returns the same figures **without**
+rendering, for shaping a report by hand or answering in chat.
+
+`period` takes `ytd` (default), `last month`, `this month`, `last quarter`,
+`Q2 2026`, `2025`, `last 90 days`, or `2026-01-01..2026-06-30`. Windows anchor on
+the **statement's last session, not today**, so a file pulled on the 7th and read
+on the 10th still means the same month by "this month"; a window the statement
+cannot reach is refused rather than quietly answered for a different span, and one
+it can only partly cover says so in its own title.
+
+This exists because four generated reviews were each wrong in a different way.
+Pasted into a prompt, the method was one dropped newline from vanishing — and the
+reply looked finished either way. With the method intact, the figures still had to
+be retyped, and one sheet printed a total two dollars off the line items directly
+above it. A template that computes has neither failure available to it.
+
 **The call gets a badge.** `stance="HOLD | trim 50% at $40–$42"` puts a
 colour-coded pill under the title on both the image and the PDF — buy /
 accumulate / overweight read positive, sell / reduce / trim / underweight

@@ -1461,3 +1461,138 @@ def test_a_real_breakdown_under_a_data_heading_still_charts():
         "- **Industrials:** 7.8%\n"
     )
     assert series and series[0]["title"] == "Sector Exposure"
+
+
+def test_a_figure_in_a_parenthetical_aside_is_not_the_items_measure():
+    """`- Sharpe ratio: 1.06 (risk-free rate = 0%)` charted as 0.0%: the first
+    percent sign belongs to the aside, and a ratio is not a percentage at all. The
+    bar read as the metric while showing a number from its own footnote. Observed
+    on a delivered risk profile."""
+    series = reports.extract_series(
+        "## Risk Profile\n"
+        "- Annualised volatility: 16.0%\n"
+        "- Sharpe ratio: 1.06 (risk-free rate = 0%)\n"
+        "- Beta vs SPY: 0.91 (less volatile than the market)\n"
+        "- Max drawdown: -20.2% (measured over 2025-08-11 to 2026-08-10)\n"
+    )
+    # Sharpe and beta carry no percentage of their own, so only two items remain —
+    # below the minimum. No chart is the right answer: volatility, a ratio and a
+    # drawdown were never a comparable set.
+    assert series == []
+
+
+def test_an_aside_does_not_stop_a_real_breakdown_charting():
+    series = reports.extract_series(
+        "## Sector Exposure\n"
+        "- **Healthcare (US listed):** 27.9% — UNH, NVO\n"
+        "- **Technology:** 21.3% (mega-cap weighted)\n"
+        "- **Industrials:** 7.8%\n"
+    )
+    assert [v for _l, v in series[0]["items"]] == [27.9, 21.3, 7.8]
+
+
+# --- the portfolio-review guard --------------------------------------------------
+
+_REVIEW_HL = (
+    "YTD Time-Weighted Return | +19.35% | deposit-independent\n"
+    "Portfolio Value | $41,265.40 | current NAV\n"
+    "Unrealised P/L | +$7,412.60 | since purchase"
+)
+_CHARTABLE = "## Mix\n- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+
+
+def test_a_hand_built_performance_review_is_refused():
+    """Routing to `render_review` was asked for in the system prompt and in this
+    module's docstring, and three runs with both loaded ignored both. The last did
+    not merely retype a figure — it invented the whole monthly series (January
+    "+5.2%" against a real +0.10%, April "+1.9%" against a real +17.87%) and put
+    the trailing-twelve-month return on the sheet as year-to-date. A prompt
+    requests; a refusal decides."""
+    out = reports.render_report(
+        "Year-to-Date Portfolio Review 2026", _CHARTABLE,
+        highlights=_REVIEW_HL, subtitle="As of August 10, 2026", deliver=False,
+    )
+    assert out.startswith("NOT RENDERED")
+    assert "render_review" in out
+
+
+def test_render_review_itself_is_not_refused():
+    with reports.reviewing():
+        out = reports.render_report(
+            "Portfolio Performance — 2026 year to date", _CHARTABLE,
+            highlights=_REVIEW_HL, deliver=False,
+        )
+    assert not out.startswith("NOT RENDERED")
+
+
+def test_a_single_stock_report_is_not_a_portfolio_review():
+    """The guard must cost nothing to every other report on the system."""
+    out = reports.render_report(
+        "NVO — Novo Nordisk | Biotech Under Pressure", _CHARTABLE,
+        highlights="Current Price | $47.20 | -24.2% YTD", deliver=False,
+    )
+    assert not out.startswith("NOT RENDERED")
+
+
+def test_a_portfolio_allocation_sheet_is_not_a_performance_review():
+    """A portfolio sheet that is not a REVIEW — allocation, risk, tax lots — has no
+    review word and different tiles, and keeps rendering."""
+    for title, highlights in (
+        ("Portfolio Allocation Breakdown",
+         "Total value | $41,265.40 | 11 positions\nTop-5 | 64.2% | concentration"),
+        ("Portfolio Risk Profile",
+         "Volatility | 16.0% | annualised\nBeta vs SPY | 0.91 | trailing"),
+    ):
+        out = reports.render_report(title, _CHARTABLE, highlights=highlights,
+                                    deliver=False)
+        assert not out.startswith("NOT RENDERED"), title
+
+
+def test_the_guard_needs_two_performance_tiles_not_one():
+    """One return figure on a portfolio-titled sheet is not enough to call it a
+    review — the bar is deliberately above a single coincidence."""
+    out = reports.render_report(
+        "Portfolio Review 2026", _CHARTABLE,
+        highlights="Total value | $41,265.40 | 11 positions", deliver=False,
+    )
+    assert not out.startswith("NOT RENDERED")
+
+
+def test_an_undelivered_report_says_it_was_not_sent():
+    """With deliver=False the result was "Rendered … Saved: …" and nothing else —
+    indistinguishable from a delivered one. A report that never left the machine
+    could therefore be reported to the user as sent, which is what they noticed."""
+    out = reports.render_report("T", _CHARTABLE, highlights="X | 1 |", deliver=False)
+    assert "NOT SENT" in out
+    assert "deliver=True" in out, "and it says how to actually send it"
+
+
+def test_an_inline_label_is_not_a_sentence_cut_mid_phrase():
+    """"Healthcare is 27.9%" yields the label "Healthcare is", which charts as a
+    fragment. The list path refuses those via `_is_label`; this path had no
+    equivalent, and shipped bars reading "Healthcare is" and "Consumer Cyclical
+    at"."""
+    got = reports._inline_series(
+        "Healthcare is 27.9% and Consumer Cyclical at 14.8% of the book.", "h"
+    )
+    assert [l for l, _v in got["items"]] == ["Healthcare", "Consumer Cyclical"]
+
+
+def test_prose_in_a_commentary_section_is_not_charted_as_a_breakdown():
+    """An inline breakdown names itself after the SENTENCE it came from, so a
+    commentary section slipped past the prose-heading check that already governs
+    list and table series. It shipped a chart headed "Concentration risk is
+    material and rising. VOO a" — a sentence cut at the title limit — with bars
+    reading "VOO alone" and "AMZN together represent"."""
+    assert reports.extract_series(
+        "## Observations\n"
+        "- Concentration risk is material and rising. VOO alone is 27.2% and "
+        "AMZN together represent 24.0% of the book.\n"
+    ) == []
+
+
+def test_a_real_inline_breakdown_under_a_data_heading_still_charts():
+    series = reports.extract_series(
+        "## Revenue Mix\n- Split by region (North America ~65%, Europe ~35%)\n"
+    )
+    assert series[0]["items"] == [("North America", 65.0), ("Europe", 35.0)]

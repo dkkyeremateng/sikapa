@@ -777,3 +777,27 @@ def test_listing_transactions_does_not_repeat_overlapping_rows(monkeypatch, tmp_
         "Dividends,Data,USD,U1,2025-04-01,AMZN(US1) Cash Dividend,12\n"
     )
     assert len(s.query_transactions(kind="dividend", account="U1", limit=500)) == len(once)
+
+
+def test_the_portfolio_total_is_summed_before_it_is_rounded(monkeypatch, tmp_path):
+    """Adding the DISPLAYED per-position figures compounds one rounding per row
+    into the total. On the real book the raw values sum to 7,412.6016 — a true
+    $7,412.60 — while summing the rounded rows gives $7,412.61, a cent that is not
+    in the data and that a second tool reporting the same quantity disagrees with.
+    """
+    from financial_research_assistant import statements as s
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    monkeypatch.setattr(s, "query_positions", lambda symbol=None, account=None: [
+        # Each rounds UP a fraction of a cent; three rows turn that into a whole one.
+        {"symbol": "A", "value": 100.0, "unrealized_pl": 1.004, "currency": "USD",
+         "description": "", "asset_category": "STK"},
+        {"symbol": "B", "value": 100.0, "unrealized_pl": 1.004, "currency": "USD",
+         "description": "", "asset_category": "STK"},
+        {"symbol": "C", "value": 100.0, "unrealized_pl": 1.004, "currency": "USD",
+         "description": "", "asset_category": "STK"},
+    ])
+    res = s.allocation()
+    assert res["unrealized_pl"] == 3.01, "raw 3.012 rounds to 3.01"
+    assert sum(p["unrealized_pl"] for p in res["positions"]) == 3.00, (
+        "the displayed rows sum to something else — which is the trap"
+    )

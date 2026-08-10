@@ -1610,8 +1610,15 @@ def allocation(account: str | None = None, fx: dict[str, Any] | None = None) -> 
         by_category[cat] = by_category.get(cat, 0.0) + val
     ranked.sort(key=lambda r: r["value"], reverse=True)
     top5 = sum(r["weight_pct"] for r in ranked[:5])
+    # Summed from the RAW values, then rounded once. Adding the displayed
+    # per-position figures instead compounds eleven roundings into the total: this
+    # book's true unrealised P/L is 7,412.6016, and summing the rounded rows gives
+    # 7,412.61 — a cent that is not in the data, and a second tool reporting the
+    # same quantity would disagree with it.
+    unrealized = sum(p.get("unrealized_pl") or 0.0 for p in positions)
     return {
         "total_value": round(total, 2),
+        "unrealized_pl": round(unrealized, 2),
         "positions": ranked,
         "largest_weight_pct": ranked[0]["weight_pct"] if ranked else 0.0,
         "top5_concentration_pct": round(top5, 2),
