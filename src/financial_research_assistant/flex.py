@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -234,30 +235,62 @@ def _fstr(el: Any, *names: str) -> str:
     return ""
 
 
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_COMPACT_DATE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+
+
+def _iso_date(raw: str) -> str:
+    """Normalize a Flex date to ISO ``YYYY-MM-DD``.
+
+    The query's Date Format is a dropdown, and only its ISO setting matches what
+    every date comparison here assumes: holding periods are classified against an
+    acquisition anniversary, tax years come from the leading four characters, and
+    the store sorts on these strings. IBKR's ``yyyyMMdd`` default slices to
+    ``2025-09-2`` — a string that is wrong everywhere and raises nowhere.
+
+    ``yyyyMMdd`` is converted, since it is unambiguous. A day-first or month-first
+    format is **not** guessed at: ``03/04/2026`` is two different days depending on
+    a setting this file doesn't carry, and picking one would misdate trades near
+    the start of a month rather than fail. Those raise, with the fix named.
+    """
+    text = raw.strip()
+    if not text or _ISO_DATE.match(text):
+        return text
+    compact = _COMPACT_DATE.match(text)
+    if compact:
+        return "-".join(compact.groups())
+    raise FlexError(
+        f"unrecognized date {text!r} — set the Flex query's Date Format to "
+        f"'yyyy-MM-dd' (General Configuration). Day-first and month-first formats "
+        f"are ambiguous and would silently misdate trades."
+    )
+
+
 def _flex_datetime(raw: str) -> str:
     """Normalize a Flex ``dateTime`` to the CSV importer's ``"YYYY-MM-DD, HH:MM:SS"``.
 
     Flex joins the two halves with whatever Date/Time Separator the query is
     configured for (a semicolon by default). Everything downstream slices the
-    first ten characters, so only the date half has to be right — but emitting one
-    shape means a row is indistinguishable whether it arrived by CSV or by Flex.
+    first ten characters, so the date half has to be both right and ISO — but
+    emitting one shape means a row is indistinguishable whether it arrived by CSV
+    or by Flex.
     """
     text = raw.strip()
     for sep in (";", " "):
         if sep in text:
             date_part, _, time_part = text.partition(sep)
-            return f"{date_part.strip()}, {time_part.strip()}"
-    return text
+            return f"{_iso_date(date_part)}, {time_part.strip()}"
+    return _iso_date(text)
 
 
 def _iso_period(start: str, end: str) -> str:
-    """Render an ISO date range as the period string the store keys imports on.
+    """Render a Flex date range as the period string the store keys imports on.
 
     ``statements._period_bounds`` parses ``"%B %d, %Y"`` back out of this to date
     the NAV curve, so the format is load-bearing, not cosmetic."""
     try:
-        s = datetime.strptime(start, "%Y-%m-%d").strftime("%B %d, %Y")
-        e = datetime.strptime(end, "%Y-%m-%d").strftime("%B %d, %Y")
+        s = datetime.strptime(_iso_date(start), "%Y-%m-%d").strftime("%B %d, %Y")
+        e = datetime.strptime(_iso_date(end), "%Y-%m-%d").strftime("%B %d, %Y")
     except ValueError:
         return ""
     return f"{s} - {e}"
@@ -276,6 +309,38 @@ def _summary_only(elements: list[Any]) -> list[Any]:
     if not tagged:
         return elements
     return [e for e in elements if (e.get("levelOfDetail") or "SUMMARY").upper() == "SUMMARY"]
+
+
+# Container element -> (the query section that produces it, what is lost without
+# it). A section that is *selected but empty* still emits its container, so an
+# absent element means the query was never asked for that data — which is the
+# distinction that makes this worth reporting rather than guessing at.
+_EXPECTED_SECTIONS = (
+    ("Trades", "Trades", "no trades: cost basis and realized gains cannot be computed"),
+    ("OpenPositions", "Open Positions", "no holdings"),
+    ("CashTransactions", "Cash Transactions", "no dividends, withholding tax or fees"),
+    ("CorporateActions", "Corporate Actions",
+     "splits will not adjust lots, silently distorting cost basis per share"),
+    ("SecuritiesInfo", "Financial Instrument Information", "no ISIN/exchange for holdings"),
+    ("EquitySummaryInBase", "Net Asset Value (NAV) in Base", "no NAV breakdown or history"),
+    ("ChangeInNAV", "Change in NAV", "no time-weighted return"),
+)
+
+
+def _missing_sections(statements: list[Any]) -> list[str]:
+    """Sections the query never asked for, as human-readable warnings.
+
+    The dangerous one is Corporate Actions. Its absence looks exactly like a year
+    with no splits — the import succeeds, every number renders, and a 3-for-1 goes
+    unapplied so that position's cost basis per share is silently three times what
+    it should be. Naming the gap is the only way that surfaces before a tax return
+    does.
+    """
+    return [
+        f"{label} not in the Flex query — {consequence}"
+        for tag, label, consequence in _EXPECTED_SECTIONS
+        if not any(stmt.find(tag) is not None for stmt in statements)
+    ]
 
 
 def _stmt_account(stmt: Any) -> str:
@@ -500,7 +565,9 @@ def parse_flex_xml(xml: str) -> dict[str, Any]:
 
     statements = sorted(
         root.iter("FlexStatement"),
-        key=lambda s: (s.get("toDate") or "", s.get("fromDate") or ""),
+        # Normalized before comparing: raw compact and hyphenated dates sort
+        # against each other wrongly, so the "last" statement would be the wrong one.
+        key=lambda s: (_iso_date(s.get("toDate") or ""), _iso_date(s.get("fromDate") or "")),
     )
     if not statements:
         raise FlexError("Flex statement contains no <FlexStatement> — check the query's period")
@@ -541,8 +608,8 @@ def parse_flex_xml(xml: str) -> dict[str, Any]:
         if acct and acct not in accounts:
             accounts.append(acct)
 
-    start = min((s.get("fromDate") or "") for s in statements)
-    end = max((s.get("toDate") or "") for s in statements)
+    start = min(_iso_date(s.get("fromDate") or "") for s in statements)
+    end = max(_iso_date(s.get("toDate") or "") for s in statements)
 
     return {
         "account": "+".join(accounts),
@@ -555,6 +622,9 @@ def parse_flex_xml(xml: str) -> dict[str, Any]:
         "instruments": list(instruments.values()),
         "nav": _nav_rows(statements),
         "corporate_actions": corporate_actions,
+        # Carried alongside the data rather than logged: what's missing is a
+        # property of this import, and the caller is the one who can act on it.
+        "warnings": _missing_sections(statements),
     }
 
 
@@ -600,10 +670,13 @@ def flex_sync(
 
     summary = statements.store_statement(parsed)
     verb = "Re-imported" if summary["replaced"] else "Imported"
-    return (
+    out = (
         f"Fetched Flex statement for query {qid} ({len(xml):,} bytes) → saved {path}.\n"
         f"{verb} {summary['period']} for {summary['account']}: "
         f"{summary['trades']} trades, {summary['cash']} cash movements, "
         f"{summary['positions']} positions, {summary['corporate_actions']} corporate actions"
         + (f", TWR {summary['twrr']}" if summary["twrr"] else "")
     )
+    for warning in parsed.get("warnings") or []:
+        out += f"\n  warning: {warning}"
+    return out
