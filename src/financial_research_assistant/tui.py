@@ -36,6 +36,7 @@ from __future__ import annotations
 import html as _html
 import json
 import os
+import re
 import time
 from collections.abc import Callable
 from typing_extensions import override
@@ -245,10 +246,52 @@ class CommandInput(Input):
     """Input with a slash-command palette (↑/↓ select, Tab/→ fill, Enter run)
     and prompt history (↑/↓ when the palette is closed)."""
 
+    #: Marker standing in for a multi-line paste, e.g. ``[pasted 52 lines #1]``.
+    _PASTE_MARK = re.compile(r"\[pasted \d+ lines #(\d+)\]")
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._history: list[str] = []
         self._history_index: int = -1
+        self._pastes: dict[str, str] = {}
+
+    @override
+    def _on_paste(self, event: events.Paste) -> None:
+        """Keep every line of a multi-line paste.
+
+        ``Input._on_paste`` does ``event.text.splitlines()[0]`` — it takes the
+        first line and DISCARDS the rest, with nothing shown to say it happened.
+        Pasting a fifty-line prompt therefore submits its first sentence, and the
+        agent answers that instead: the request looks honoured, the output looks
+        finished, and only the content reveals that forty-nine lines never
+        arrived. (Observed: a portfolio review whose entire method section was
+        silently dropped, producing a confident report built on the wrong return.)
+
+        A single-line ``Input`` cannot render newlines, so the text is held aside
+        and a marker takes its place in the box. ``expand`` puts it back at submit
+        time. Deleting the marker deletes the paste, which is what it looks like.
+        """
+        text = event.text or ""
+        # BOTH are required. `stop()` only halts bubbling; Textual walks the whole
+        # MRO for `_on_paste` and breaks out only on `_no_default_action`, so
+        # without `prevent_default()` the base handler still runs after this one
+        # and appends its first line — observed as "[pasted 2 lines #1]alpha".
+        event.stop()
+        event.prevent_default()
+        if not text:
+            return
+        if "\n" not in text.strip():
+            self.insert_text_at_cursor(text.strip("\n"))
+            return
+        token = str(len(self._pastes) + 1)
+        self._pastes[token] = text
+        self.insert_text_at_cursor(f"[pasted {len(text.splitlines())} lines #{token}]")
+
+    def expand(self, value: str) -> str:
+        """The submitted text with every surviving paste marker restored."""
+        return self._PASTE_MARK.sub(
+            lambda m: self._pastes.get(m.group(1), m.group(0)), value
+        )
 
     def _open_palette(self) -> OptionList | None:
         try:
@@ -1066,7 +1109,11 @@ class AgentApp(App[Any]):
         # Modal inputs (ModelScreen) handle their own submit.
         if not isinstance(event.input, CommandInput):
             return
-        msg = event.value.strip()
+        # Markers back to text BEFORE anything reads the message: a paste that
+        # reached the input only to be sent as "[pasted 52 lines #1]" would be the
+        # same silent loss in a new costume.
+        typed = event.value.strip()
+        msg = event.input.expand(typed).strip()
         try:
             palette = self.query_one("#command-list", OptionList)
         except Exception:
@@ -1081,8 +1128,12 @@ class AgentApp(App[Any]):
         ):
             hl = palette.get_option_at_index(palette.highlighted or 0).id or ""
             if hl.startswith(msg.lower()):
-                msg = hl
-        event.input.record_history(msg)
+                msg = typed = hl
+        # History keeps the MARKER form. Recalling with ↑ assigns straight to
+        # `Input.value`, and a single-line box cannot render the newlines the
+        # expanded text carries; the marker recalls cleanly and re-expands on the
+        # next submit, since `_pastes` outlives the turn.
+        event.input.record_history(typed)
         event.input.clear()
         if palette is not None:
             palette.display = False
