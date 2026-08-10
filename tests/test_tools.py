@@ -1054,3 +1054,24 @@ def test_income_summary_tool_adds_usd_total(monkeypatch, tmp_path):
     assert "USD:" in out and "EUR:" in out
     assert "40.00 USD net total" in out
 
+
+
+def test_position_listings_state_their_own_totals(monkeypatch, tmp_path):
+    """Eleven per-position P/L figures and no sum meant every report that wanted a
+    portfolio total added them up by hand — and three delivered sheets in a row got
+    it wrong by a couple of dollars, under line items that were each correct."""
+    from financial_research_assistant import statements as s, tools as t
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    monkeypatch.setattr(s, "query_positions", lambda symbol=None, account=None: [
+        {"symbol": "A", "quantity": 1.0, "cost_basis": 10.0, "value": 30.0,
+         "unrealized_pl": 20.0, "currency": "USD", "description": "",
+         "security_id": "", "asset_category": "STK"},
+        {"symbol": "B", "quantity": 1.0, "cost_basis": 10.0, "value": 5.0,
+         "unrealized_pl": -5.0, "currency": "USD", "description": "",
+         "security_id": "", "asset_category": "STK"},
+    ])
+    monkeypatch.setattr(s, "query_nav", lambda account=None: {"rows": [], "twrr": ""})
+
+    listing = t.query_portfolio()
+    assert "TOTAL" in listing and "unrealized P/L +15.00" in listing
+    assert "total unrealized P/L +15.00" in t.allocation()

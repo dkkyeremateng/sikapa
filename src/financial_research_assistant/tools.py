@@ -709,6 +709,15 @@ def query_portfolio(symbol: str = "", account: str = "") -> str:
                 f"      qty {p['quantity']} · cost basis {p['cost_basis']:.2f} · "
                 f"value {p['value']:.2f} · unrealized P/L {p['unrealized_pl']:+.2f}"
             )
+        # TOTALLED HERE, not left to the reader. Listing eleven P/L figures and no
+        # sum meant every report that wanted a portfolio total added them up by
+        # hand — and three delivered sheets in a row got it wrong by a couple of
+        # dollars, quietly, under line items that were individually correct.
+        lines.append(
+            f"  TOTAL  cost basis {sum(p['cost_basis'] or 0 for p in positions):.2f} · "
+            f"value {sum(p['value'] or 0 for p in positions):.2f} · "
+            f"unrealized P/L {sum(p['unrealized_pl'] or 0 for p in positions):+.2f}"
+        )
     if nav["rows"]:
         lines.append("")
         lines.append("NET ASSET VALUE (asset class · prior → current · change):")
@@ -1121,9 +1130,13 @@ def allocation(account: str = "") -> str:
             f"  {p['symbol']:<6} {p['weight_pct']:>5.1f}%  "
             f"value {p['value']:>12,.2f}  {p['description']}"
         )
+    # Stated here too, because this is the tool a portfolio report reaches for and
+    # it previously reported values with no P/L at all — leaving the total to be
+    # assembled by hand from somewhere else.
     lines.append(
         f"largest position {res['largest_weight_pct']:.1f}% · "
-        f"top-5 concentration {res['top5_concentration_pct']:.1f}%"
+        f"top-5 concentration {res['top5_concentration_pct']:.1f}% · "
+        f"total unrealized P/L {res['unrealized_pl']:+,.2f} (since purchase)"
     )
     cats = ", ".join(f"{c} {v['weight_pct']:.1f}%" for c, v in res["by_category"].items())
     lines.append(f"by asset category: {cats}")

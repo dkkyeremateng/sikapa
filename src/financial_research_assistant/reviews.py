@@ -196,7 +196,12 @@ def build_review(period: str = "", account: str = "") -> dict[str, Any]:
     usd = _window_income(account, r["start"], r["end"])
     alloc = statements.allocation(account=account or None)
     realized = statements.realized_gains(account=account or None, year=int(year))
-    unrealized = sum(p.get("unrealized_pl") or 0.0 for p in alloc["positions"])
+    # From `allocation`'s own total, which sums the raw values once. Adding the
+    # DISPLAYED rows here instead compounded eleven roundings into a cent that is
+    # not in the data.
+    unrealized = alloc.get("unrealized_pl")
+    if unrealized is None:
+        unrealized = sum(p.get("unrealized_pl") or 0.0 for p in alloc["positions"])
     nav_change = r["nav_end"] - r["nav_start"]
     deposit_share = (r["deposits"] / nav_change * 100) if nav_change else 0.0
 

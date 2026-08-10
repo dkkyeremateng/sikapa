@@ -994,6 +994,12 @@ def render_report(
 ) -> str:
     """Typeset a summary as a PDF + cover image and send it to the user's channels.
 
+    NOT FOR A PORTFOLIO PERFORMANCE REVIEW — call `render_review(period,
+    observations, stance)` instead, which computes the figures and renders in one
+    step. Building one here means writing the tiles by hand, and every delivered
+    review that carried a wrong number carried one that had been typed rather than
+    read.
+
     Use when the user asks for a report/infographic/PDF/one-pager, or wants
     something "sent"/"pushed" to them as a file rather than as chat text — and for
     a scheduled task's output, where a typeset sheet reads far better on a phone
