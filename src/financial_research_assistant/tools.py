@@ -1045,10 +1045,11 @@ def render_review(
     one wrong.
 
     What YOU write is ``observations`` — markdown bullets saying what the numbers
-    mean. That is the whole job: which month carried the period, whether growth
-    came from deposits or returns, what the concentration implies, what looks
-    unflattering. Write 3-6 bullets, one insight each, and reference figures
-    without restating long lists of them.
+    mean, and it is REQUIRED: without it the call is refused, because figures with
+    no reading of them are a table rather than a review. That is the whole job:
+    which month carried the period, whether growth came from deposits or returns,
+    what the concentration implies, what looks unflattering. Write 3-6 bullets,
+    one insight each, and reference figures without restating long lists of them.
 
     ``period`` accepts 'ytd' (default), 'last month', 'this month', 'last
     quarter', 'Q2 2026', '2025', 'last 90 days', or '2026-01-01..2026-06-30'.
@@ -1063,8 +1064,23 @@ def render_review(
     except Exception as exc:  # unknown period, no Flex file, window out of range
         return f"Could not build the review: {exc}"
 
-    body = brief["markdown"]
     notes = (observations or "").strip()
+    # Refused, not warned about. The warning shipped: a delivered sheet carried
+    # correct tiles and charts and no interpretation at all, because a note in the
+    # tool result is easy to read past once the render has already succeeded.
+    # Figures alone are a table; the reading of them is the review.
+    if not notes:
+        return (
+            "NOT RENDERED — a review with no observations is a table of figures.\n"
+            f"The {(period or 'ytd')} numbers are computed and waiting; call again "
+            "with `observations` — 3-6 markdown bullets on what they MEAN. Look for: "
+            "which month carried the period, whether growth came from deposits or "
+            "returns, what the concentration implies, what is unflattering.\n"
+            "Use `portfolio_review_brief` first if you want to read the figures "
+            "before writing them up."
+        )
+
+    body = brief["markdown"]
     if notes:
         # Normalised to bullets so a paragraph still charts as observations rather
         # than sinking into prose the cover cannot use.
@@ -1086,13 +1102,7 @@ def render_review(
             deliver=deliver,
             theme=theme,
         )
-    lines = [f"Rendered the {brief['period_label']} review.", out]
-    if not notes:
-        lines.append(
-            "No observations were supplied, so the sheet is figures only — call "
-            "again with `observations` to say what they mean."
-        )
-    return "\n".join(lines)
+    return f"Rendered the {brief['period_label']} review.\n{out}"
 
 
 def allocation(account: str = "") -> str:
