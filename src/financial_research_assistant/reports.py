@@ -978,6 +978,76 @@ def _build_cover(
     return None
 
 
+# --- the portfolio-review guard -------------------------------------------------
+#
+# Routing a performance review to `render_review` was asked for in the system
+# prompt AND in this module's docstring, and three runs with both loaded ignored
+# both. The last one did not merely retype a figure: it invented the entire
+# monthly series (January "+5.2%" against a real +0.10%, April "+1.9%" against a
+# real +17.87%), invented the annual track record, and put the trailing-twelve-
+# month return back on the sheet as year-to-date. Every number a reader would act
+# on was wrong, on a sheet that looked exactly as authoritative as a correct one.
+#
+# Prompts request; a refusal decides. This is the same shape as the chartless-body
+# refusal below — it declines and says precisely what to call instead.
+
+#: Set while `render_review` is driving, so the sheet it builds is not refused.
+_rendering_review: ContextVar[bool] = ContextVar("fra_rendering_review", default=False)
+
+
+@contextmanager
+def reviewing():
+    """Mark this render as coming FROM `render_review` — see `_looks_like_a_review`."""
+    token = _rendering_review.set(True)
+    try:
+        yield
+    finally:
+        _rendering_review.reset(token)
+
+
+_PORTFOLIO_WORDS = ("portfolio", "my holdings", "account performance")
+_REVIEW_WORDS = ("review", "performance", "year-to-date", "year to date", "ytd",
+                 "quarter", "monthly", "annual", "recap")
+#: Tile labels that mark a sheet as a PERFORMANCE review rather than, say, a
+#: portfolio risk or allocation sheet — which stay allowed.
+_REVIEW_TILES = ("return", "unrealised", "unrealized", "drawdown", "dividend",
+                 "investment gain", "portfolio value", "deposit", "nav")
+
+
+def _looks_like_a_review(title: str, subtitle: str, highlights: str) -> bool:
+    """Whether this call is a portfolio performance review built by hand.
+
+    Deliberately narrow, and requiring all three: the words for a portfolio, the
+    words for a review of one, and at least two performance figures in the tiles.
+    A single-stock sheet has no portfolio word; a portfolio RISK or ALLOCATION
+    sheet has no review word and different tiles. Both keep working.
+    """
+    head = f"{title} {subtitle}".lower()
+    if not any(w in head for w in _PORTFOLIO_WORDS):
+        return False
+    if not any(w in head for w in _REVIEW_WORDS):
+        return False
+    labels = " ".join(t["label"] for t in parse_highlights(highlights)).lower()
+    return sum(1 for w in _REVIEW_TILES if w in labels) >= 2
+
+
+_REVIEW_REFUSAL = (
+    "NOT RENDERED — this is a portfolio performance review, and building one here "
+    "means writing its figures by hand.\n"
+    "Call `render_review(period=..., observations=..., stance=...)` instead. It "
+    "computes the return, deposits, investment gain, drawdown, monthly path, "
+    "holdings, income and concentration, renders the sheet and delivers it. You "
+    "supply only `observations` — 3-6 bullets on what the numbers mean.\n"
+    "This is refused rather than warned about because a hand-built review last "
+    "shipped an entire monthly series that was invented: January '+5.2%' where the "
+    "account returned +0.10%, April '+1.9%' where it returned +17.87%, and a "
+    "trailing-twelve-month return labelled year-to-date.\n"
+    "If you genuinely need a custom portfolio sheet that is NOT a performance "
+    "review — an allocation breakdown, a risk profile, a tax-lot summary — title it "
+    "for what it is and it will render."
+)
+
+
 # --- Model-facing tool ---------------------------------------------------------
 
 
@@ -1050,6 +1120,11 @@ def render_report(
     """
     if not (title or "").strip() and not (markdown or "").strip():
         return "Nothing to render — give at least a title or some body text."
+
+    # Before anything is drawn: a performance review assembled by hand is refused,
+    # because its figures were typed rather than read. See `_looks_like_a_review`.
+    if not _rendering_review.get() and _looks_like_a_review(title, subtitle, highlights):
+        return _REVIEW_REFUSAL
 
     # Refuse a chartless body rather than shipping a cover of tiles and text.
     # A narrative report is a legitimate outcome, but it should be a decision:

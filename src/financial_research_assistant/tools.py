@@ -1074,15 +1074,18 @@ def render_review(
         )
         body += f"\n## Observations\n{bullets}\n"
 
-    out = reports.render_report(
-        brief["title"],
-        body,
-        highlights=brief["highlights"],
-        subtitle=brief["subtitle"],
-        stance=stance,
-        deliver=deliver,
-        theme=theme,
-    )
+    # `reviewing()` exempts this from the guard in `render_report`: the sheet it
+    # refuses is a hand-built one, and this one's figures came from the brief.
+    with reports.reviewing():
+        out = reports.render_report(
+            brief["title"],
+            body,
+            highlights=brief["highlights"],
+            subtitle=brief["subtitle"],
+            stance=stance,
+            deliver=deliver,
+            theme=theme,
+        )
     lines = [f"Rendered the {brief['period_label']} review.", out]
     if not notes:
         lines.append(
