@@ -1576,3 +1576,23 @@ def test_an_inline_label_is_not_a_sentence_cut_mid_phrase():
         "Healthcare is 27.9% and Consumer Cyclical at 14.8% of the book.", "h"
     )
     assert [l for l, _v in got["items"]] == ["Healthcare", "Consumer Cyclical"]
+
+
+def test_prose_in_a_commentary_section_is_not_charted_as_a_breakdown():
+    """An inline breakdown names itself after the SENTENCE it came from, so a
+    commentary section slipped past the prose-heading check that already governs
+    list and table series. It shipped a chart headed "Concentration risk is
+    material and rising. VOO a" — a sentence cut at the title limit — with bars
+    reading "VOO alone" and "AMZN together represent"."""
+    assert reports.extract_series(
+        "## Observations\n"
+        "- Concentration risk is material and rising. VOO alone is 27.2% and "
+        "AMZN together represent 24.0% of the book.\n"
+    ) == []
+
+
+def test_a_real_inline_breakdown_under_a_data_heading_still_charts():
+    series = reports.extract_series(
+        "## Revenue Mix\n- Split by region (North America ~65%, Europe ~35%)\n"
+    )
+    assert series[0]["items"] == [("North America", 65.0), ("Europe", 35.0)]

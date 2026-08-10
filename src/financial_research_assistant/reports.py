@@ -1562,7 +1562,15 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
         # entirely — the fix below, applied one step too early.
         embedded = _inline_series(text, heading)
         if embedded:
-            inline.append(embedded)
+            # Filtered on the SOURCE heading, not the series title: an inline
+            # breakdown names itself after the sentence it came from, so a
+            # commentary section slipped past the prose-heading check that already
+            # governs list and table series. It shipped a chart headed
+            # "Concentration risk is material and rising. VOO a" — a sentence, cut
+            # at the title limit — with bars labelled "VOO alone" and "AMZN
+            # together represent".
+            if not _is_prose_heading(heading):
+                inline.append(embedded)
             continue
         # For a SINGLE measure, though, an aside cannot be it. Searched over the
         # whole line, "Sharpe ratio: 1.06 (risk-free rate = 0%)" charts as 0.0% —
