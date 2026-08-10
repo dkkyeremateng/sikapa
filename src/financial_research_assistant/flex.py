@@ -550,6 +550,8 @@ def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, An
         raise FlexError(f"not a Flex statement (root <{root.tag}>)")
 
     days: list[tuple[str, float]] = []
+    flows: dict[str, float] = {}
+    navs: dict[str, tuple[float, float]] = {}
     checked = reconciled = 0
     for stmt in root.iter("FlexStatement"):
         nav = stmt.find("ChangeInNAV")
@@ -558,9 +560,12 @@ def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, An
             continue
         try:
             twr = float(raw)
-            days.append((_iso_date(stmt.get("toDate") or ""), twr))
+            day = _iso_date(stmt.get("toDate") or "")
+            days.append((day, twr))
         except (ValueError, FlexError):
             continue
+        flows[day] = flows.get(day, 0.0) + _fnum(nav, "depositsWithdrawals")
+        navs[day] = (_fnum(nav, "startingValue"), _fnum(nav, "endingValue"))
         start_value = _fnum(nav, "startingValue")
         if start_value > 0:
             checked += 1
@@ -603,11 +608,23 @@ def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, An
     for d, t in window:
         by_month.setdefault(d[:7], []).append((d, t))
 
+    # The money side of the same window. Reported here because it is the ONE
+    # thing a time-weighted return cannot be asked for: TWR is deposit-independent
+    # by construction, so capital cannot be recovered from it. A sheet tried
+    # anyway — back-solving "capital deployed" as NAV / (1 + TWR) and subtracting
+    # — and produced a $13,480 investment gain against a true $3,215.
+    deposits = sum(v for d, v in flows.items() if window[0][0] <= d <= window[-1][0])
+    nav_start = navs[window[0][0]][0]
+    nav_end = navs[window[-1][0]][1]
     return {
         "start": window[0][0],
         "end": window[-1][0],
         "sessions": len(window),
         "return_pct": chain(window),
+        "nav_start": nav_start,
+        "nav_end": nav_end,
+        "deposits": deposits,
+        "investment_gain": nav_end - nav_start - deposits,
         "max_drawdown_pct": drawdown * 100,
         "best_session_pct": max(t for _d, t in window),
         "worst_session_pct": min(t for _d, t in window),

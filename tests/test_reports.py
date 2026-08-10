@@ -1433,3 +1433,31 @@ def test_distinct_labels_still_chart():
         "## Weights\n- **VOO:** 27.2%\n- **UNH:** 12.4%\n- **AMZN:** 10.0%\n"
     )
     assert [l for l, _v in series[0]["items"]] == ["VOO", "UNH", "AMZN"]
+
+
+def test_a_commentary_section_is_not_charted():
+    """Bullets under "Key Observations" each quote whatever figure their sentence
+    is about, so charting the run put a month's return, a position weight and a
+    two-month total on one axis — four bars sharing nothing but the % sign. It
+    also collided with the sheet's own "Key observations" block, printing that
+    heading twice. Observed on a delivered sheet."""
+    md = (
+        "## Key Observations\n"
+        "- **April carried the year:** best month was April with +17.87%\n"
+        "- **Concentration risk:** VOO alone is 27.2% of the book\n"
+        "- **Crypto hedge modest:** Bitcoin allocation 5.5% added little\n"
+        "- **Recent flatness:** June and July returned only +0.61%\n"
+    )
+    assert reports.extract_series(md) == []
+    # The content is not lost — it belongs in the observations block, whole.
+    assert len(reports.extract_notes(md, set())) == 4
+    assert reports.build_infographic_html("t", md).count("<h2>Key observations</h2>") == 1
+
+
+def test_a_real_breakdown_under_a_data_heading_still_charts():
+    """The denylist is on prose headings only; it must not cost a real series."""
+    series = reports.extract_series(
+        "## Sector Exposure\n- **Healthcare:** 27.9%\n- **Technology:** 21.3%\n"
+        "- **Industrials:** 7.8%\n"
+    )
+    assert series and series[0]["title"] == "Sector Exposure"

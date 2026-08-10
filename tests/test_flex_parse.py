@@ -474,3 +474,23 @@ def test_period_return_says_so_when_the_query_has_no_daily_breakout():
            "</FlexStatements></FlexQueryResponse>")
     with pytest.raises(flex.FlexError, match="Breakout by Day"):
         flex.period_return(xml=xml)
+
+
+def test_period_return_states_the_money_side_of_the_window():
+    """TWR is deposit-independent BY CONSTRUCTION, so capital cannot be recovered
+    from it. A sheet tried anyway — back-solving "capital deployed" as
+    NAV / (1 + TWR) and subtracting — and reported a $13,480 investment gain
+    against a true $3,215. Stating NAV, deposits and the gain leaves nothing to
+    derive."""
+    from financial_research_assistant import flex
+
+    xml = _DAILY_XML.replace(
+        '<ChangeInNAV startingValue="110" endingValue="121" twr="10.0" />',
+        '<ChangeInNAV startingValue="110" endingValue="171" twr="10.0" '
+        'depositsWithdrawals="50" />',
+    )
+    r = flex.period_return(start="2026-01-01", xml=xml)
+    assert r["nav_start"] == 110.0
+    assert r["deposits"] == 50.0
+    # NAV rose 110 -> 119.79 across the window, 50 of which was deposited.
+    assert round(r["investment_gain"], 2) == round(r["nav_end"] - 110.0 - 50.0, 2)

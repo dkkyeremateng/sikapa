@@ -936,6 +936,14 @@ def portfolio_period_return(start: str = "", end: str = "") -> str:
         f"  best / worst    {r['best_session_pct']:+.2f}% / {r['worst_session_pct']:+.2f}%",
         f"  winning days    {r['up_sessions']}/{r['sessions']} "
         f"({r['up_sessions'] / r['sessions'] * 100:.1f}%)",
+        # The money side, stated so it is never derived. TWR is deposit-independent
+        # by construction, so capital CANNOT be recovered from it — a sheet that
+        # back-solved it reported a $13,480 gain against a true $3,215.
+        f"  NAV             {r['nav_start']:,.2f} → {r['nav_end']:,.2f} "
+        f"({r['nav_end'] - r['nav_start']:+,.2f})",
+        f"  deposits        {r['deposits']:+,.2f} over the same window",
+        f"  investment gain {r['investment_gain']:+,.2f} "
+        f"(NAV change less deposits — this, not the NAV change, is what you earned)",
         "  monthly: " + ", ".join(
             f"{m} {v:+.2f}%" for m, v in r["monthly_pct"].items()
         ),

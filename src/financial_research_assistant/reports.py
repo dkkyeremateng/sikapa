@@ -1183,6 +1183,28 @@ _DANGLING_RE = re.compile(
 )
 
 
+#: Headings that introduce COMMENTARY, not a breakdown. Bullets under them each
+#: quote whatever figure their sentence is about, so charting the run puts a
+#: month's return, a position weight and a two-month total on one axis — four
+#: bars that share nothing but the % sign. (Observed: "April carried the year
+#: 17.9 / Concentration risk 30.4 / Crypto hedge modest 5.5".) It also collided
+#: with the sheet's own "Key observations" block, printing that heading twice.
+#:
+#: Matched on the heading rather than inferred from the values, because the
+#: numbers alone cannot say whether four percentages are comparable — but a
+#: section called "Key observations" has already said it is not a breakdown.
+_PROSE_HEADINGS = {
+    "key observations", "observations", "key takeaways", "takeaways",
+    "key points", "notes", "summary", "bottom line", "conclusion",
+    "commentary", "analysis", "what stands out", "highlights",
+    "recommendation", "recommendations",
+}
+
+
+def _is_prose_heading(title: str) -> bool:
+    return re.sub(r"[^a-z ]", "", (title or "").lower()).strip() in _PROSE_HEADINGS
+
+
 def _distinct_enough(items: list[tuple[str, float]]) -> bool:
     """Whether these labels form a category axis at all.
 
@@ -1456,7 +1478,9 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
             break
         if extra["title"] not in {s["title"] for s in series}:
             series.append(extra)
-    return series[:_MAX_SERIES]
+    # Applied last so it catches every path into `series` — list runs, tables and
+    # inline breakdowns alike.
+    return [s for s in series if not _is_prose_heading(s["title"])][:_MAX_SERIES]
 
 
 _INFO_CSS = """
