@@ -1216,6 +1216,16 @@ _TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 
 
+#: ``(2.30)`` — accounting notation for a negative, and the default in anything
+#: transcribed from a financial statement. Read as positive it does not merely
+#: misstate the magnitude, it points the bar the wrong way: a cash burn charts as
+#: cash generated. Deliberately narrow — the parentheses must wrap the number and
+#: nothing else, so "11.65x (trailing)" stays positive and so does
+#: "(4.2% of total)".
+_ACCOUNTING_NEG_RE = re.compile(r"^\$?\s*\(\s*[-−]?\s*\$?\s*[\d,]+(?:\.\d+)?\s*[%x]?\s*\)$",
+                                re.IGNORECASE)
+
+
 def _cell_number(cell: str) -> tuple[float, str] | None:
     """``(value, unit)`` when a cell holds exactly one number.
 
@@ -1233,7 +1243,7 @@ def _cell_number(cell: str) -> tuple[float, str] | None:
         value = float(digits.replace(",", ""))
     except ValueError:
         return None
-    if sign in ("-", "−"):
+    if sign in ("-", "−") or _ACCOUNTING_NEG_RE.match(text):
         value = -value
     unit = "%" if pct else ("$" if "$" in text else "")
     return value, unit
@@ -1283,7 +1293,10 @@ def _table_series(rows: list[list[str]], heading: str) -> dict[str, Any] | None:
         if not label:
             continue
         value, _unit = parsed
-        signed = signed or bool(re.match(r"\s*[+\-−]", row[col].strip()))
+        # A negative value IS a signed one, however it was written. Keyed only off
+        # a leading +/- glyph, an accounting negative left the series "unsigned",
+        # which drew a loss in the gain colour and dropped the minus from its label.
+        signed = signed or value < 0 or bool(re.match(r"\s*[+\-−]", row[col].strip()))
         items.append((label[:_MAX_LABEL], value))
     if len(items) < _MIN_ITEMS:
         return None
@@ -1451,9 +1464,12 @@ h1{{font-size:46px;line-height:1.06;font-weight:650;letter-spacing:-.025em;margi
 .card.wide{{grid-column:1 / -1}}
 .card h2{{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
  font-weight:650;margin-bottom:18px}}
-.row{{display:grid;grid-template-columns:164px 1fr 72px;align-items:center;gap:12px;margin-bottom:11px}}
+/* The value column grows past its floor rather than being a hard 72px: a money
+   series keeps its cents now, and "+$12,480.50" has no break opportunity, so a
+   fixed track let it overflow leftward into the bar it labels. */
+.row{{display:grid;grid-template-columns:164px 1fr minmax(72px,max-content);align-items:center;gap:12px;margin-bottom:11px}}
 .row .k{{font-size:13.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.row .v{{font-size:14.5px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}}
+.row .v{{font-size:14.5px;font-weight:600;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}}
 .track{{height:22px;background:var(--track);border-radius:4px;position:relative}}
 .fill{{height:22px;background:var(--pos);border-radius:0 4px 4px 0}}
 .dv{{position:relative;height:22px;background:var(--track);border-radius:4px}}
@@ -1489,10 +1505,20 @@ _INFO_DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 
 def _fmt_value(value: float, unit: str, signed: bool) -> str:
-    """Label a bar in its own unit. A dollar P/L rendered as "180.0%" is a lie."""
+    """Label a bar in its own unit. A dollar P/L rendered as "180.0%" is a lie.
+
+    Money keeps its cents, and drops them only when they are literally ".00".
+    Rounding to whole dollars flattened an EPS table — the most ordinary
+    dollar-denominated shape a report has — into uselessness: $1.84 became "$2",
+    and $0.19 became "$0", which is not merely imprecise but says the opposite of
+    what the source did. A magnitude threshold instead would have mixed "$180" and
+    "$1.84" inside one chart, so the rule is the same at every size: never show a
+    cent the source did not have, never drop one it did.
+    """
     sign = "+" if signed and value > 0 else ("-" if value < 0 else "")
     if unit == "$":
-        return f"{sign}${abs(value):,.0f}"
+        text = f"{abs(value):,.2f}".removesuffix(".00")
+        return f"{sign}${text}"
     if unit == "%":
         return f"{sign}{abs(value):.1f}%"
     return f"{sign}{abs(value):,.2f}"
@@ -1691,6 +1717,16 @@ _STANCE_HEADING_RE = re.compile(
 )
 
 
+def _clip(text: str, limit: int) -> str:
+    """Cut at a word boundary, marked. A hard slice ended a stance reason on a
+    bare letter ("…the cheapest leverage i"), which reads as a rendering fault
+    rather than as text that was shortened."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:.—–-")
+    return f"{cut or text[:limit]}…"
+
+
 def parse_stance(raw: str) -> dict[str, str] | None:
     """``BUY`` / ``HOLD | trim 50% at $40`` -> ``{label, tone, note}``, else None.
 
@@ -1711,7 +1747,7 @@ def parse_stance(raw: str) -> dict[str, str] | None:
     return {
         "label": label.upper(),
         "tone": _STANCE_TONES[label.lower()],
-        "note": re.sub(r"\s+", " ", note)[:64],
+        "note": _clip(re.sub(r"\s+", " ", note), 88),
     }
 
 
@@ -1919,7 +1955,9 @@ def _fpdf_infographic(
             pdf.set_font(family, "B", 9)
             pdf.set_text_color(*_ink("muted"))
             pdf.cell(0, 14, conv(chart["title"].upper()), new_x="LMARGIN", new_y="NEXT")
-            label_w, value_w = 118.0, 56.0
+            # Same reason the CSS column grew: "+$12,480.50" does not fit 56pt,
+            # and an overflowing fpdf cell writes over the bar to its left.
+            label_w, value_w = 118.0, 72.0
             bar_w = inner - label_w - value_w - 16
             values = chart["items"]
             diverging = _is_diverging(chart)

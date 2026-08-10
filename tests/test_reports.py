@@ -51,6 +51,64 @@ def test_an_unsigned_two_digit_table_cell_keeps_its_leading_digit():
     assert reports._cell_number("1,234.5") == (1234.5, "")
 
 
+def test_a_parenthesised_number_is_the_negative_it_means():
+    """Accounting notation, and the default in anything transcribed off a financial
+    statement. Read as positive it does not just misstate the size — it points the
+    bar the wrong way, charting a cash burn as cash generated."""
+    assert reports._cell_number("(2.30)") == (-2.3, "")
+    assert reports._cell_number("$(84.0)") == (-84.0, "$")
+    assert reports._cell_number("(1,204)") == (-1204.0, "")
+    assert reports._cell_number("(12.5%)") == (-12.5, "%")
+
+
+def test_a_parenthetical_aside_is_not_a_negative():
+    """The narrow rule that keeps the fix from creating its own wrong numbers: the
+    parentheses have to wrap the number and nothing else."""
+    assert reports._cell_number("11.65x (trailing)") == (11.65, "")
+    assert reports._cell_number("(4.2% of total)") == (4.2, "%")
+
+
+def test_a_negative_value_makes_its_series_signed_however_it_was_written():
+    """Keyed only off a leading +/- glyph, an accounting negative left the series
+    "unsigned" — so the loss drew in the gain colour and its label lost the minus."""
+    series = reports.extract_series(
+        "## EPS\n| Q | EPS |\n|---|---|\n"
+        "| Q2 | $1.84 |\n| Q1 | $(0.42) |\n| Q4 | $0.19 |\n"
+    )[0]
+    assert series["signed"] is True
+    assert dict(series["items"])["Q1"] == -0.42
+
+
+def test_money_bar_labels_keep_the_cents_that_carry_the_meaning():
+    """Whole dollars rounded an EPS table into uselessness: $1.84 -> "$2", and
+    $0.19 -> "$0", which says the opposite of what the source did."""
+    assert reports._fmt_value(1.84, "$", False) == "$1.84"
+    assert reports._fmt_value(0.19, "$", False) == "$0.19"
+    assert reports._fmt_value(-0.42, "$", True) == "-$0.42"
+    assert reports._fmt_value(1234.5, "$", False) == "$1,234.50"
+    # Dropped only when they are literally ".00", so one chart never mixes "$180"
+    # with "$1.84" the way a magnitude threshold would.
+    assert reports._fmt_value(180.0, "$", True) == "+$180"
+
+
+def test_no_extractor_invents_a_number_the_source_never_stated():
+    """The invariant behind three separate bugs found in this file: a value the
+    sheet shows must be a COMPLETE numeric token from its source, never a fragment
+    of one. `74.1% -> 4.1%` violated exactly this."""
+    import re as _re
+
+    token = _re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+    def stated(text):
+        return {float(t.replace(",", "")) for t in token.findall(text)}
+
+    for cell in ("74.1%", "73.2%", "11.65", "$1,234.50", "(2.30)", "24.8x",
+                 "-4.8%", "−4.8%", "+11.4%", "$208.7B", "100%", "0.9%"):
+        parsed = reports._cell_number(cell)
+        assert parsed is not None, cell
+        assert abs(parsed[0]) in stated(cell), f"{cell} -> {parsed[0]} is not in it"
+
+
 def test_a_charted_table_reports_the_figures_the_table_states():
     series = reports.extract_series(
         "## Guidance\n"
@@ -152,6 +210,21 @@ def test_a_stance_carries_its_tone_and_reason():
     got = reports.parse_stance("Strong Buy | franchise intact")
     assert got["label"] == "STRONG BUY", "the longest phrase wins over a prefix of it"
     assert got["note"] == "franchise intact"
+
+
+def test_a_long_stance_reason_is_cut_at_a_word_not_mid_letter():
+    """A hard slice ended a reason on a bare letter ("…the cheapest leverage i"),
+    which reads as a rendering fault rather than as text that was shortened."""
+    note = reports.parse_stance(
+        "HOLD | cash drag is real but the float is still the cheapest leverage "
+        "in finance and that has not changed this quarter or the last one"
+    )["note"]
+    assert note.endswith("…")
+    assert not note.rstrip("…").endswith(" ")
+    assert note.rstrip("…").split()[-1] in (
+        "cash drag is real but the float is still the cheapest leverage in finance "
+        "and that has not changed this quarter or the last one"
+    ).split()
 
 
 def test_a_stance_we_cannot_colour_is_refused_rather_than_guessed():
