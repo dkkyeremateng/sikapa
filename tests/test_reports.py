@@ -775,9 +775,19 @@ def test_a_list_without_percentages_is_not_charted():
 
 
 def test_prose_between_lists_separates_series():
+    """Prose ends a run, so two lists under one heading do not MERGE into a single
+    six-bar chart — which is what this guards.
+
+    Only the first reaches the sheet, because both carry the same heading and
+    printing it twice over two charts is the defect `test_one_chart_per_heading`
+    describes. The separation still matters: without it the two runs would be one
+    chart of six bars drawn from unrelated data.
+    """
     md = ("## A\n\n- x 10%\n- y 20%\n- z 30%\n\nSome prose here breaks the run.\n\n"
           "- p 40%\n- q 50%\n- r 60%\n")
-    assert len(reports.extract_series(md)) == 2
+    series = reports.extract_series(md)
+    assert len(series) == 1
+    assert [l for l, _v in series[0]["items"]] == ["x", "y", "z"], "not merged with p/q/r"
 
 
 def test_series_and_items_are_capped():
@@ -1660,3 +1670,156 @@ def test_mixed_magnitudes_in_one_column_do_not_share_an_axis():
         "## Revenue\n| Segment | Revenue |\n|---|---|\n"
         "| Data centre | $115.2B |\n| Gaming | $980.0M |\n| Automotive | $1.7B |\n"
     ) == []
+
+
+def test_a_unicode_minus_in_a_list_item_is_still_a_minus():
+    """`_NUM_RE` learned the unicode minus for table cells and these four patterns
+    did not, so "Maximum Drawdown: −29.5%" parsed as +29.5 and a delivered sheet
+    charted a maximum drawdown as a GAIN — in the up colour, on the positive side
+    of zero."""
+    series = reports.extract_series(
+        "## Recent Price Action\n"
+        "- 3-Month Performance: +6.82% from $88.00 to $94.00\n"
+        "- 1-Year Volatility: 33.4% annualized\n"
+        "- Maximum Drawdown: −29.5% over the past year\n"
+    )[0]
+    assert dict(series["items"])["Maximum Drawdown"] == -29.5
+    assert reports._fmt_value(-29.5, "%", True) == "-29.5%"
+
+
+def test_a_unicode_minus_marks_the_series_signed():
+    """Otherwise the run renders as magnitudes and the loss reads as a gain by
+    colour even when the number is right."""
+    series = reports.extract_series(
+        "## Moves\n- **A:** −10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+    )[0]
+    assert series["signed"] is True
+
+
+def test_an_en_dash_range_is_not_a_negative():
+    """The en and em dashes separate a range — "$68–$76", "52-Week Range: $68.59 –
+    $99.20" — and reading one as a sign would break every range on a sheet."""
+    assert reports._clean_label("52-Week Range: $68.59 – $99.20") == "52-Week Range"
+    # An en dash before a percentage must not be read as a minus sign.
+    series = reports.extract_series(
+        "## Split\n- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+    )[0]
+    assert series["signed"] is False, "no signs written, so none rendered"
+    # No space, so the dash sits where a sign would: "10–20%" is a range,
+    # and reading the dash as a minus would make it -20.
+    assert reports._PCT_RE.search("a 10–20% range").group(1) == "20"
+    got = reports._inline_series("Split (North America ~65%, Europe ~35%)", "h")
+    assert got["items"] == [("North America", 65.0), ("Europe", 35.0)]
+
+
+def test_every_glyph_a_writer_uses_for_minus_is_read_as_one():
+    """A delivered "EPS BEAT/MISS TRACK RECORD" charted four misses as beats,
+    because the model wrote them with an EN DASH — a third glyph, after the hyphen
+    and the unicode minus were each handled in turn."""
+    for cell, want in (("-4.9%", -4.9), ("−5.3%", -5.3), ("–8.7%", -8.7), ("—7.2%", -7.2)):
+        assert reports._cell_number(cell) == (want, "%"), cell
+
+
+def test_an_unsigned_cell_does_not_negate_itself():
+    """`sign in _MINUS_CHARS` is True for the EMPTY string, so a cell with no sign
+    negated itself — 8.9% became -8.9%."""
+    assert reports._cell_number("8.9%") == (8.9, "%")
+    assert reports._cell_number("1,335.65") == (1335.65, "")
+
+
+def test_a_dash_between_numbers_is_a_range_not_a_sign():
+    """The same glyph does both jobs, so POSITION decides: a dash with a digit
+    before it joins two numbers, a dash with nothing numeric before it negates the
+    one after — the reading a person makes."""
+    assert reports._cell_number("10–20%") is None      # two figures, not a measure
+    assert reports._cell_number("$68–$76") is None
+    assert reports._PCT_RE.search("a 10–20% range").group(1) == "20"
+    assert reports._clean_label("52-Week Range: $68.59 – $99.20") == "52-Week Range"
+
+
+def test_a_beat_miss_table_keeps_its_misses():
+    series = reports.extract_series(
+        "## EPS Beat/Miss\n| Quarter | Surprise |\n|---|---|\n"
+        "| Q2 2026 | +8.9% |\n| Q1 2026 | –8.7% |\n| Q4 2025 | –7.2% |\n"
+        "| Q3 2025 | –5.3% |\n"
+    )[0]
+    assert [v for _l, v in series["items"]] == [8.9, -8.7, -7.2, -5.3]
+    assert series["signed"] is True
+
+
+def test_a_tile_written_without_pipes_still_gets_a_label():
+    """"Analyst target $62.37 (+19.4%)" arrived with no pipes and became one long
+    value under an empty label — a tile with a heading and nothing beneath it on a
+    delivered sheet. Words first, figure after, is the split the writer meant."""
+    tile = reports.parse_highlights("Analyst target $62.37 (+19.4%)")[0]
+    assert tile["label"] == "Analyst target"
+    assert tile["value"] == "$62.37 (+19.4%)"
+
+
+def test_the_split_looks_for_a_figure_at_a_word_gap():
+    """Without that, "Top-5 concentration 64.2%" splits at the hyphen INSIDE
+    "Top-5" and labels the tile "Top"."""
+    tile = reports.parse_highlights("Top-5 concentration 64.2%")[0]
+    assert tile["label"] == "Top-5 concentration"
+    assert tile["value"] == "64.2%"
+
+
+def test_a_pipeless_tile_with_no_figure_is_left_alone():
+    """Nothing to divide, so the tolerant behaviour is unchanged."""
+    assert reports.parse_highlights("just a value")[0] == {
+        "label": "", "value": "just a value", "note": "",
+    }
+    # And one that OPENS with its figure has no label to take.
+    assert reports.parse_highlights("2026 outlook strong")[0]["label"] == ""
+    # Safe to call with padding, so the helper does not depend on its caller
+    # having stripped first.
+    assert reports._split_at_the_figure("  just a value  ")["value"] == "just a value"
+
+
+def test_a_heading_that_is_also_one_of_its_own_bars_is_not_a_breakdown():
+    """"Discount rate: 9%, Terminal growth: 2.5%" charted two DCF ASSUMPTIONS
+    against each other under the title "Discount rate" — the first label doing
+    double duty because the sentence began with it. A real breakdown names the
+    whole and never repeats a part."""
+    assert reports._inline_series("Discount rate: 9%, Terminal growth: 2.5%", "h") is None
+
+
+def test_a_breakdown_that_names_the_whole_still_charts():
+    """The guard must cost nothing to the shape it was built for."""
+    for line, title, labels in (
+        ("Split by region (North America ~65%, Europe ~35%)",
+         "Split by region", ["North America", "Europe"]),
+        ("Revenue: $5.29B (+5.3% QoQ; -4% YTD)", "Revenue", ["QoQ", "YTD"]),
+    ):
+        got = reports._inline_series(line, "h")
+        assert got is not None, line
+        assert got["title"] == title
+        assert [l for l, _v in got["items"]] == labels
+
+
+def test_one_chart_per_heading():
+    """A section holding both a table and a run of bullets yielded two series with
+    the same title, and the sheet printed that heading twice over two different
+    charts — observed as "KEY BUSINESS TRENDS" above a revenue table and again
+    above three unrelated percentages."""
+    series = reports.extract_series(
+        "## Key Business Trends\n"
+        "| Period | Revenue |\n|---|---|\n"
+        "| FY 2025 | $21.19B |\n| FY 2024 | $20.46B |\n| Q2 2026 | $10.32B |\n"
+        "\n"
+        "- **FY 2025 growth slowing:** Revenue +3.6% vs +7.1% in FY2024\n"
+        "- **YTD 2026 deceleration:** GAAP revenue down 3% YTD\n"
+        "- **Net margin pressure:** Q2 net margin fell to 11.8%\n"
+    )
+    assert len(series) == 1
+    # The table is kept, being the more structured of the two.
+    assert [l for l, _v in series[0]["items"]] == ["FY 2025", "FY 2024", "Q2 2026"]
+
+
+def test_distinct_headings_still_give_distinct_charts():
+    titles = [s["title"] for s in reports.extract_series(
+        "## Revenue Mix\n- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+        "\n## Margin Trend\n| Year | Margin |\n|---|---|\n"
+        "| 2024 | 18.6% |\n| 2025 | 15.0% |\n| 2026 | 11.8% |\n"
+    )]
+    assert titles == ["Revenue Mix", "Margin Trend"]
