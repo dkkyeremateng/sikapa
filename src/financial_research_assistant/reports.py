@@ -1247,12 +1247,25 @@ REPORT_TOOLS = [render_report]
 # wrote the report; this reads the shapes it produced rather than asking a second
 # model what to draw, so the cover costs nothing and cannot invent a number.
 
-#: A percentage anywhere in a list item, sign preserved.
-_PCT_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)\s*%")
+#: A percentage anywhere in a list item, sign preserved — INCLUDING the unicode
+#: minus. `_NUM_RE` learned that for table cells and these four did not, so a
+#: figure written "−29.5%" parsed as +29.5 and a maximum drawdown charted as a
+#: GAIN. The en and em dashes stay out: they separate a range ("$68–$76"), and
+#: reading one as a sign would break every range on a sheet.
+_PCT_RE = re.compile(r"([+\-−]?\d+(?:\.\d+)?)\s*%")
+def _pct_float(text: str) -> float:
+    """A captured percentage as a number, unicode minus included.
+
+    `float()` does not accept U+2212, so widening the patterns to match it
+    without widening this raised ValueError on the first negative it saw.
+    """
+    return float(text.replace("\u2212", "-"))
+
+
 #: A parenthetical aside — context hung off a figure, never the figure itself.
 _ASIDE_RE = re.compile(r"\s*\([^)]*\)")
 #: Where a label stops: a dash/colon separator, or the figure itself.
-_LABEL_SPLIT = re.compile(r"\s*[–—:|]\s*|\s+(?=[+-]?\d+(?:\.\d+)?\s*%)")
+_LABEL_SPLIT = re.compile(r"\s*[–—:|]\s*|\s+(?=[+\-−]?\d+(?:\.\d+)?\s*%)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 _BOLD_HEADING_RE = re.compile(r"^\s{0,3}\*\*(.+?)\*\*:?\s*$")
 _ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$")
@@ -1456,13 +1469,13 @@ def _table_series(rows: list[list[str]], heading: str) -> dict[str, Any] | None:
 
 #: ``North America ~65%``: a capitalised label immediately followed by a percentage.
 _PAIR_RE = re.compile(
-    r"([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)\s*[:~≈]?\s*([+-]?\d+(?:\.\d+)?)\s*%"
+    r"([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)\s*[:~≈]?\s*([+\-−]?\d+(?:\.\d+)?)\s*%"
 )
 #: ``65% North America``: the same split written the other way round. The label
 #: must end on punctuation or a conjunction, so ``29.3%) means a wide outcome``
 #: yields nothing rather than a label of "means a wide outcome".
 _PAIR_REV_RE = re.compile(
-    r"([+-]?\d+(?:\.\d+)?)\s*%\s+([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)"
+    r"([+\-−]?\d+(?:\.\d+)?)\s*%\s+([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)"
     r"(?=\s*[,;)]|\s+(?:and|or)\b|$)"
 )
 #: An enumeration inside one sentence needs only two members to be worth a chart —
@@ -1497,7 +1510,7 @@ def _inline_series(line: str, heading: str) -> dict[str, Any] | None:
         clean = _DANGLING_RE.sub("", clean).strip()
         if len(clean) < 2 or len(clean) > _MAX_LABEL:
             return None
-        items.append((clean, float(digits)))
+        items.append((clean, _pct_float(digits)))
     title = re.split(r"\s*[(:]", text, maxsplit=1)[0].strip(" -–—•*")
     return {
         "title": (title[:48] if len(title) >= 4 else heading) or "Breakdown",
@@ -1598,8 +1611,8 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
         label = _clean_label(text)
         if not label:
             continue
-        value = float(found.group(1))
-        signed = signed or found.group(1)[0] in "+-"
+        value = _pct_float(found.group(1))
+        signed = signed or found.group(1)[0] in "+-\u2212"
         items.append((label, value))
     flush()
     flush_table()

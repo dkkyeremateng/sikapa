@@ -1660,3 +1660,43 @@ def test_mixed_magnitudes_in_one_column_do_not_share_an_axis():
         "## Revenue\n| Segment | Revenue |\n|---|---|\n"
         "| Data centre | $115.2B |\n| Gaming | $980.0M |\n| Automotive | $1.7B |\n"
     ) == []
+
+
+def test_a_unicode_minus_in_a_list_item_is_still_a_minus():
+    """`_NUM_RE` learned the unicode minus for table cells and these four patterns
+    did not, so "Maximum Drawdown: −29.5%" parsed as +29.5 and a delivered sheet
+    charted a maximum drawdown as a GAIN — in the up colour, on the positive side
+    of zero."""
+    series = reports.extract_series(
+        "## Recent Price Action\n"
+        "- 3-Month Performance: +6.82% from $88.00 to $94.00\n"
+        "- 1-Year Volatility: 33.4% annualized\n"
+        "- Maximum Drawdown: −29.5% over the past year\n"
+    )[0]
+    assert dict(series["items"])["Maximum Drawdown"] == -29.5
+    assert reports._fmt_value(-29.5, "%", True) == "-29.5%"
+
+
+def test_a_unicode_minus_marks_the_series_signed():
+    """Otherwise the run renders as magnitudes and the loss reads as a gain by
+    colour even when the number is right."""
+    series = reports.extract_series(
+        "## Moves\n- **A:** −10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+    )[0]
+    assert series["signed"] is True
+
+
+def test_an_en_dash_range_is_not_a_negative():
+    """The en and em dashes separate a range — "$68–$76", "52-Week Range: $68.59 –
+    $99.20" — and reading one as a sign would break every range on a sheet."""
+    assert reports._clean_label("52-Week Range: $68.59 – $99.20") == "52-Week Range"
+    # An en dash before a percentage must not be read as a minus sign.
+    series = reports.extract_series(
+        "## Split\n- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+    )[0]
+    assert series["signed"] is False, "no signs written, so none rendered"
+    # No space, so the dash sits where a sign would: "10–20%" is a range,
+    # and reading the dash as a minus would make it -20.
+    assert reports._PCT_RE.search("a 10–20% range").group(1) == "20"
+    got = reports._inline_series("Split (North America ~65%, Europe ~35%)", "h")
+    assert got["items"] == [("North America", 65.0), ("Europe", 35.0)]
