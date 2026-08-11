@@ -1557,6 +1557,17 @@ def _inline_series(line: str, heading: str) -> dict[str, Any] | None:
             return None
         items.append((clean, _pct_float(digits)))
     title = re.split(r"\s*[(:]", text, maxsplit=1)[0].strip(" -–—•*")
+    # A heading that is ALSO one of its own bars is not a heading. "Discount rate:
+    # 9%, Terminal growth: 2.5%" charted two DCF assumptions against each other
+    # under the title "Discount rate" — the first label doing double duty because
+    # the sentence began with it, which is the tell that this is a sentence and not
+    # a breakdown. A real one names the whole ("Split by region" over North America
+    # and Europe; "Revenue" over QoQ and YTD) and never repeats a part.
+    # Compared as they are: both come from the same substring of the same
+    # sentence, so they cannot differ by case or punctuation, and normalising
+    # would be a branch no input could reach.
+    if title and any(title == label for label, _v in items):
+        return None
     return {
         "title": (title[:48] if len(title) >= 4 else heading) or "Breakdown",
         "signed": False,

@@ -1764,3 +1764,24 @@ def test_a_pipeless_tile_with_no_figure_is_left_alone():
     # Safe to call with padding, so the helper does not depend on its caller
     # having stripped first.
     assert reports._split_at_the_figure("  just a value  ")["value"] == "just a value"
+
+
+def test_a_heading_that_is_also_one_of_its_own_bars_is_not_a_breakdown():
+    """"Discount rate: 9%, Terminal growth: 2.5%" charted two DCF ASSUMPTIONS
+    against each other under the title "Discount rate" — the first label doing
+    double duty because the sentence began with it. A real breakdown names the
+    whole and never repeats a part."""
+    assert reports._inline_series("Discount rate: 9%, Terminal growth: 2.5%", "h") is None
+
+
+def test_a_breakdown_that_names_the_whole_still_charts():
+    """The guard must cost nothing to the shape it was built for."""
+    for line, title, labels in (
+        ("Split by region (North America ~65%, Europe ~35%)",
+         "Split by region", ["North America", "Europe"]),
+        ("Revenue: $5.29B (+5.3% QoQ; -4% YTD)", "Revenue", ["QoQ", "YTD"]),
+    ):
+        got = reports._inline_series(line, "h")
+        assert got is not None, line
+        assert got["title"] == title
+        assert [l for l, _v in got["items"]] == labels
