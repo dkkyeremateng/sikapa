@@ -1679,9 +1679,22 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
             break
         if extra["title"] not in {s["title"] for s in series}:
             series.append(extra)
+    # ONE chart per heading. A section holding both a table and a run of bullets
+    # yields two series with the same title, and the sheet then prints that heading
+    # twice over two different charts — observed as "KEY BUSINESS TRENDS" above a
+    # revenue table and again above three unrelated percentages. The first is kept
+    # because a table is the more structured of the two; the inline path already
+    # deduped this way, and only list-against-table was left out.
+    kept: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for s in series:
+        if s["title"] in seen_titles:
+            continue
+        seen_titles.add(s["title"])
+        kept.append(s)
     # Applied last so it catches every path into `series` — list runs, tables and
     # inline breakdowns alike.
-    return [s for s in series if not _is_prose_heading(s["title"])][:_MAX_SERIES]
+    return [s for s in kept if not _is_prose_heading(s["title"])][:_MAX_SERIES]
 
 
 _INFO_CSS = """

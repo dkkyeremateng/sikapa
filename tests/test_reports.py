@@ -775,9 +775,19 @@ def test_a_list_without_percentages_is_not_charted():
 
 
 def test_prose_between_lists_separates_series():
+    """Prose ends a run, so two lists under one heading do not MERGE into a single
+    six-bar chart — which is what this guards.
+
+    Only the first reaches the sheet, because both carry the same heading and
+    printing it twice over two charts is the defect `test_one_chart_per_heading`
+    describes. The separation still matters: without it the two runs would be one
+    chart of six bars drawn from unrelated data.
+    """
     md = ("## A\n\n- x 10%\n- y 20%\n- z 30%\n\nSome prose here breaks the run.\n\n"
           "- p 40%\n- q 50%\n- r 60%\n")
-    assert len(reports.extract_series(md)) == 2
+    series = reports.extract_series(md)
+    assert len(series) == 1
+    assert [l for l, _v in series[0]["items"]] == ["x", "y", "z"], "not merged with p/q/r"
 
 
 def test_series_and_items_are_capped():
@@ -1785,3 +1795,31 @@ def test_a_breakdown_that_names_the_whole_still_charts():
         assert got is not None, line
         assert got["title"] == title
         assert [l for l, _v in got["items"]] == labels
+
+
+def test_one_chart_per_heading():
+    """A section holding both a table and a run of bullets yielded two series with
+    the same title, and the sheet printed that heading twice over two different
+    charts — observed as "KEY BUSINESS TRENDS" above a revenue table and again
+    above three unrelated percentages."""
+    series = reports.extract_series(
+        "## Key Business Trends\n"
+        "| Period | Revenue |\n|---|---|\n"
+        "| FY 2025 | $21.19B |\n| FY 2024 | $20.46B |\n| Q2 2026 | $10.32B |\n"
+        "\n"
+        "- **FY 2025 growth slowing:** Revenue +3.6% vs +7.1% in FY2024\n"
+        "- **YTD 2026 deceleration:** GAAP revenue down 3% YTD\n"
+        "- **Net margin pressure:** Q2 net margin fell to 11.8%\n"
+    )
+    assert len(series) == 1
+    # The table is kept, being the more structured of the two.
+    assert [l for l, _v in series[0]["items"]] == ["FY 2025", "FY 2024", "Q2 2026"]
+
+
+def test_distinct_headings_still_give_distinct_charts():
+    titles = [s["title"] for s in reports.extract_series(
+        "## Revenue Mix\n- **A:** 10.0%\n- **B:** 20.0%\n- **C:** 30.0%\n"
+        "\n## Margin Trend\n| Year | Margin |\n|---|---|\n"
+        "| 2024 | 18.6% |\n| 2025 | 15.0% |\n| 2026 | 11.8% |\n"
+    )]
+    assert titles == ["Revenue Mix", "Margin Trend"]
