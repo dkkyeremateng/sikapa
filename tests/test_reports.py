@@ -1700,3 +1700,38 @@ def test_an_en_dash_range_is_not_a_negative():
     assert reports._PCT_RE.search("a 10–20% range").group(1) == "20"
     got = reports._inline_series("Split (North America ~65%, Europe ~35%)", "h")
     assert got["items"] == [("North America", 65.0), ("Europe", 35.0)]
+
+
+def test_every_glyph_a_writer_uses_for_minus_is_read_as_one():
+    """A delivered "EPS BEAT/MISS TRACK RECORD" charted four misses as beats,
+    because the model wrote them with an EN DASH — a third glyph, after the hyphen
+    and the unicode minus were each handled in turn."""
+    for cell, want in (("-4.9%", -4.9), ("−5.3%", -5.3), ("–8.7%", -8.7), ("—7.2%", -7.2)):
+        assert reports._cell_number(cell) == (want, "%"), cell
+
+
+def test_an_unsigned_cell_does_not_negate_itself():
+    """`sign in _MINUS_CHARS` is True for the EMPTY string, so a cell with no sign
+    negated itself — 8.9% became -8.9%."""
+    assert reports._cell_number("8.9%") == (8.9, "%")
+    assert reports._cell_number("1,335.65") == (1335.65, "")
+
+
+def test_a_dash_between_numbers_is_a_range_not_a_sign():
+    """The same glyph does both jobs, so POSITION decides: a dash with a digit
+    before it joins two numbers, a dash with nothing numeric before it negates the
+    one after — the reading a person makes."""
+    assert reports._cell_number("10–20%") is None      # two figures, not a measure
+    assert reports._cell_number("$68–$76") is None
+    assert reports._PCT_RE.search("a 10–20% range").group(1) == "20"
+    assert reports._clean_label("52-Week Range: $68.59 – $99.20") == "52-Week Range"
+
+
+def test_a_beat_miss_table_keeps_its_misses():
+    series = reports.extract_series(
+        "## EPS Beat/Miss\n| Quarter | Surprise |\n|---|---|\n"
+        "| Q2 2026 | +8.9% |\n| Q1 2026 | –8.7% |\n| Q4 2025 | –7.2% |\n"
+        "| Q3 2025 | –5.3% |\n"
+    )[0]
+    assert [v for _l, v in series["items"]] == [8.9, -8.7, -7.2, -5.3]
+    assert series["signed"] is True

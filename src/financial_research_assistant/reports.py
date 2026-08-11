@@ -1247,25 +1247,40 @@ REPORT_TOOLS = [render_report]
 # wrote the report; this reads the shapes it produced rather than asking a second
 # model what to draw, so the cover costs nothing and cannot invent a number.
 
+#: What counts as a MINUS in front of a figure. Writers reach for four glyphs —
+#: hyphen, unicode minus, en dash, em dash — and a delivered "EPS BEAT/MISS
+#: TRACK RECORD" showed four misses as beats because the model wrote "–8.7%"
+#: with an en dash.
+#:
+#: The en dash is also a RANGE separator ("10–20%", "$68–$76"), so position
+#: decides: a dash with a digit before it joins two numbers, a dash with
+#: nothing numeric before it negates the one after. That reading is the same
+#: one a person makes, and it needs no vocabulary of dashes.
+_MINUS = r"(?:(?<![\d.,])[+\-\u2212\u2013\u2014])?"
+#: The glyphs that mean "negative" once one has been matched.
+_MINUS_CHARS = "-\u2212\u2013\u2014"
+
 #: A percentage anywhere in a list item, sign preserved — INCLUDING the unicode
 #: minus. `_NUM_RE` learned that for table cells and these four did not, so a
 #: figure written "−29.5%" parsed as +29.5 and a maximum drawdown charted as a
 #: GAIN. The en and em dashes stay out: they separate a range ("$68–$76"), and
 #: reading one as a sign would break every range on a sheet.
-_PCT_RE = re.compile(r"([+\-−]?\d+(?:\.\d+)?)\s*%")
+_PCT_RE = re.compile(rf"({_MINUS}\d+(?:\.\d+)?)\s*%")
 def _pct_float(text: str) -> float:
     """A captured percentage as a number, unicode minus included.
 
     `float()` does not accept U+2212, so widening the patterns to match it
     without widening this raised ValueError on the first negative it saw.
     """
-    return float(text.replace("\u2212", "-"))
+    for glyph in _MINUS_CHARS[1:]:
+        text = text.replace(glyph, "-")
+    return float(text)
 
 
 #: A parenthetical aside — context hung off a figure, never the figure itself.
 _ASIDE_RE = re.compile(r"\s*\([^)]*\)")
 #: Where a label stops: a dash/colon separator, or the figure itself.
-_LABEL_SPLIT = re.compile(r"\s*[–—:|]\s*|\s+(?=[+\-−]?\d+(?:\.\d+)?\s*%)")
+_LABEL_SPLIT = re.compile(rf"\s*[–—:|]\s*|\s+(?={_MINUS}\d+(?:\.\d+)?\s*%)")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 _BOLD_HEADING_RE = re.compile(r"^\s{0,3}\*\*(.+?)\*\*:?\s*$")
 _ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$")
@@ -1355,7 +1370,7 @@ def _clean_label(text: str) -> str:
 # sheet whose whole promise is that it cannot invent a number. Signed cells
 # (`+11.4%`) and thousands-separated ones happened to survive, which is why this
 # stood for so long.
-_NUM_RE = re.compile(r"([+\-−]?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(%?)")
+_NUM_RE = re.compile(rf"({_MINUS})\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(%?)")
 _TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 
@@ -1392,7 +1407,9 @@ def _cell_number(cell: str) -> tuple[float, str] | None:
         value = float(digits.replace(",", ""))
     except ValueError:
         return None
-    if sign in ("-", "−") or _ACCOUNTING_NEG_RE.match(text):
+    # `sign and` first: an empty string is `in` every string, so without it a
+    # cell with no sign at all negated itself.
+    if (sign and sign in _MINUS_CHARS) or _ACCOUNTING_NEG_RE.match(text):
         value = -value
     unit = "%" if pct else ("$" if "$" in text else "")
     # The MAGNITUDE travels with the unit. Dropped, "$115.2B" charted as "$115.20"
@@ -1469,13 +1486,13 @@ def _table_series(rows: list[list[str]], heading: str) -> dict[str, Any] | None:
 
 #: ``North America ~65%``: a capitalised label immediately followed by a percentage.
 _PAIR_RE = re.compile(
-    r"([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)\s*[:~≈]?\s*([+\-−]?\d+(?:\.\d+)?)\s*%"
+    rf"([A-Z][A-Za-z][A-Za-z &/'\-]{{1,26}}?)\s*[:~≈]?\s*({_MINUS}\d+(?:\.\d+)?)\s*%"
 )
 #: ``65% North America``: the same split written the other way round. The label
 #: must end on punctuation or a conjunction, so ``29.3%) means a wide outcome``
 #: yields nothing rather than a label of "means a wide outcome".
 _PAIR_REV_RE = re.compile(
-    r"([+\-−]?\d+(?:\.\d+)?)\s*%\s+([A-Z][A-Za-z][A-Za-z &/'\-]{1,26}?)"
+    rf"({_MINUS}\d+(?:\.\d+)?)\s*%\s+([A-Z][A-Za-z][A-Za-z &/'\-]{{1,26}}?)"
     r"(?=\s*[,;)]|\s+(?:and|or)\b|$)"
 )
 #: An enumeration inside one sentence needs only two members to be worth a chart —
@@ -1612,7 +1629,7 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
         if not label:
             continue
         value = _pct_float(found.group(1))
-        signed = signed or found.group(1)[0] in "+-\u2212"
+        signed = signed or found.group(1)[0] in "+" + _MINUS_CHARS
         items.append((label, value))
     flush()
     flush_table()
