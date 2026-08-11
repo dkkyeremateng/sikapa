@@ -1244,6 +1244,20 @@ _REAL_FILE_REQUESTS = [
     "analyse portfolio YTD performance and genrate the docs for telegram",
     # "show me … as a one-pager": the artifact was listed, the verb was not.
     "Show me my portfolio allocation as a one-pager",
+    # A CHART or IMAGE is a file too.
+    "send me a chart of my portfolio value",
+    "make me an image of the allocation",
+    # No request verb at all — the indefinite article carries the request.
+    "a one-pager on my holdings",
+    "monthly review as a pdf",
+    "I'd like a performance review for Q2",
+    "portfolio review please",
+    # A bare "review" is not an artifact alone, but named with a channel it can
+    # only be the document.
+    "put the review in telegram",
+    "drop the report in telegram",
+    # No channel named, so the channel rules cannot help — this one needs the verb.
+    "share the one-pager with me",
 ]
 
 _REAL_NON_REQUESTS = [
@@ -1255,6 +1269,11 @@ _REAL_NON_REQUESTS = [
     "look into this, the agent didn't generate the report but it says it did",
     "confirm everthing is working as expected and merge changes to main",
     "review the llm provider integration and find out why I can't use claude opus",
+    # A DEFINITE artifact refers to one that exists; every non-request reads this
+    # way, which is what makes the indefinite-article rule safe.
+    "the report looks wrong, the numbers don't add up",
+    "why is the chart empty?",
+    "the image on page 1 is the cover",
 ]
 
 
