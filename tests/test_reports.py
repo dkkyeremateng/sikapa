@@ -1823,3 +1823,73 @@ def test_distinct_headings_still_give_distinct_charts():
         "| 2024 | 18.6% |\n| 2025 | 15.0% |\n| 2026 | 11.8% |\n"
     )]
     assert titles == ["Revenue Mix", "Margin Trend"]
+
+
+# --- a bar that contradicts its own label ---------------------------------------
+
+
+def test_a_level_written_into_a_chart_of_changes_is_dropped():
+    """"Net margin compressed +11.8%" is the margin ITSELF, not its move. Charted
+    beside a -25.5% EPS change it drew as the one thing that went up in a bad
+    quarter — the sheet's most legible bar saying the opposite of its own label."""
+    series = reports.extract_series(
+        "## Q2 Scorecard\n"
+        "- **EPS YoY:** -25.5%\n"
+        "- **Revenue YoY:** -4.5%\n"
+        "- **Free cash flow:** -18.2%\n"
+        "- **Net margin compressed:** +11.8%\n"
+    )
+    assert len(series) == 1
+    assert [l for l, _v in series[0]["items"]] == [
+        "EPS YoY", "Revenue YoY", "Free cash flow"
+    ]
+
+
+def test_too_few_coherent_bars_drops_the_whole_chart():
+    """Two bars are not a breakdown, so the chart goes rather than shrinking into
+    one that no longer shows what it was titled for."""
+    assert reports.extract_series(
+        "## Q2 Scorecard\n"
+        "- **EPS YoY:** -25.5%\n"
+        "- **Revenue YoY:** -4.5%\n"
+        "- **Net margin compressed:** +11.8%\n"
+    ) == []
+
+
+def test_a_label_that_agrees_with_its_own_sign_still_charts():
+    """The guard must cost nothing to the shape it was built for."""
+    series = reports.extract_series(
+        "## Segment Moves\n"
+        "- **Merchant rev grew:** +7.2%\n"
+        "- **Payments fell:** -3.1%\n"
+        "- **Fintech declined:** -5.4%\n"
+    )
+    assert len(series) == 1
+    assert len(series[0]["items"]) == 3
+
+
+def test_an_unsigned_level_keeps_its_direction_word():
+    """"Net margin fell to 11.8%" is a level too, but nothing here claims it is a
+    move: with no sign on any value the chart is a magnitude comparison, and the
+    verb describes the category rather than pointing the bar."""
+    series = reports.extract_series(
+        "## Margin Levels\n"
+        "- **Gross margin:** 38.0%\n"
+        "- **Op margin declined:** 22.5%\n"
+        "- **Net margin compressed:** 11.8%\n"
+    )
+    assert len(series) == 1
+    assert len(series[0]["items"]) == 3
+
+
+def test_a_label_naming_both_directions_is_left_alone():
+    """"Declining growth" has not settled which way it points, so the guard stays
+    quiet — it only ever speaks to a label that contradicts itself outright."""
+    series = reports.extract_series(
+        "## Q2 Scorecard\n"
+        "- **EPS YoY:** -25.5%\n"
+        "- **Revenue YoY:** -4.5%\n"
+        "- **Declining growth:** +11.8%\n"
+    )
+    assert len(series) == 1
+    assert len(series[0]["items"]) == 3

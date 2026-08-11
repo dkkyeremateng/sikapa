@@ -1353,6 +1353,63 @@ def _is_prose_heading(title: str) -> bool:
     return re.sub(r"[^a-z ]", "", (title or "").lower()).strip() in _PROSE_HEADINGS
 
 
+#: Words that state a direction, so a label carrying one has already said which
+#: way its own number goes. Stems, matched as prefixes, so "compressed",
+#: "compression" and "compressing" all count once.
+_FELL = ("compress", "contract", "declin", "decreas", "fell", "fall", "drop",
+         "shrank", "shrink", "narrow", "weaken", "slump", "sank", "lower",
+         "loss", "lost", "miss")
+_ROSE = ("expand", "grew", "grow", "rose", "rise", "rising", "gain", "climb",
+         "improv", "widen", "strengthen", "surge", "jump", "beat", "higher")
+_WORD_RE = re.compile(r"[a-z]+")
+
+
+def _direction(label: str) -> int:
+    """+1 / -1 when a label names a direction, 0 when it does not or says both.
+
+    A label holding both ("declining growth") has not settled the question, so it
+    is left alone — this only ever speaks when the label is unambiguous.
+    """
+    words = _WORD_RE.findall((label or "").lower())
+    fell = any(w.startswith(_FELL) for w in words)
+    rose = any(w.startswith(_ROSE) for w in words)
+    return 0 if fell == rose else (-1 if fell else 1)
+
+
+def _is_coherent(label: str, value: float) -> bool:
+    """Whether a bar's sign agrees with the direction its own label states.
+
+    A LEVEL written into a chart of CHANGES is the failure: "Net margin compressed
+    +11.8%" is the margin itself, not its move, and charted beside a -25.5% EPS
+    change it drew as the one thing that went up in a bad quarter. English carries
+    the sign here and the digits do not — "fell 3%" negates, "fell to 11.8%" does
+    not — so no rule over the number alone can separate them.
+
+    Narrow on purpose. It reads the label's own claim and only ever drops a bar
+    that contradicts it; a label naming no direction is never touched, so the
+    failure mode is missing a bad bar, never removing a good one.
+    """
+    direction = _direction(label)
+    return direction == 0 or value == 0 or (value > 0) == (direction > 0)
+
+
+def _coherent_series(series: dict[str, Any]) -> dict[str, Any] | None:
+    """`series` with self-contradicting bars removed, or None if too little is left.
+
+    Only SIGNED series are checked. Where the sign is not being displayed as
+    meaning anything, a directional word in a label is describing the category
+    rather than claiming which way the bar points.
+    """
+    if not series.get("signed"):
+        return series
+    items = [(l, v) for l, v in series["items"] if _is_coherent(l, v)]
+    if len(items) == len(series["items"]):
+        return series
+    if len(items) < _MIN_ITEMS:
+        return None
+    return {**series, "items": items}
+
+
 def _distinct_enough(items: list[tuple[str, float]]) -> bool:
     """Whether these labels form a category axis at all.
 
@@ -1692,9 +1749,10 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
             continue
         seen_titles.add(s["title"])
         kept.append(s)
-    # Applied last so it catches every path into `series` — list runs, tables and
+    # Applied last so they catch every path into `series` — list runs, tables and
     # inline breakdowns alike.
-    return [s for s in kept if not _is_prose_heading(s["title"])][:_MAX_SERIES]
+    checked = [_coherent_series(s) for s in kept if not _is_prose_heading(s["title"])]
+    return [s for s in checked if s][:_MAX_SERIES]
 
 
 _INFO_CSS = """
