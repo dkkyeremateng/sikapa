@@ -200,3 +200,100 @@ def test_the_margin_chart_is_not_read_as_a_run_of_changes(brief):
     series = [s for s in reports.extract_series(brief["markdown"])
               if "Net Margin" in s["title"]]
     assert series and not series[0]["signed"]
+
+
+# --- the model-facing tools -----------------------------------------------------
+
+
+def _patch(monkeypatch, quarters=_QUARTERS, prices=None):
+    edgar._TICKER_CIK.clear()
+    payloads = {"company_tickers.json": _TICKERS, "companyfacts": _facts(quarters)}
+    monkeypatch.setattr(
+        edgar, "_fetch_json",
+        lambda url, timeout=20.0: next(
+            (v for k, v in payloads.items() if k in url), {}
+        ),
+    )
+    monkeypatch.setattr(
+        tools, "_fetch_daily",
+        lambda sym, days, **kw: _prices() if prices is None else prices,
+    )
+
+
+def test_the_brief_tool_hands_over_blocks_to_pass_verbatim(monkeypatch):
+    _patch(monkeypatch)
+    out = tools.stock_brief("FISV")
+    assert "HIGHLIGHTS (pass verbatim as `highlights`)" in out
+    assert "MARKDOWN (pass as `markdown`" in out
+    assert "GAAP as-reported" in out
+
+
+def test_the_brief_names_both_declines_and_forbids_merging_them(monkeypatch):
+    """Three contradictory decline figures reached one delivered sheet. Putting the
+    two real measurements side by side, each with its window, is what stops a third
+    being written between them."""
+    _patch(monkeypatch)
+    out = tools.stock_brief("FISV")
+    assert "never merge the two" in out
+    assert "trailing-12-month drawdown" in out
+    assert "high since 2023-05-01" in out
+
+
+def test_the_brief_says_the_margin_is_a_level(monkeypatch):
+    _patch(monkeypatch)
+    assert "never write it as a change" in tools.stock_brief("FISV")
+
+
+def test_a_broken_brief_is_reported_not_raised(monkeypatch):
+    """A tool that raises kills the turn; one that explains lets the model recover."""
+    _patch(monkeypatch, prices=[])
+    out = tools.stock_brief("FISV")
+    assert out.startswith("Could not build the brief")
+    assert "No price history" in out
+
+
+def test_a_stock_report_with_no_observations_is_refused(monkeypatch):
+    """Figures with no reading of them are a table, not a report — and a warning in
+    a tool result is easy to read past once the render has already succeeded."""
+    _patch(monkeypatch)
+    out = tools.render_stock_report("FISV", deliver=False)
+    assert out.startswith("NOT RENDERED")
+    assert "Q2 2026" in out
+    assert "stock_brief" in out
+
+
+def test_a_stock_report_with_observations_renders(monkeypatch):
+    """And the sheet it builds is exempt from the hand-built guard, since its
+    figures came from the brief rather than from the model."""
+    _patch(monkeypatch)
+    out = tools.render_stock_report(
+        "FISV",
+        observations="Growth has stalled and the margin path explains most of it.",
+        deliver=False,
+    )
+    assert not out.startswith("NOT RENDERED")
+    assert "Could not build" not in out
+    assert "FISV" in out
+
+
+def test_observations_written_as_prose_still_reach_the_cover(monkeypatch):
+    """A paragraph that is not bulleted sinks into prose the cover cannot use."""
+    _patch(monkeypatch)
+    from financial_research_assistant import stocks
+
+    brief = stocks.build_stock_brief("FISV")
+    body = brief["markdown"] + "\n## Observations\n- one\n"
+    assert "- one" in body
+
+
+def test_a_filer_with_too_little_history_still_renders(monkeypatch):
+    """Two reported quarters build no table, and the chartless refusal would then
+    hand the model advice it cannot act on — restructure a body it did not write.
+    The tiles carry the sheet instead."""
+    _patch(monkeypatch, quarters=_QUARTERS[:2])
+    out = tools.render_stock_report(
+        "FISV", observations="Too little history to read a trend yet.",
+        deliver=False,
+    )
+    assert not out.startswith("NOT RENDERED")
+    assert "nothing in this body can be charted" not in out

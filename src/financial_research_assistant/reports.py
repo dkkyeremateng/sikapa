@@ -1033,6 +1033,21 @@ def reviewing():
         _rendering_review.reset(token)
 
 
+#: Set while `render_stock_report` is driving, so the sheet it builds is not refused.
+_rendering_stock: ContextVar[bool] = ContextVar("fra_rendering_stock", default=False)
+
+
+@contextmanager
+def analysing():
+    """Mark this render as coming FROM `render_stock_report` — see
+    `_looks_like_a_stock_report`."""
+    token = _rendering_stock.set(True)
+    try:
+        yield
+    finally:
+        _rendering_stock.reset(token)
+
+
 _PORTFOLIO_WORDS = ("portfolio", "my holdings", "account performance")
 _REVIEW_WORDS = ("review", "performance", "year-to-date", "year to date", "ytd",
                  "quarter", "monthly", "annual", "recap")
@@ -1076,6 +1091,54 @@ _REVIEW_REFUSAL = (
 )
 
 
+#: Words that make a sheet an EARNINGS write-up rather than some other stock page.
+_EARNINGS_WORDS = ("earnings", "results", "quarter", "10-q", "q1 ", "q2 ", "q3 ",
+                   "q4 ", "fy20", "fiscal")
+#: Tile labels holding the figures a quarter is reported in.
+_STOCK_TILES = ("revenue", "eps", "earnings per share", "net income", "margin",
+                "operating income", "drawdown", "free cash flow")
+#: Heads that name more than one company. A comparison or screen legitimately
+#: carries revenue and margin tiles for several names, and `render_stock_report`
+#: is single-symbol, so refusing those would leave no way to build them at all.
+_MULTI_NAME_WORDS = (" vs ", " vs. ", "versus", "comparison", "compare", "screen",
+                     "peers", "peer group", "sector", "watchlist", "basket")
+
+
+def _looks_like_a_stock_report(title: str, subtitle: str, highlights: str) -> bool:
+    """Whether this call is a single-stock earnings sheet built by hand.
+
+    Narrow, and requiring all four: an earnings word, no portfolio word (that is
+    the review guard's territory), no word naming several companies, and at least
+    two of a quarter's figures in the tiles. A valuation or risk sheet has
+    different tiles; a peer comparison is exempted outright.
+    """
+    head = f"{title} {subtitle}".lower()
+    if not any(w in head for w in _EARNINGS_WORDS):
+        return False
+    if any(w in head for w in _PORTFOLIO_WORDS + _MULTI_NAME_WORDS):
+        return False
+    labels = " ".join(t["label"] for t in parse_highlights(highlights)).lower()
+    return sum(1 for w in _STOCK_TILES if w in labels) >= 2
+
+
+_STOCK_REFUSAL = (
+    "NOT RENDERED — this is a single-stock earnings sheet, and building one here "
+    "means writing its figures by hand.\n"
+    "Call `render_stock_report(symbol=..., observations=..., stance=...)` instead. "
+    "It pulls the quarter from SEC 10-Q XBRL and the price side from daily history, "
+    "renders the sheet and delivers it. You supply only `observations` — 3-6 "
+    "bullets on what the quarter means.\n"
+    "This is refused rather than warned about because a hand-built earnings sheet "
+    "last shipped revenue of $4.96B where the as-reported figure was $5.29B, called "
+    "the stock down 63% in one bullet and 70% in another over a correctly-computed "
+    "-66.3%, and charted a net margin LEVEL of 11.8% among year-over-year changes "
+    "as the one thing that rose in a bad quarter.\n"
+    "If you genuinely need a stock sheet that is NOT an earnings write-up — a "
+    "valuation, a risk profile, a peer comparison — title it for what it is and it "
+    "will render."
+)
+
+
 # --- Model-facing tool ---------------------------------------------------------
 
 
@@ -1097,6 +1160,12 @@ def render_report(
     step. Building one here means writing the tiles by hand, and every delivered
     review that carried a wrong number carried one that had been typed rather than
     read.
+
+    NOT FOR A SINGLE-STOCK EARNINGS WRITE-UP either — call
+    `render_stock_report(symbol, observations, stance)`, which pulls the quarter
+    from SEC 10-Q XBRL and the price side from daily history, each figure labelled
+    with the window and basis it is on. A peer comparison, valuation or risk sheet
+    is not an earnings write-up and still belongs here.
 
     Use when the user asks for a report/infographic/PDF/one-pager, or wants
     something "sent"/"pushed" to them as a file rather than as chat text — and for
@@ -1153,6 +1222,11 @@ def render_report(
     # because its figures were typed rather than read. See `_looks_like_a_review`.
     if not _rendering_review.get() and _looks_like_a_review(title, subtitle, highlights):
         return _REVIEW_REFUSAL
+    # And the same for a single-stock earnings sheet, for the same reason: its
+    # figures were typed. See `_looks_like_a_stock_report`.
+    if (not _rendering_stock.get()
+            and _looks_like_a_stock_report(title, subtitle, highlights)):
+        return _STOCK_REFUSAL
 
     # Refuse a chartless body rather than shipping a cover of tiles and text.
     # A narrative report is a legitimate outcome, but it should be a decision:

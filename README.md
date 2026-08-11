@@ -12,7 +12,7 @@ offline deterministic fake mode, and a generic eval harness.
 > A self-playing terminal walkthrough of seven features — company comparison, DCF
 > valuation, cited SEC-filing answers, the options explainer, document Q&A,
 > parallel subagents, and background work delivered to your phone — plus a map of
-> all 66 tools. Source: [`demo.html`](demo.html)
+> all 71 tools. Source: [`demo.html`](demo.html)
 > (open it locally in any browser). See also the full [`Tools.md`](Tools.md) reference.
 
 > **The broker is pluggable — two registry-driven seams.** A different broker's
@@ -878,6 +878,34 @@ Pasted into a prompt, the method was one dropped newline from vanishing — and 
 reply looked finished either way. With the method intact, the figures still had to
 be retyped, and one sheet printed a total two dollars off the line items directly
 above it. A template that computes has neither failure available to it.
+
+**Earnings write-ups are one call too, and every figure carries its window.**
+*"Analyse the latest earnings report of FISV and share findings on Telegram"* goes
+to `render_stock_report(symbol, observations, stance)`, which pulls the quarter
+from SEC 10-Q XBRL and the price side from daily history. `stock_brief(symbol)`
+returns the same figures without rendering.
+
+What makes this more than a second copy of the review template is what the tiles
+*say about themselves*. "Net margin 11.8% — **level, not a change**". "Max drawdown
+−66.3% — **trailing 12 months**". "From the high −78.0% — **high since 2023-05-01**".
+
+That labelling is the whole fix, and it came from a delivered sheet whose three
+decline figures — −70%, −63% and −66.3% — read as three guesses at one number.
+Only the last was tool-computed, and it was **right**: −66.3% is the trailing-year
+drawdown. But the sheet never said "trailing year", and measured from its actual
+high the stock was down 78%. A correct figure sat on the page answering a question
+nobody had asked, and the prose drifted around it precisely because "the decline"
+had no fixed window to be checked against. A number is not enough on its own.
+
+The same sheet put revenue at $4.96B where the as-reported figure is $5.29B —
+plausibly the adjusted, non-GAAP number a company headlines, which is a different
+number. The sheet said neither, so the brief states the basis on the tile and says
+in the body that adjusted figures are not carried.
+
+Both guards refuse rather than warn. A hand-built earnings sheet — an earnings
+word in the title, two of a quarter's figures in the tiles — is turned back with
+the name of the tool that can build it properly. A peer comparison, valuation or
+risk sheet is not an earnings write-up and still renders through `render_report`.
 
 **The call gets a badge.** `stance="HOLD | trim 50% at $40–$42"` puts a
 colour-coded pill under the title on both the image and the PDF — buy /

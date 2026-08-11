@@ -1893,3 +1893,87 @@ def test_a_label_naming_both_directions_is_left_alone():
     )
     assert len(series) == 1
     assert len(series[0]["items"]) == 3
+
+
+# --- a hand-built earnings sheet ------------------------------------------------
+
+_STOCK_HL = (
+    "Revenue Q2 2026 | $4.96B | -4.5% YoY\n"
+    "Diluted EPS | $1.17 | -25.5% YoY\n"
+    "Net margin | 11.8% | compressed"
+)
+
+
+def test_a_hand_built_earnings_sheet_is_refused():
+    """The figures above are the ones that actually shipped: $4.96B where the
+    as-reported revenue was $5.29B, and a net margin LEVEL of 11.8% written as a
+    move. Both were typed. The review guard proved a prompt requests and a refusal
+    decides; this is the same decision for the same reason."""
+    out = reports.render_report(
+        "Fiserv (FISV) — Q2 2026 Earnings", _CHARTABLE,
+        highlights=_STOCK_HL, deliver=False,
+    )
+    assert out.startswith("NOT RENDERED")
+    assert "render_stock_report" in out
+
+
+def test_render_stock_report_itself_is_not_refused():
+    with reports.analysing():
+        out = reports.render_report(
+            "Fiserv (FISV) — Q2 2026 Earnings", _CHARTABLE,
+            highlights=_STOCK_HL, deliver=False,
+        )
+    assert not out.startswith("NOT RENDERED")
+
+
+def test_a_peer_comparison_is_not_a_single_stock_earnings_sheet():
+    """A comparison carries revenue and margin tiles for several names and cannot
+    go through a single-symbol tool, so refusing it would leave no way to build one
+    at all."""
+    for title in (
+        "Fiserv vs Global Payments — Q2 2026 Earnings",
+        "Payments Peers — Q2 2026 Results Comparison",
+    ):
+        out = reports.render_report(title, _CHARTABLE, highlights=_STOCK_HL,
+                                    deliver=False)
+        assert not out.startswith("NOT RENDERED"), title
+
+
+def test_a_valuation_sheet_is_not_an_earnings_write_up():
+    """The guard must cost nothing to every other stock report on the system."""
+    out = reports.render_report(
+        "Fiserv (FISV) — DCF Valuation", _CHARTABLE,
+        highlights="Fair value | $78.40 | base case\nWACC | 9.0% | assumed",
+        deliver=False,
+    )
+    assert not out.startswith("NOT RENDERED")
+
+
+def test_the_stock_guard_needs_two_quarter_figures_not_one():
+    """One revenue tile on an earnings-titled sheet is not enough — the bar is
+    deliberately above a single coincidence."""
+    out = reports.render_report(
+        "Fiserv (FISV) — Q2 2026 Earnings", _CHARTABLE,
+        highlights="Revenue Q2 2026 | $5.29B | GAAP as-reported", deliver=False,
+    )
+    assert not out.startswith("NOT RENDERED")
+
+
+def test_a_stock_sheet_with_no_earnings_word_still_renders():
+    """"Under Pressure" is a thesis piece, not a quarter write-up."""
+    out = reports.render_report(
+        "Fiserv (FISV) — A Business Under Pressure", _CHARTABLE,
+        highlights=_STOCK_HL, deliver=False,
+    )
+    assert not out.startswith("NOT RENDERED")
+
+
+def test_a_portfolio_review_still_routes_to_the_review_refusal():
+    """A review titled for a quarter now carries two of the new earnings words, and
+    the advice still has to name the tool that can actually build it."""
+    out = reports.render_report(
+        "Portfolio Review — Q2 2026 Results", _CHARTABLE,
+        highlights=_REVIEW_HL, deliver=False,
+    )
+    assert "render_review" in out
+    assert "render_stock_report" not in out

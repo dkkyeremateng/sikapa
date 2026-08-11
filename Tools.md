@@ -1,6 +1,6 @@
 # Tools Reference
 
-Every agent tool the assistant can call, grouped by area. **66 tools.**
+Every agent tool the assistant can call, grouped by area. **71 tools.**
 
 You don't call these directly — you ask the assistant in plain English and it
 picks the tool(s). Each entry below shows:
@@ -310,6 +310,16 @@ Your deposit-independent performance (TWRR) vs a benchmark over the same span.
 - **Ask:** "Am I beating the S&P?"
 - **Call:** `portfolio_vs_benchmark(benchmark="SPY")`
 
+#### `portfolio_period_return(period="ytd", start="", end="", account="")`
+The time-weighted return over an **exact window**, chain-linked from the
+statement's daily returns, with the monthly path, drawdown, hit rate, NAV
+endpoints, deposits and investment gain. Windows anchor on the statement's last
+session, not today, and one the file cannot reach is refused rather than quietly
+answered for a different span — a stored statement's own TWR is not year-to-date,
+and a trailing-twelve-month pull reports twelve months.
+- **Ask:** "What did I return in the second quarter?"
+- **Call:** `portfolio_period_return(period="Q2 2026")`
+
 #### `realized_gains(year=0, symbol="", account="")`
 Realized capital gains via FIFO lot matching, split short-term vs long-term, net of commissions. `year` filters by realization year.
 - **Ask:** "What were my realized gains in 2025?"
@@ -492,6 +502,53 @@ containers; `pypdfium2` makes the cover image either way. The fallback bundles t
 Inter typeface, so its output is identical on every machine.
 - **Ask:** "Send me that as a PDF." / "Make an infographic of the FISV results and put it on Telegram." / "Every Friday, email me a one-pager on my holdings."
 - **Call:** `render_report(title="FISV Q2 2026 — miss and guidance cut", highlights="Adjusted EPS | $1.84 | vs $1.91 consensus\nMean target | $66.62 | +26.5%", markdown="## Headline\n\nFiserv missed and **cut guidance**…")`
+
+The two tools below take the figures out of the model's hands entirely. Each has
+**no parameter through which a number could arrive**, so it cannot carry a wrong
+one — the model supplies only the reading of them. Both are backed by a refusal in
+`render_report`: a sheet that looks hand-built is turned back with the name of the
+tool that can build it properly, because a docstring asks and a signature decides.
+
+#### `render_review(period="ytd", observations="", stance="", deliver=True, theme="", account="")`
+A **portfolio performance review** in one call: the time-weighted return, deposits,
+investment gain, drawdown, monthly path, holdings, income and concentration, all
+computed, rendered and delivered. `observations` is required — 3-6 bullets on what
+the numbers mean; without it the call is refused, since figures with no reading of
+them are a table rather than a review. `period` takes `ytd`, `last month`, `last
+quarter`, `Q2 2026`, `2025`, `last 90 days`, or `2026-01-01..2026-06-30`, anchored
+on the **statement's last session, not today**.
+- **Ask:** "Produce my year-to-date portfolio performance review and send it to Telegram." / "Generate a performance review for last month."
+- **Call:** `render_review(period="ytd", observations="- April carried the year; without it the period returns +4.9%.\n- Growth came from returns, not deposits.", stance="HOLD | concentration is the standing risk")`
+
+#### `portfolio_review_brief(period="ytd", account="")`
+The same figures **without** rendering — for shaping a report by hand or answering
+in chat. Returns a ready `highlights` block and markdown body to pass through
+verbatim.
+- **Ask:** "What are my YTD numbers?" *(then shape the answer yourself)*
+- **Call:** `portfolio_review_brief(period="ytd")`
+
+#### `render_stock_report(symbol, observations="", stance="", deliver=True, theme="")`
+A **single-stock earnings write-up** in one call: the newest quarter from SEC 10-Q
+XBRL (revenue, diluted EPS, net income, net margin, year-over-year and
+quarter-over-quarter) plus the price side from daily history (last close, the high
+the window reaches back to, the fall from it, the trailing-12-month drawdown and
+range). `observations` is required, as above.
+
+**Every tile states its own window and basis**, which is the point of the tool.
+"Net margin 11.8% — *level, not a change*". "Max drawdown −66.3% — *trailing 12
+months*". "From the high −78.0% — *high since 2023-05-01*". A delivered sheet once
+carried −70%, −63% and −66.3% as three guesses at one number; only the last was
+tool-computed, and it was right — but nothing said which window it covered, so the
+prose drifted around it. Earnings figures are **GAAP as-reported**; the adjusted,
+non-GAAP numbers a company headlines are different numbers and are not carried.
+- **Ask:** "Analyse the latest earnings report of FISV and share findings on Telegram."
+- **Call:** `render_stock_report(symbol="FISV", observations="- Growth has stalled and the margin path explains most of it.\n- The market has already priced the guidance cut.", stance="HOLD | trim into strength above $60")`
+
+#### `stock_brief(symbol, quarters=8)`
+The same figures without rendering, plus a context block naming the two decline
+measurements side by side so neither gets restated in the other's window.
+- **Ask:** "How did Fiserv's quarter actually look?"
+- **Call:** `stock_brief(symbol="FISV")`
 
 ---
 
