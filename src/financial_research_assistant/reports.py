@@ -216,6 +216,34 @@ def _slug(text: str) -> str:
     return (out or "report")[:48]
 
 
+#: Where a figure starts: at a word gap, an optional currency mark and sign, then
+#: a digit. The gap is what stops "Top-5 concentration 64.2%" splitting at the
+#: hyphen inside "Top-5" and yielding the label "Top".
+_TILE_FIGURE_RE = re.compile(r"(?:^|(?<=\s))[$€£¥]?\s*[+\-−–—]?\d")
+
+
+def _split_at_the_figure(text: str) -> dict[str, str]:
+    """A pipe-less tile split into label and figure at the first number.
+
+    "Analyst target $62.37 (+19.4%)" arrived with no pipes and became one long
+    value under an empty label — a tile with a heading and nothing beneath it on a
+    delivered sheet. The split the writer meant is obvious and mechanical: words
+    first, figure after. A line with no figure at all, or one that opens with it,
+    is left exactly as it was, since there is nothing to divide.
+    """
+    text = text.strip()
+    found = _TILE_FIGURE_RE.search(text)
+    if not found:
+        return {"label": "", "value": text, "note": ""}
+    # No separate guard for "the figure is first": the slice before it is then
+    # empty, which is the same empty label that branch would have produced.
+    return {
+        "label": text[:found.start()].strip(" .:—–-"),
+        "value": text[found.start():].strip(),
+        "note": "",
+    }
+
+
 def parse_highlights(raw: str) -> list[dict[str, str]]:
     """``label | value | note`` per line -> stat tiles. Blank lines ignored.
 
@@ -244,7 +272,7 @@ def parse_highlights(raw: str) -> list[dict[str, str]]:
                 })
             continue
         if len(parts) == 1:
-            tiles.append({"label": "", "value": parts[0], "note": ""})
+            tiles.append(_split_at_the_figure(parts[0]))
         else:
             tiles.append({
                 "label": parts[0],

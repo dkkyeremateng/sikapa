@@ -1735,3 +1735,32 @@ def test_a_beat_miss_table_keeps_its_misses():
     )[0]
     assert [v for _l, v in series["items"]] == [8.9, -8.7, -7.2, -5.3]
     assert series["signed"] is True
+
+
+def test_a_tile_written_without_pipes_still_gets_a_label():
+    """"Analyst target $62.37 (+19.4%)" arrived with no pipes and became one long
+    value under an empty label — a tile with a heading and nothing beneath it on a
+    delivered sheet. Words first, figure after, is the split the writer meant."""
+    tile = reports.parse_highlights("Analyst target $62.37 (+19.4%)")[0]
+    assert tile["label"] == "Analyst target"
+    assert tile["value"] == "$62.37 (+19.4%)"
+
+
+def test_the_split_looks_for_a_figure_at_a_word_gap():
+    """Without that, "Top-5 concentration 64.2%" splits at the hyphen INSIDE
+    "Top-5" and labels the tile "Top"."""
+    tile = reports.parse_highlights("Top-5 concentration 64.2%")[0]
+    assert tile["label"] == "Top-5 concentration"
+    assert tile["value"] == "64.2%"
+
+
+def test_a_pipeless_tile_with_no_figure_is_left_alone():
+    """Nothing to divide, so the tolerant behaviour is unchanged."""
+    assert reports.parse_highlights("just a value")[0] == {
+        "label": "", "value": "just a value", "note": "",
+    }
+    # And one that OPENS with its figure has no label to take.
+    assert reports.parse_highlights("2026 outlook strong")[0]["label"] == ""
+    # Safe to call with padding, so the helper does not depend on its caller
+    # having stripped first.
+    assert reports._split_at_the_figure("  just a value  ")["value"] == "just a value"
