@@ -1007,6 +1007,26 @@ def _is_a_described_request(text: str, at: int) -> bool:
     """Whether the request verb at ``at`` sits under a negation."""
     return bool(_NEGATED.search(text[max(0, at - 30):at]))
 
+#: An EXPORT is a different promise from a report: a file on disk for a spreadsheet
+#: or an accountant, not a sheet delivered to a channel. It gets its own check
+#: because the report note's wording ("no report was produced") would be wrong for
+#: it, and a note that misdescribes what is missing is worse than none.
+_EXPORT_REQUEST = re.compile(
+    r"(?:\b(?:export|download|dump|save|write)\b[^.?!\n]{0,60}"
+    r"\b(?:csv|spreadsheet|excel|xlsx?|tsv|file)\b"
+    r"|\b(?:csv|spreadsheet|excel|xlsx?)\b[^.?!\n]{0,30}\b(?:export|download|dump)\b)",
+    re.IGNORECASE,
+)
+
+_EXPORT_TOOLS = frozenset({"export_data"})
+
+_MISSING_EXPORT_NOTE = (
+    "\n\n---\n"
+    "⚠️ **Note — no file was written.** You asked for an export, but `export_data` "
+    "was never called, so nothing was saved to the exports directory. The answer "
+    "above is chat text only."
+)
+
 _MISSING_REPORT_NOTE = (
     "\n\n---\n"
     "⚠️ **Note — no report was produced.** You asked for one, but no rendering tool "
@@ -1028,7 +1048,15 @@ async def settle_delivery_claim(
 
     Either way the answer is only appended to, never rewritten.
     """
-    if fake or not answer or _DELIVERY_TOOLS & called_tools:
+    if fake or not answer:
+        return answer
+    # The export check is independent of the report one: a turn can legitimately
+    # write a CSV and produce no sheet, or the reverse.
+    exporting = _EXPORT_REQUEST.search(user_msg or "")
+    if (exporting and not _EXPORT_TOOLS & called_tools
+            and not _is_a_described_request(user_msg, exporting.start())):
+        return answer + _MISSING_EXPORT_NOTE
+    if _DELIVERY_TOOLS & called_tools:
         return answer
     found = _DELIVERY_CLAIM.search(answer)
     if found and not _is_an_offer(answer, found.start()):

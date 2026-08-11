@@ -1291,3 +1291,54 @@ async def test_talking_about_a_report_is_not_asking_for_one():
     answer = "Here you go."
     for text in _REAL_NON_REQUESTS:
         assert await settle_delivery_claim(answer, set(), user_msg=text) == answer, text
+
+
+async def test_a_requested_export_that_never_happened_is_noted():
+    """An export is a different promise from a report — a file on disk for a
+    spreadsheet, not a sheet delivered to a channel — so it gets its own check and
+    its own wording. A note that misdescribes what is missing is worse than none."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    for ask in (
+        "export my portfolio to csv",
+        "export my transactions to a csv file",
+        "download my holdings as a spreadsheet",
+        "can you dump the trades to excel",
+        "save my positions to a csv",
+    ):
+        out = await settle_delivery_claim("Here you go.", set(), user_msg=ask)
+        assert "no file was written" in out.lower(), ask
+
+
+async def test_an_export_that_happened_draws_no_note():
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    answer = "Wrote 11 rows."
+    assert await settle_delivery_claim(
+        answer, {"export_data"}, user_msg="export my portfolio to csv"
+    ) == answer
+
+
+async def test_talking_about_a_csv_is_not_asking_for_one():
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    answer = "Here you go."
+    for text in (
+        "the csv looks wrong, the totals don't add up",
+        "the agent didn't export the csv",
+        "What's my YTD return?",
+    ):
+        assert await settle_delivery_claim(answer, set(), user_msg=text) == answer, text
+
+
+async def test_the_export_and_report_notes_are_independent():
+    """A turn can legitimately write a CSV and produce no sheet, or the reverse, so
+    a report request must not draw the export note."""
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    out = await settle_delivery_claim(
+        "Here you go.", set(),
+        user_msg="Produce my portfolio performance review and send it to Telegram.",
+    )
+    assert "no report was produced" in out.lower()
+    assert "no file was written" not in out.lower()
