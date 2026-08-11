@@ -957,22 +957,39 @@ _UNBACKED_DELIVERY_NOTE = (
 #: an instruction to analyse, and only the first matches.
 _ARTIFACT = (
     r"(?:report|one[- ]pager|pdf|infographic|tear\s?sheet|docs?|document"
+    r"|charts?|images?|graphics?|visual"
     r"|(?:performance|portfolio)\s+review)"
 )
 
-#: Verbs that ask for one. Sourced from what the user actually types, which is how
+#: Verbs that ask for one. Sourced from what people actually type, which is how
 #: "show me … as a one-pager" and "generate the docs for telegram" were found to
 #: slip past a list built from imagination.
 _ASK_VERB = (
     r"(?:produce|generate|create|make|prepare|build|render|send|email|push"
-    r"|give\s+me|show(?:\s+me)?|get\s+me|put\s+together|draw\s+up|write(?:\s+up)?)"
+    r"|give\s+me|show(?:\s+me)?|get\s+me|put\s+together|draw\s+up|write(?:\s+up)?"
+    r"|drop|put|share|attach)"
 )
 
 _REPORT_REQUEST = re.compile(
+    # 1. A request verb, then the artifact: "generate the docs", "show me a
+    #    one-pager".
     rf"(?:\b{_ASK_VERB}\b[^.?!\n]{{0,60}}\b{_ARTIFACT}\b"
-    # "for telegram" as well as "to telegram": naming the channel is the request,
-    # whichever preposition carries it.
-    rf"|\b{_ARTIFACT}\b[^.?!\n]{{0,60}}\b(?:to|via|on|for)\s+(?:telegram|slack|e-?mail)\b)",
+    # 2. The artifact, then a channel. "for telegram" as well as "to telegram":
+    #    naming the channel is the request, whichever preposition carries it.
+    rf"|\b{_ARTIFACT}\b[^.?!\n]{{0,60}}\b(?:to|via|on|in|for)\s+(?:telegram|slack|e-?mail)\b"
+    # 3. An INDEFINITE artifact, with no verb at all — "a one-pager on my
+    #    holdings", "monthly review as a pdf", "I'd like a performance review".
+    #    The article carries the request: "a report" asks for one, "the report"
+    #    refers to one that exists, which is how every non-request in the corpus
+    #    reads ("the report looks wrong", "why is the chart empty").
+    rf"|\b(?:a|an)\s+{_ARTIFACT}\b"
+    # 4. The artifact, then please — "portfolio review please".
+    rf"|\b{_ARTIFACT}\b[^.?!\n]{{0,20}}\bplease\b"
+    # 5. A BARE "review" named alongside a channel — "put the review in telegram".
+    #    Bare "review" is not an artifact on its own, because "review my portfolio
+    #    concentration" is an instruction to analyse; paired with a channel it can
+    #    only be the document.
+    rf"|\breview\b[^.?!\n]{{0,20}}\b(?:to|via|on|in|for)\s+(?:telegram|slack|e-?mail)\b)",
     re.IGNORECASE,
 )
 
