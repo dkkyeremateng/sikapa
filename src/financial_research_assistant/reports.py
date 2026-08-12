@@ -1033,6 +1033,21 @@ def reviewing():
         _rendering_review.reset(token)
 
 
+#: Set while `render_stock_report` is driving, so the sheet it builds is not refused.
+_rendering_stock: ContextVar[bool] = ContextVar("fra_rendering_stock", default=False)
+
+
+@contextmanager
+def analysing():
+    """Mark this render as coming FROM `render_stock_report` — see
+    `_looks_like_a_stock_report`."""
+    token = _rendering_stock.set(True)
+    try:
+        yield
+    finally:
+        _rendering_stock.reset(token)
+
+
 _PORTFOLIO_WORDS = ("portfolio", "my holdings", "account performance")
 _REVIEW_WORDS = ("review", "performance", "year-to-date", "year to date", "ytd",
                  "quarter", "monthly", "annual", "recap")
@@ -1076,6 +1091,54 @@ _REVIEW_REFUSAL = (
 )
 
 
+#: Words that make a sheet an EARNINGS write-up rather than some other stock page.
+_EARNINGS_WORDS = ("earnings", "results", "quarter", "10-q", "q1 ", "q2 ", "q3 ",
+                   "q4 ", "fy20", "fiscal")
+#: Tile labels holding the figures a quarter is reported in.
+_STOCK_TILES = ("revenue", "eps", "earnings per share", "net income", "margin",
+                "operating income", "drawdown", "free cash flow")
+#: Heads that name more than one company. A comparison or screen legitimately
+#: carries revenue and margin tiles for several names, and `render_stock_report`
+#: is single-symbol, so refusing those would leave no way to build them at all.
+_MULTI_NAME_WORDS = (" vs ", " vs. ", "versus", "comparison", "compare", "screen",
+                     "peers", "peer group", "sector", "watchlist", "basket")
+
+
+def _looks_like_a_stock_report(title: str, subtitle: str, highlights: str) -> bool:
+    """Whether this call is a single-stock earnings sheet built by hand.
+
+    Narrow, and requiring all four: an earnings word, no portfolio word (that is
+    the review guard's territory), no word naming several companies, and at least
+    two of a quarter's figures in the tiles. A valuation or risk sheet has
+    different tiles; a peer comparison is exempted outright.
+    """
+    head = f"{title} {subtitle}".lower()
+    if not any(w in head for w in _EARNINGS_WORDS):
+        return False
+    if any(w in head for w in _PORTFOLIO_WORDS + _MULTI_NAME_WORDS):
+        return False
+    labels = " ".join(t["label"] for t in parse_highlights(highlights)).lower()
+    return sum(1 for w in _STOCK_TILES if w in labels) >= 2
+
+
+_STOCK_REFUSAL = (
+    "NOT RENDERED — this is a single-stock earnings sheet, and building one here "
+    "means writing its figures by hand.\n"
+    "Call `render_stock_report(symbol=..., observations=..., stance=...)` instead. "
+    "It pulls the quarter from SEC 10-Q XBRL and the price side from daily history, "
+    "renders the sheet and delivers it. You supply only `observations` — 3-6 "
+    "bullets on what the quarter means.\n"
+    "This is refused rather than warned about because a hand-built earnings sheet "
+    "last shipped revenue of $4.96B where the as-reported figure was $5.29B, called "
+    "the stock down 63% in one bullet and 70% in another over a correctly-computed "
+    "-66.3%, and charted a net margin LEVEL of 11.8% among year-over-year changes "
+    "as the one thing that rose in a bad quarter.\n"
+    "If you genuinely need a stock sheet that is NOT an earnings write-up — a "
+    "valuation, a risk profile, a peer comparison — title it for what it is and it "
+    "will render."
+)
+
+
 # --- Model-facing tool ---------------------------------------------------------
 
 
@@ -1097,6 +1160,12 @@ def render_report(
     step. Building one here means writing the tiles by hand, and every delivered
     review that carried a wrong number carried one that had been typed rather than
     read.
+
+    NOT FOR A SINGLE-STOCK EARNINGS WRITE-UP either — call
+    `render_stock_report(symbol, observations, stance)`, which pulls the quarter
+    from SEC 10-Q XBRL and the price side from daily history, each figure labelled
+    with the window and basis it is on. A peer comparison, valuation or risk sheet
+    is not an earnings write-up and still belongs here.
 
     Use when the user asks for a report/infographic/PDF/one-pager, or wants
     something "sent"/"pushed" to them as a file rather than as chat text — and for
@@ -1153,6 +1222,11 @@ def render_report(
     # because its figures were typed rather than read. See `_looks_like_a_review`.
     if not _rendering_review.get() and _looks_like_a_review(title, subtitle, highlights):
         return _REVIEW_REFUSAL
+    # And the same for a single-stock earnings sheet, for the same reason: its
+    # figures were typed. See `_looks_like_a_stock_report`.
+    if (not _rendering_stock.get()
+            and _looks_like_a_stock_report(title, subtitle, highlights)):
+        return _STOCK_REFUSAL
 
     # Refuse a chartless body rather than shipping a cover of tiles and text.
     # A narrative report is a legitimate outcome, but it should be a decision:
@@ -1351,6 +1425,63 @@ _PROSE_HEADINGS = {
 
 def _is_prose_heading(title: str) -> bool:
     return re.sub(r"[^a-z ]", "", (title or "").lower()).strip() in _PROSE_HEADINGS
+
+
+#: Words that state a direction, so a label carrying one has already said which
+#: way its own number goes. Stems, matched as prefixes, so "compressed",
+#: "compression" and "compressing" all count once.
+_FELL = ("compress", "contract", "declin", "decreas", "fell", "fall", "drop",
+         "shrank", "shrink", "narrow", "weaken", "slump", "sank", "lower",
+         "loss", "lost", "miss")
+_ROSE = ("expand", "grew", "grow", "rose", "rise", "rising", "gain", "climb",
+         "improv", "widen", "strengthen", "surge", "jump", "beat", "higher")
+_WORD_RE = re.compile(r"[a-z]+")
+
+
+def _direction(label: str) -> int:
+    """+1 / -1 when a label names a direction, 0 when it does not or says both.
+
+    A label holding both ("declining growth") has not settled the question, so it
+    is left alone — this only ever speaks when the label is unambiguous.
+    """
+    words = _WORD_RE.findall((label or "").lower())
+    fell = any(w.startswith(_FELL) for w in words)
+    rose = any(w.startswith(_ROSE) for w in words)
+    return 0 if fell == rose else (-1 if fell else 1)
+
+
+def _is_coherent(label: str, value: float) -> bool:
+    """Whether a bar's sign agrees with the direction its own label states.
+
+    A LEVEL written into a chart of CHANGES is the failure: "Net margin compressed
+    +11.8%" is the margin itself, not its move, and charted beside a -25.5% EPS
+    change it drew as the one thing that went up in a bad quarter. English carries
+    the sign here and the digits do not — "fell 3%" negates, "fell to 11.8%" does
+    not — so no rule over the number alone can separate them.
+
+    Narrow on purpose. It reads the label's own claim and only ever drops a bar
+    that contradicts it; a label naming no direction is never touched, so the
+    failure mode is missing a bad bar, never removing a good one.
+    """
+    direction = _direction(label)
+    return direction == 0 or value == 0 or (value > 0) == (direction > 0)
+
+
+def _coherent_series(series: dict[str, Any]) -> dict[str, Any] | None:
+    """`series` with self-contradicting bars removed, or None if too little is left.
+
+    Only SIGNED series are checked. Where the sign is not being displayed as
+    meaning anything, a directional word in a label is describing the category
+    rather than claiming which way the bar points.
+    """
+    if not series.get("signed"):
+        return series
+    items = [(l, v) for l, v in series["items"] if _is_coherent(l, v)]
+    if len(items) == len(series["items"]):
+        return series
+    if len(items) < _MIN_ITEMS:
+        return None
+    return {**series, "items": items}
 
 
 def _distinct_enough(items: list[tuple[str, float]]) -> bool:
@@ -1692,9 +1823,10 @@ def extract_series(markdown: str) -> list[dict[str, Any]]:
             continue
         seen_titles.add(s["title"])
         kept.append(s)
-    # Applied last so it catches every path into `series` — list runs, tables and
+    # Applied last so they catch every path into `series` — list runs, tables and
     # inline breakdowns alike.
-    return [s for s in kept if not _is_prose_heading(s["title"])][:_MAX_SERIES]
+    checked = [_coherent_series(s) for s in kept if not _is_prose_heading(s["title"])]
+    return [s for s in checked if s][:_MAX_SERIES]
 
 
 _INFO_CSS = """

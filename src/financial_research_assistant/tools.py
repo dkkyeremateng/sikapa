@@ -1127,6 +1127,156 @@ def render_review(
     return f"Rendered the {brief['period_label']} review.\n{out}"
 
 
+def stock_brief(symbol: str, quarters: int = 8) -> str:
+    """EVERY figure a single-stock or earnings report needs, already computed,
+    formatted for `render_report`, and LABELLED with the window and basis it is on.
+
+    USE THIS FIRST for any 'analyse the latest earnings / how is X doing / write up
+    this stock' request. It pulls the newest reported quarter from SEC 10-Q XBRL
+    (revenue, diluted EPS, net income, net margin, year-over-year and
+    quarter-over-quarter), and the price side from daily history (last close, the
+    high this window reaches back to, the fall from it, the trailing-twelve-month
+    drawdown and range), in one call.
+
+    PASS THEM THROUGH VERBATIM. Copy the HIGHLIGHTS block into `render_report`'s
+    ``highlights`` and the MARKDOWN block into ``markdown``, then ADD your own
+    observations. Do not retype the figures and do not restate a percentage in a
+    different window — that is exactly what went wrong last time.
+
+    Note what each tile SAYS about itself. "Net margin 11.8% — level, not a change"
+    is the margin itself, not its move: a delivered chart of year-over-year changes
+    carried it as "compressed +11.8%" and drew it as the one thing that rose in a
+    bad quarter. "Max drawdown -66.3% — trailing 12 months" is not the fall from
+    the high, which over a longer window was -78%. Both are true; they measure
+    different things, and a sheet that prints one without its span invites the
+    other to be written beside it.
+
+    Earnings figures are GAAP as-reported. The "adjusted" numbers a company
+    headlines in its press release are different, are not carried here, and must
+    not be mixed in — a run reporting $4.96B against an as-reported $5.29B was
+    plausibly quoting one, and said neither.
+    """
+    from . import stocks
+
+    try:
+        brief = stocks.build_stock_brief(symbol, quarters=quarters)
+    except Exception as exc:  # unknown ticker, no 10-Q series, no price history
+        return f"Could not build the brief: {exc}"
+
+    f = brief["facts"]
+
+    def pct(key: str) -> str:
+        """A percentage, or "n/a" — a quarter with no comparison has no number, and
+        printing 0.0 for it would read as flat where the truth is unknown."""
+        value = f.get(key)
+        return "n/a" if value is None else f"{value:.1f}%"
+
+    return "\n".join([
+        f"STOCK BRIEF · {brief['symbol']} · {brief['quarter']}",
+        f"  title: {brief['title']}",
+        f"  subtitle: {brief['subtitle']}",
+        "",
+        "HIGHLIGHTS (pass verbatim as `highlights`):",
+        brief["highlights"],
+        "",
+        "MARKDOWN (pass as `markdown`, then append your own observations):",
+        brief["markdown"],
+        "CONTEXT for your commentary — do not restate mechanically:",
+        f"  basis {f['basis']}; quarter ended {f['quarter_end']}",
+        f"  revenue {pct('revenue_yoy_pct')} YoY, {pct('revenue_qoq_pct')} QoQ",
+        f"  net margin {pct('net_margin_pct')} is a LEVEL — it was "
+        f"{pct('net_margin_year_ago_pct')} a year ago; never write it as a change",
+        # The two decline figures, side by side and named, because writing one
+        # without the other is what produced three contradictory numbers on a
+        # single delivered sheet.
+        f"  down {f['from_peak_pct']:.1f}% from ${f['peak']:,.2f} on {f['peak_day']} "
+        f"(high since {f['price_window_start']}) — a DIFFERENT window from the "
+        f"{f['drawdown_pct']:.1f}% trailing-12-month drawdown; never merge the two",
+        f"  trailing-year range ${f['year_low']:,.2f} to ${f['year_high']:,.2f}; "
+        f"last close ${f['last_close']:,.2f} on {f['last_day']}",
+    ])
+
+
+def render_stock_report(
+    symbol: str,
+    observations: str = "",
+    stance: str = "",
+    deliver: bool = True,
+    theme: str = "",
+) -> str:
+    """Render AND send a single-stock / earnings report, in one call.
+
+    THIS IS THE DEFAULT for 'analyse the latest earnings report of X / how is X
+    doing / write up this stock and send it'. Every figure on the sheet is computed
+    here — revenue, EPS, net income, net margin, year-over-year, the price, the
+    fall from the window's high, the trailing-twelve-month drawdown — each labelled
+    with the window and basis it is on. You do not supply any of them, and cannot
+    get one wrong.
+
+    What YOU write is ``observations`` — markdown bullets saying what the quarter
+    MEANS, and it is REQUIRED: without it the call is refused, because figures with
+    no reading of them are a table rather than a report. Write 3-6 bullets, one
+    insight each: what is driving the direction, whether the market has already
+    priced it, what the margin path implies, what looks unflattering, what would
+    change your mind.
+
+    ``stance`` badges your call ('HOLD | trim into strength above $60').
+    ``deliver=False`` renders without sending. Use `stock_brief` instead only when
+    you need the figures for a report you are shaping yourself, or to answer in
+    chat.
+    """
+    from . import reports, stocks
+
+    try:
+        brief = stocks.build_stock_brief(symbol)
+    except Exception as exc:  # unknown ticker, no 10-Q series, no price history
+        return f"Could not build the report: {exc}"
+
+    notes = (observations or "").strip()
+    # Refused, not warned about — the same lesson `render_review` learned: a note
+    # in a tool result is easy to read past once the render has already succeeded.
+    if not notes:
+        return (
+            f"NOT RENDERED — a {brief['symbol']} report with no observations is a "
+            "table of figures.\n"
+            f"The {brief['quarter']} numbers are computed and waiting; call again "
+            "with `observations` — 3-6 markdown bullets on what they MEAN. Look "
+            "for: what is driving the direction, whether the market has priced it, "
+            "what the margin path implies, what is unflattering, what would change "
+            "your mind.\n"
+            "Use `stock_brief` first if you want to read the figures before writing "
+            "them up."
+        )
+
+    lines = [ln.strip() for ln in notes.splitlines() if ln.strip()]
+    bullets = "\n".join(
+        ln if ln.startswith(("-", "*", "#")) else f"- {ln}" for ln in lines
+    )
+    body = brief["markdown"] + f"\n## Observations\n{bullets}\n"
+
+    # A filer with fewer than three reported quarters has no table to chart, and
+    # the chartless refusal would then hand the model advice it cannot act on —
+    # restructuring a body it did not write. `allow_prose` says "I looked, there is
+    # genuinely nothing to chart", which is exactly true here, so the tiles carry
+    # the sheet instead.
+    chartless = not reports.extract_series(body)
+
+    # `analysing()` exempts this from the guard in `render_report`: the sheet it
+    # refuses is a hand-built one, and this one's figures came from the brief.
+    with reports.analysing():
+        out = reports.render_report(
+            brief["title"],
+            body,
+            highlights=brief["highlights"],
+            subtitle=brief["subtitle"],
+            stance=stance,
+            deliver=deliver,
+            theme=theme,
+            allow_prose=chartless,
+        )
+    return f"Rendered the {brief['symbol']} {brief['quarter']} report.\n{out}"
+
+
 def allocation(account: str = "") -> str:
     """Portfolio allocation & concentration from the newest imported statement's
     open positions: each position's weight as a % of the book, the largest

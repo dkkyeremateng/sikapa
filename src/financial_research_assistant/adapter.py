@@ -936,7 +936,8 @@ _DELIVERY_CLAIM = re.compile(
 #: Any of these having run means the answer's delivery talk is grounded in a real
 #: call — `render_report` and `render_review` both report where the file went, and
 #: `deliver_answer` sends the text itself.
-_DELIVERY_TOOLS = frozenset({"render_report", "render_review", "deliver_answer"})
+_DELIVERY_TOOLS = frozenset({"render_report", "render_review",
+                             "render_stock_report", "deliver_answer"})
 
 _UNBACKED_DELIVERY_NOTE = (
     "\n\n---\n"
