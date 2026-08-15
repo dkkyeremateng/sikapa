@@ -1104,8 +1104,33 @@ def _hide(monkeypatch, module):
     monkeypatch.setattr(builtins, "__import__", fake)
 
 
+def _init_chat_model_raises(monkeypatch, exc):
+    """Make `init_chat_model` fail with `exc`.
+
+    Deliberately NOT done by hiding the real module. `init_chat_model` imports
+    through `importlib.import_module`, which does not go through
+    `builtins.__import__` — so a fake that hooks `__import__` models the wrong
+    thing and silently stops failing. It did: these two tests passed against
+    langchain-anthropic 1.4.8 and went green-but-meaningless on 1.5.6, where the
+    real client was built instead. Pin the ERROR the library raises, not the
+    machinery it happens to raise it from.
+    """
+    def boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", boom)
+
+
+#: What `init_chat_model` raises for an absent integration. Note it carries no
+#: `name` attribute, which is why the message fallback exists.
+_LANGCHAIN_IMPORT_ERROR = ImportError(
+    "Initializing ChatAnthropic requires the langchain-anthropic package. "
+    "Please install it with `pip install langchain-anthropic`"
+)
+
+
 def test_a_missing_provider_package_names_the_install_command(monkeypatch):
-    _hide(monkeypatch, "langchain_anthropic")
+    _init_chat_model_raises(monkeypatch, _LANGCHAIN_IMPORT_ERROR)
     with pytest.raises(llm.ProviderSupportError) as got:
         llm._make_llm("claude-sonnet-4-5", provider="anthropic", api_key="k")
     message = str(got.value)
@@ -1118,7 +1143,7 @@ def test_the_hint_warns_that_uv_sync_removes_other_extras(monkeypatch):
     """`uv sync --extra anthropic` syncs to exactly the extras named and removes
     the rest — run without `--extra dev` it uninstalls pytest, which is how this
     warning was earned."""
-    _hide(monkeypatch, "langchain_anthropic")
+    _init_chat_model_raises(monkeypatch, _LANGCHAIN_IMPORT_ERROR)
     with pytest.raises(llm.ProviderSupportError) as got:
         llm._make_llm("claude-sonnet-4-5", provider="anthropic", api_key="k")
     assert "removes the rest" in str(got.value)
@@ -1127,14 +1152,9 @@ def test_the_hint_warns_that_uv_sync_removes_other_extras(monkeypatch):
 def test_a_missing_module_inside_an_installed_provider_is_not_masked(monkeypatch):
     """Answering a real bug with install advice sends the reader after the wrong
     thing entirely, so only the integration package itself converts."""
-    _hide(monkeypatch, "some_internal_dep")
-
-    def boom(*_a, **_k):
-        raise ModuleNotFoundError(
-            "No module named 'some_internal_dep'", name="some_internal_dep"
-        )
-
-    monkeypatch.setattr("langchain.chat_models.init_chat_model", boom)
+    _init_chat_model_raises(monkeypatch, ModuleNotFoundError(
+        "No module named 'some_internal_dep'", name="some_internal_dep"
+    ))
     with pytest.raises(ModuleNotFoundError) as got:
         llm._make_llm("claude-sonnet-4-5", provider="anthropic", api_key="k")
     assert not isinstance(got.value, llm.ProviderSupportError)
@@ -1144,14 +1164,9 @@ def test_a_missing_module_inside_an_installed_provider_is_not_masked(monkeypatch
 def test_a_provider_with_no_declared_extra_still_gets_a_command(monkeypatch):
     """The map covers what this project declares; anything else still beats a
     bare import error."""
-    _hide(monkeypatch, "langchain_cohere")
-
-    def boom(*_a, **_k):
-        raise ModuleNotFoundError(
-            "No module named 'langchain_cohere'", name="langchain_cohere"
-        )
-
-    monkeypatch.setattr("langchain.chat_models.init_chat_model", boom)
+    _init_chat_model_raises(monkeypatch, ModuleNotFoundError(
+        "No module named 'langchain_cohere'", name="langchain_cohere"
+    ))
     with pytest.raises(llm.ProviderSupportError) as got:
         llm._make_llm("some-model", provider="cohere", api_key="k")
     assert "uv pip install langchain-cohere" in str(got.value)

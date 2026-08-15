@@ -101,9 +101,12 @@ def _anthropic_oauth_llm(model: str, token: str, base_url: str | None):
     ``default_headers`` as ``dict[str, str]``, so the SDK's ``Omit`` sentinel
     can't get through pydantic either. Overriding the params is the one seam that
     reaches ``anthropic.Client(auth_token=…)``, which is the SDK's supported way
-    to send a bearer credential. Verified against langchain-anthropic 1.5.3 /
-    anthropic 0.120.2: exactly one auth header goes out, even with
-    ``ANTHROPIC_API_KEY`` set in the environment.
+    to send a bearer credential. Verified against langchain-anthropic 1.5.6 /
+    anthropic 0.122.0 (the pinned versions), and re-checked on 1.4.8 / 0.116.0:
+    exactly one auth header goes out, even with ``ANTHROPIC_API_KEY`` set in the
+    environment. Worth re-checking on an upgrade — this reaches into
+    ``ChatAnthropic``'s private client params, so it is the one seam here that a
+    minor version bump could quietly break.
     """
     from functools import cached_property
 
