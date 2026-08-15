@@ -1080,3 +1080,127 @@ def test_login_reaches_make_llm(monkeypatch):
     llm._make_llm("some-model")
     assert seen["base_url"] == "https://openrouter.ai/api/v1"
     assert seen["api_key"].get_secret_value() == "sk-or"
+
+
+# --- a provider whose package is not installed ---------------------------------
+#
+# Every non-OpenAI provider is an OPTIONAL extra, so this is the first thing a
+# working configuration hits on a fresh checkout. It surfaced as a bare
+# "ModuleNotFoundError: No module named 'langchain_anthropic'" on an agent that
+# had otherwise started fine — the module named, the remedy nowhere.
+
+
+def _hide(monkeypatch, module):
+    """Make `import <module>` fail exactly as an uninstalled package does."""
+    import builtins
+
+    real = builtins.__import__
+
+    def fake(name, *args, **kwargs):
+        if name == module or name.startswith(module + "."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+
+
+def _init_chat_model_raises(monkeypatch, exc):
+    """Make `init_chat_model` fail with `exc`.
+
+    Deliberately NOT done by hiding the real module. `init_chat_model` imports
+    through `importlib.import_module`, which does not go through
+    `builtins.__import__` — so a fake that hooks `__import__` models the wrong
+    thing and silently stops failing. It did: these two tests passed against
+    langchain-anthropic 1.4.8 and went green-but-meaningless on 1.5.6, where the
+    real client was built instead. Pin the ERROR the library raises, not the
+    machinery it happens to raise it from.
+    """
+    def boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", boom)
+
+
+#: What `init_chat_model` raises for an absent integration. Note it carries no
+#: `name` attribute, which is why the message fallback exists.
+_LANGCHAIN_IMPORT_ERROR = ImportError(
+    "Initializing ChatAnthropic requires the langchain-anthropic package. "
+    "Please install it with `pip install langchain-anthropic`"
+)
+
+
+def test_a_missing_provider_package_names_the_install_command(monkeypatch):
+    _init_chat_model_raises(monkeypatch, _LANGCHAIN_IMPORT_ERROR)
+    with pytest.raises(llm.ProviderSupportError) as got:
+        llm._make_llm("claude-sonnet-4-5", provider="anthropic", api_key="k")
+    message = str(got.value)
+    assert "langchain-anthropic" in message
+    assert "uv pip install langchain-anthropic" in message
+    assert "financial-research-assistant[anthropic]" in message
+
+
+def test_the_hint_warns_that_uv_sync_removes_other_extras(monkeypatch):
+    """`uv sync --extra anthropic` syncs to exactly the extras named and removes
+    the rest — run without `--extra dev` it uninstalls pytest, which is how this
+    warning was earned."""
+    _init_chat_model_raises(monkeypatch, _LANGCHAIN_IMPORT_ERROR)
+    with pytest.raises(llm.ProviderSupportError) as got:
+        llm._make_llm("claude-sonnet-4-5", provider="anthropic", api_key="k")
+    assert "removes the rest" in str(got.value)
+
+
+def test_a_missing_module_inside_an_installed_provider_is_not_masked(monkeypatch):
+    """Answering a real bug with install advice sends the reader after the wrong
+    thing entirely, so only the integration package itself converts."""
+    _init_chat_model_raises(monkeypatch, ModuleNotFoundError(
+        "No module named 'some_internal_dep'", name="some_internal_dep"
+    ))
+    with pytest.raises(ModuleNotFoundError) as got:
+        llm._make_llm("claude-sonnet-4-5", provider="anthropic", api_key="k")
+    assert not isinstance(got.value, llm.ProviderSupportError)
+    assert "some_internal_dep" in str(got.value)
+
+
+def test_a_provider_with_no_declared_extra_still_gets_a_command(monkeypatch):
+    """The map covers what this project declares; anything else still beats a
+    bare import error."""
+    _init_chat_model_raises(monkeypatch, ModuleNotFoundError(
+        "No module named 'langchain_cohere'", name="langchain_cohere"
+    ))
+    with pytest.raises(llm.ProviderSupportError) as got:
+        llm._make_llm("some-model", provider="cohere", api_key="k")
+    assert "uv pip install langchain-cohere" in str(got.value)
+
+
+def test_the_openai_path_is_untouched(monkeypatch):
+    """The guard must cost nothing to the default provider, which needs no extra."""
+    seen = {}
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", lambda **kw: seen.update(kw))
+    llm._make_llm("gpt-4o", provider="openai", api_key="k")
+    assert seen["model"] == "gpt-4o"
+
+
+def test_the_oauth_path_gets_the_hint_too(monkeypatch):
+    """THE case that was actually reported. `init_chat_model` catches the import
+    itself and re-raises a message of its own, but the OAuth subclass imports
+    `langchain_anthropic` directly — so an OAuth user, and only an OAuth user, saw
+    the bare "No module named 'langchain_anthropic'" with no remedy in it."""
+    auth.set_credential("default", {
+        "provider": "anthropic", "type": "oauth", "access": "tok",
+        "refresh": "rt", "expires": 0,
+    })
+    monkeypatch.setattr(llm, "_is_oauth", lambda _scope: True)
+    _hide(monkeypatch, "langchain_anthropic")
+    with pytest.raises(llm.ProviderSupportError) as got:
+        llm._make_llm("claude-sonnet-4-5", provider="anthropic", api_key="tok")
+    assert "uv pip install langchain-anthropic" in str(got.value)
+
+
+def test_the_oauth_path_still_builds_when_the_package_is_there():
+    """The guard must cost nothing to the path it wraps: one auth header, the
+    bearer one, even with an API key in the environment."""
+    pytest.importorskip("langchain_anthropic")
+    client = llm._anthropic_oauth_llm("claude-sonnet-4-5", "tok-abc", None)
+    params = client._client_params
+    assert params["auth_token"] == "tok-abc"
+    assert params["api_key"] is None

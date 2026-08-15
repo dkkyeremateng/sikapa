@@ -17,6 +17,75 @@ from __future__ import annotations
 
 from typing import Any
 import os
+import re
+
+
+#: Provider → (extra name, the module its integration imports as). Only the
+#: providers this project declares an extra for; anything else falls back to the
+#: generic half of the message, which is still better than a bare import error.
+_PROVIDER_EXTRAS = {
+    "anthropic": ("anthropic", "langchain_anthropic"),
+    "google_genai": ("google", "langchain_google_genai"),
+    "google-genai": ("google", "langchain_google_genai"),
+    "groq": ("groq", "langchain_groq"),
+}
+
+
+class ProviderSupportError(RuntimeError):
+    """A provider was selected whose LangChain integration is not installed.
+
+    Distinct from a credential or config error so the message can carry an
+    install command. Every non-OpenAI provider is an OPTIONAL extra, so this is
+    the first thing a working configuration hits on a fresh checkout — and the
+    bare ``ModuleNotFoundError: No module named 'langchain_anthropic'`` it
+    replaced named the module but not the remedy, on an agent that had otherwise
+    started fine.
+    """
+
+
+def _provider_support_error(
+    provider: str, exc: ImportError
+) -> ProviderSupportError | None:
+    """An actionable error for a missing provider package, or None to re-raise.
+
+    Catches ImportError rather than ModuleNotFoundError because the two
+    construction paths fail differently, and only one of them was ever reported.
+    ``init_chat_model`` catches the import itself and re-raises its own
+    ImportError ("requires the langchain-anthropic package"); the OAuth subclass
+    imports ``langchain_anthropic`` directly and lets the bare
+    ModuleNotFoundError out. An OAuth user therefore got the message with no
+    remedy in it, which is the one that was actually hit.
+
+    Only converts when the missing module IS an integration package. An
+    ImportError from somewhere INSIDE an installed provider is a real bug, and
+    answering it with install advice would send the reader after the wrong thing.
+    """
+    extra, module = _PROVIDER_EXTRAS.get(provider, ("", ""))
+    # `name` is set on ModuleNotFoundError but not on the ImportError
+    # `init_chat_model` constructs, so the message is the fallback.
+    missing = (getattr(exc, "name", "") or "").split(".")[0]
+    if not missing:
+        found = re.search(r"\blangchain[-_][a-z0-9_-]+", str(exc))
+        missing = found.group(0).replace("-", "_") if found else ""
+    if not missing or (missing != module and not missing.startswith("langchain")):
+        return None
+    dist = missing.replace("_", "-")
+    how = (
+        f"  uv pip install {dist}\n"
+        f"  pip install 'financial-research-assistant[{extra}]'"
+        if extra
+        else f"  uv pip install {dist}\n  pip install {dist}"
+    )
+    return ProviderSupportError(
+        f"The {provider!r} provider needs the optional {dist!r} package, which is "
+        "not installed. Every non-OpenAI provider is an optional extra.\n"
+        f"Install it with one of:\n{how}\n"
+        # `uv sync --extra X` is deliberately NOT suggested: it syncs to exactly
+        # the extras named, so it removes any others already installed — running
+        # it without `--extra dev` here uninstalled pytest.
+        "(`uv sync --extra …` syncs to exactly the extras you name and removes "
+        "the rest, so pass every extra you already have, or use the commands above.)"
+    )
 
 
 def _anthropic_oauth_llm(model: str, token: str, base_url: str | None):
@@ -32,9 +101,12 @@ def _anthropic_oauth_llm(model: str, token: str, base_url: str | None):
     ``default_headers`` as ``dict[str, str]``, so the SDK's ``Omit`` sentinel
     can't get through pydantic either. Overriding the params is the one seam that
     reaches ``anthropic.Client(auth_token=…)``, which is the SDK's supported way
-    to send a bearer credential. Verified against langchain-anthropic 1.5.3 /
-    anthropic 0.120.2: exactly one auth header goes out, even with
-    ``ANTHROPIC_API_KEY`` set in the environment.
+    to send a bearer credential. Verified against langchain-anthropic 1.5.6 /
+    anthropic 0.122.0 (the pinned versions), and re-checked on 1.4.8 / 0.116.0:
+    exactly one auth header goes out, even with ``ANTHROPIC_API_KEY`` set in the
+    environment. Worth re-checking on an upgrade — this reaches into
+    ``ChatAnthropic``'s private client params, so it is the one seam here that a
+    minor version bump could quietly break.
     """
     from functools import cached_property
 
@@ -238,8 +310,11 @@ def _make_llm(
     ``base_url``/``api_key`` override is given — those are forwarded here too, so
     the tier overrides work against an Anthropic-compatible gateway exactly as
     they do against an OpenAI-compatible one. The provider's integration package
-    must be installed (e.g. ``pip install '.[anthropic]'``); a missing one raises
-    a clear ImportError that surfaces as an error event."""
+    is an OPTIONAL extra and must be installed (e.g. ``pip install
+    '.[anthropic]'``); a missing one raises `ProviderSupportError` naming the
+    package and the command that installs it, which surfaces as an error event.
+    That is the first thing a working configuration hits on a fresh checkout, and
+    it used to surface as a bare ``No module named 'langchain_anthropic'``."""
     provider = (provider or credential_provider(scope) or "openai").strip().lower()
     model = model or credential_model(scope) or _default_model(provider)
     base_url, api_key = _credentials(scope, provider, base_url, api_key)
@@ -255,6 +330,20 @@ def _make_llm(
             base_url=base_url,
             api_key=SecretStr(api_key) if api_key else None,
         )
+    # Every provider below is an optional extra, so a missing package is the
+    # expected first failure rather than an exceptional one. One wrapper covers
+    # both construction paths — the OAuth subclass imports `langchain_anthropic`
+    # directly, and `init_chat_model` imports its provider package internally.
+    try:
+        return _build_provider_llm(provider, model, base_url, api_key, scope)
+    except ImportError as e:
+        raise (_provider_support_error(provider, e) or e) from e
+
+
+def _build_provider_llm(
+    provider: str, model: str, base_url: str | None, api_key: str | None, scope: str
+):
+    """Construct a non-OpenAI provider's chat model. See `_make_llm`."""
     from langchain.chat_models import init_chat_model
 
     # Forward the endpoint overrides on this path too. Without them `SUBAGENT_*`
