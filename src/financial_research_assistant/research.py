@@ -173,6 +173,8 @@ async def synthesize_report(
             "\n\nLessons from prior research to apply this time (address these "
             f"gaps or note them explicitly):\n{bullets}"
         )
+    from .graph import message_text
+
     llm = _make_llm(model)
     resp = await llm.ainvoke([
         SystemMessage(content=system_prompt or RESEARCH_SYSTEM_PROMPT),
@@ -180,7 +182,9 @@ async def synthesize_report(
             content=f"Subject: {subject}\n\nTool findings:\n{findings}{lesson_block}\n\nWrite the report."
         ),
     ])
-    return resp.content if isinstance(resp.content, str) else str(resp.content)
+    # Not `str(resp.content)`: an Anthropic-style reply is a LIST of blocks, and its
+    # repr — thinking and all — was being saved to disk as the report.
+    return message_text(resp)
 
 
 def reports_dir() -> Path:
