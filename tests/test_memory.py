@@ -594,3 +594,43 @@ def test_a_per_field_na_is_not_a_data_gap():
     # A section that is NOTHING but the marker is still a gap.
     assert len(reflection._gap_lessons("AAPL", [("Dividends", "n/a")])) == 1
     assert len(reflection._gap_lessons("AAPL", [("Earnings", "No data available")])) == 1
+
+
+#: What an Anthropic-style provider returns with thinking on: a LIST of typed
+#: blocks, not a string. `str()` of it is a Python repr carrying the reasoning.
+_BLOCK_REPLY = [
+    {"type": "thinking", "thinking": "SECRET-CHAIN-OF-THOUGHT"},
+    {"type": "text", "text": "# Report\nThe actual answer."},
+]
+
+
+async def test_a_block_list_reply_is_saved_as_its_text_not_its_repr(monkeypatch):
+    from financial_research_assistant import research
+
+    class _BlockLLM:
+        async def ainvoke(self, messages):
+            return type("R", (), {"content": _BLOCK_REPLY})()
+
+    monkeypatch.setattr(
+        "financial_research_assistant.llm._make_llm", lambda model=None: _BlockLLM()
+    )
+    out = await research.synthesize_report("AAPL", [("Fundamentals", "P/E 30")])
+    assert out == "# Report\nThe actual answer."
+    assert "SECRET" not in out and "{'type'" not in out
+
+
+async def test_lessons_from_a_block_list_reply_carry_no_reasoning(monkeypatch):
+    from financial_research_assistant import reflection
+
+    class _BlockLLM:
+        async def ainvoke(self, messages):
+            return type("R", (), {"content": [
+                {"type": "thinking", "thinking": "SECRET-CHAIN-OF-THOUGHT"},
+                {"type": "text", "text": "Check the ETF look-through earlier"},
+            ]})()
+
+    monkeypatch.setattr(
+        "financial_research_assistant.llm.quick_llm", lambda model=None: _BlockLLM()
+    )
+    lessons = await reflection._critique_lessons("AAPL", [("X", "y")], "report", None)
+    assert lessons == ["From researching AAPL: Check the ETF look-through earlier"]

@@ -117,7 +117,11 @@ async def _critique_lessons(
                 )
             ),
         ])
-        content = resp.content if isinstance(resp.content, str) else str(resp.content)
+        from .graph import message_text
+
+        # A block-list reply stringified would split into "lessons" made of dict
+        # syntax and the model's own chain-of-thought — and be stored as memory.
+        content = message_text(resp)
     except Exception:
         return []  # a flaky/unconfigured model must not sink the pipeline
     subj = subject.strip().upper()
