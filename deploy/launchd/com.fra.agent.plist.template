@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mac fallback for the always-on service. Replace __REPO__ with the checkout's
+  absolute path — which must NOT be under ~/Documents, ~/Desktop or ~/Downloads:
+  launchd-spawned processes cannot read those without a Full Disk Access grant
+  (macOS TCC), which is exactly why the old scheduler agent never ran.
+
+    sed "s#__REPO__#$HOME/Dev/financial-research-assistant#g" \
+        deploy/launchd/com.fra.agent.plist.template \
+        > ~/Library/LaunchAgents/com.fra.agent.plist
+    launchctl load -w ~/Library/LaunchAgents/com.fra.agent.plist
+
+  A Mac still sleeps: keep it awake on power (`sudo pmset -c sleep 0`) or the
+  daily report arrives whenever it next wakes.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.fra.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/.venv/bin/financial-research-assistant</string>
+        <string>--serve</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+    <!-- Restarted if it exits, including the watchdog's deliberate exit on a hang. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/fra-agent.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/fra-agent.err.log</string>
+</dict>
+</plist>

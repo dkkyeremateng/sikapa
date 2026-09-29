@@ -38,6 +38,11 @@ dependencies = [
     # optional, so they are core rather than an extra.
     "fpdf2>=2.8",
     "pypdfium2>=4.0",
+    # IANA zone data for `zoneinfo`. Scheduled reports are pinned to
+    # America/New_York so they follow the US close whatever zone the host runs
+    # in, and a slim container image (or Windows) has no system zone database
+    # for `zoneinfo` to read — it falls back to this package.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

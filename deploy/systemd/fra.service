@@ -1,0 +1,33 @@
+# The always-on agent: one container running `--serve` (scheduled jobs, the
+# Telegram inbox and the event watchers, side by side).
+#
+# Install: see deploy/README.md. Paths assume the defaults used there —
+# /etc/fra/env for secrets (0600) and /srv/fra/data for state.
+[Unit]
+Description=Financial research assistant (always-on)
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# A container left over from a crash would hold the name and fail the start.
+ExecStartPre=-/usr/bin/docker rm -f fra
+# No -p/--publish: nothing listens. Telegram is long-polled outbound, and every
+# model/market-data call is outbound too.
+ExecStart=/usr/bin/docker run --rm --name fra \
+    --env-file /etc/fra/env \
+    -v /srv/fra/data:/home/app/.financial-research-assistant \
+    --tmpfs /tmp \
+    fra:latest --serve
+# `--serve` stops claiming work on SIGTERM and lets a running turn finish; give
+# it room before docker escalates to SIGKILL.
+ExecStop=/usr/bin/docker stop -t 90 fra
+TimeoutStopSec=120
+# Also covers a hang: the service exits by itself when its job loop stops
+# ticking (FRA_WATCHDOG_MINUTES), and this brings it back.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

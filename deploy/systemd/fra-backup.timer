@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly encrypted backup of the financial research assistant's state
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15m
+# A server that was off at 03:30 backs up when it comes back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
