@@ -225,9 +225,15 @@ def _desktop_send(text: str) -> bool:
 
 
 def _desktop_configured() -> bool:
+    """Enabled AND there is a notifier on this machine to raise the banner.
+
+    Enabled alone used to be enough, and it is on by default — so on a headless
+    server with no ``notify-send`` every delivery listed "desktop" as a failed
+    channel, and every log line for a delivered answer read like an outage.
+    """
     from . import alerts
 
-    return alerts.desktop_enabled()
+    return alerts.desktop_enabled() and alerts._desktop_cmd("") is not None  # pyright: ignore[reportPrivateUsage]
 
 
 def _stdout_send(text: str) -> bool:

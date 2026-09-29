@@ -1473,18 +1473,20 @@ full set of tracing variables.
 
 ## Deploy
 
-A `Dockerfile` ships for headless/service use (the TUI is interactive):
+**Always-on:** [`deploy/README.md`](deploy/README.md) is the runbook for running the
+agent as a service on a host that doesn't sleep. It covers the host, secrets,
+moving your existing state across, the systemd unit, the outside liveness check,
+encrypted backups and updating. The short version: one container runs `--serve`,
+publishes no ports, and keeps all its state in one mounted directory.
+
+The `Dockerfile` installs from `uv.lock` (so the image runs the versions the suite
+ran on) plus the extras named in `EXTRAS` (default `anthropic`):
 
 ```bash
-docker build -t financial-research-assistant .
-docker run --rm -e OPENAI_API_KEY=sk-... -e IBKR_MCP_URL=... \
-  financial-research-assistant --prompt "AAPL quote"
-docker run --rm financial-research-assistant --prompt "hi" --fake   # no key needed
+docker build --build-arg EXTRAS=anthropic,tracing -t fra .
+docker run --rm -e ANTHROPIC_API_KEY=... -e MODEL_PROVIDER=anthropic fra --prompt "AAPL quote"
+docker run --rm fra --prompt "hi" --fake   # no key needed
 ```
-
-The image runs `pip install .` (base deps only). Optional extras — `[ofx]` for
-OFX/QFX statement import, `[tracing]`, or a model provider like `[anthropic]` —
-aren't included; add them to the `Dockerfile`'s install line if you need them.
 
 ## Customization points
 

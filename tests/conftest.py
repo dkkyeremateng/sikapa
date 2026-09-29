@@ -84,6 +84,11 @@ def _never_touch_the_real_task_store(tmp_path_factory, monkeypatch):
         "FINANCIAL_RESEARCH_JOURNAL_FILE",
         str(tmp_path_factory.mktemp("journal") / "journal.json"),
     )
+    # Every store resolved through `storage.state_dir()` (report ledger, event and
+    # run logs, the investor profile, the autonomy switch) lands here too.
+    monkeypatch.setenv(
+        "FINANCIAL_RESEARCH_HOME", str(tmp_path_factory.mktemp("state"))
+    )
     monkeypatch.setenv(
         "FINANCIAL_RESEARCH_TELEGRAM_STATE",
         str(tmp_path_factory.mktemp("tg") / "offset.json"),

@@ -1,0 +1,7 @@
+[Unit]
+Description=Encrypted backup of the financial research assistant's state
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/fra/backup.env
+ExecStart=/opt/fra/deploy/backup.sh

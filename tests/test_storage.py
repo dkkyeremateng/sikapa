@@ -112,3 +112,39 @@ def test_the_memory_store_is_0600(tmp_path, monkeypatch):
     assert len(written) == 1
     mode = stat.S_IMODE(written[0].stat().st_mode)
     assert mode == 0o600, f"memory store is {oct(mode)}"
+
+
+def test_state_dir_follows_its_override(monkeypatch, tmp_path):
+    from financial_research_assistant import storage
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_HOME", str(tmp_path / "srv"))
+    assert storage.state_dir() == tmp_path / "srv"
+    assert storage.state_file("ledger.json") == tmp_path / "srv" / "ledger.json"
+    monkeypatch.setenv("MY_OVERRIDE", str(tmp_path / "elsewhere.json"))
+    assert storage.state_file("ledger.json", "MY_OVERRIDE") == tmp_path / "elsewhere.json"
+
+
+def test_a_jsonl_log_is_private_and_survives_a_torn_line(tmp_path):
+    import os
+    import stat
+
+    from financial_research_assistant import storage
+
+    log = tmp_path / "events.jsonl"
+    storage.append_jsonl(log, {"a": 1})
+    storage.append_jsonl(log, {"a": 2})
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write('{"a": 3')  # a write cut off by a crash
+    assert stat.S_IMODE(os.stat(log).st_mode) == 0o600
+    assert storage.read_jsonl(log) == [{"a": 1}, {"a": 2}]
+    assert storage.read_jsonl(log, limit=1) == []  # the last line is the torn one
+    assert storage.read_jsonl(tmp_path / "missing.jsonl") == []
+
+
+def test_read_json_treats_a_corrupt_store_as_its_default(tmp_path):
+    from financial_research_assistant import storage
+
+    bad = tmp_path / "x.json"
+    bad.write_text("{nope", encoding="utf-8")
+    assert storage.read_json(bad, {"k": []}) == {"k": []}
+    assert storage.read_json(tmp_path / "missing.json", []) == []

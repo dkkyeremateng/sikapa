@@ -162,3 +162,19 @@ def test_the_prompt_names_the_real_variables_when_nothing_is_configured(monkeypa
     text = graph._delivery_guidance()
     assert "TELEGRAM_BOT_TOKEN" in text and "TELEGRAM_CHAT_ID" in text
     assert "--notify-test" in text
+
+
+def test_the_desktop_channel_is_absent_where_nothing_can_raise_a_banner(monkeypatch):
+    """A headless server has no notifier. Counting the channel as configured there
+    made every delivery report "failed on: desktop" for a channel that could never
+    work."""
+    from financial_research_assistant import alerts
+
+    monkeypatch.setenv("NOTIFY_CHANNELS", "desktop")
+    monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_DESKTOP", raising=False)
+    monkeypatch.setattr(alerts, "_desktop_cmd", lambda text: None)
+    assert channels.active_channels() == []
+    assert channels.deliver("hello") == ([], [])
+
+    monkeypatch.setattr(alerts, "_desktop_cmd", lambda text: ["notify-send", text])
+    assert [c.key for c in channels.active_channels()] == ["desktop"]

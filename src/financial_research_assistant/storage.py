@@ -27,9 +27,103 @@ mid-write truncates the whole store rather than one record.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import Any
+import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+
+
+def state_dir() -> Path:
+    """Where this assistant keeps its state: ``~/.financial-research-assistant``.
+
+    ``FINANCIAL_RESEARCH_HOME`` moves it — a server mounts its data volume
+    somewhere of its own choosing, and the test suite points it at a throwaway
+    directory. The older stores each take their own ``FINANCIAL_RESEARCH_*_FILE``
+    override and default under the same directory; newer ones resolve through here.
+    """
+    raw = os.environ.get("FINANCIAL_RESEARCH_HOME")
+    if raw:
+        return Path(os.path.expandvars(raw)).expanduser()
+    return Path.home() / ".financial-research-assistant"
+
+
+def state_file(name: str, env_var: str = "") -> Path:
+    """A file under ``state_dir()``, or wherever ``env_var`` points if it is set."""
+    raw = os.environ.get(env_var) if env_var else None
+    if raw:
+        return Path(os.path.expandvars(raw)).expanduser()
+    return state_dir() / name
+
+
+@contextmanager
+def locked(path: Path) -> Iterator[None]:
+    """Hold an exclusive cross-process lock for a read-modify-write of ``path``.
+
+    The same ``fcntl`` pattern ``tasks.py`` and ``alerts.py`` each wrote for
+    themselves, for the stores added since: a sidecar ``.lock`` file, blocking,
+    and degrading to no locking where ``fcntl`` doesn't exist rather than failing.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path.with_suffix(path.suffix + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def read_json(path: Path, default: Any) -> Any:
+    """Parse ``path``, or return ``default`` when it is missing or unreadable.
+
+    A corrupt store reads as empty rather than raising, the same trade every
+    store here makes: a bad hand-edit must not take down the tick that reads it.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    """Append one JSON line to a ``0600`` log, creating it if needed.
+
+    Append-only logs (events, runs) are never rewritten, so the atomic swap
+    ``write_private`` does is unnecessary here; what matters is that the file is
+    private from its first byte and that one record is one line.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, default=str) + "\n")
+
+
+def read_jsonl(path: Path, limit: int = 0) -> list[dict[str, Any]]:
+    """Every record in a JSONL log, oldest first (the last ``limit`` if given).
+    Unparseable lines — a torn final write — are skipped, not fatal."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in lines[-limit:] if limit else lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
 
 
 def write_private(path: Path, text: str, prefix: str = ".tmp-") -> None:
