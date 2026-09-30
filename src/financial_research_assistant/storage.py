@@ -104,6 +104,12 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    # The mode above only applies to a NEW file; one created before this helper
+    # existed keeps whatever it had, so tighten it on every append.
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:  # pragma: no cover - a filesystem without modes
+        pass
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, default=str) + "\n")
 

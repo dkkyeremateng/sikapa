@@ -22,8 +22,10 @@ from.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
+import contextlib
+import contextvars
 
 from .tools import (
     _chart_tool,
@@ -277,14 +279,54 @@ def capabilities() -> frozenset[str]:
     return frozenset(active)
 
 
+# --- Unattended turns -----------------------------------------------------------
+#
+# A turn nobody is watching — a scheduled task, a Telegram message, an event
+# analysis — reads text the user never saw before the model did: web results,
+# news, filings. Anything in that text can try to steer the tool calls. The
+# read-only broker filter already bounds what reaches the account; this bounds
+# what reaches the SERVER'S FILES. The tools below take a filesystem path and read
+# from it, and an unattended turn has no file to give them anyway — a phone can't
+# hand the server a statement — so their only unattended use is one nobody asked
+# for.
+#
+# `export_data` is not here: its writes are already confined to the export
+# directory.
+
+UNATTENDED_DENY: frozenset[str] = frozenset({"import_ibkr_statement", "ingest_document"})
+
+_UNATTENDED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "fra_unattended", default=False
+)
+
+
+@contextlib.contextmanager
+def unattended() -> Iterator[None]:
+    """Build every graph inside this block with the unattended toolset. A context
+    variable, so it follows the turn into its subagents (asyncio tasks copy the
+    context they were created in) and nowhere else."""
+    token = _UNATTENDED.set(True)
+    try:
+        yield
+    finally:
+        _UNATTENDED.reset(token)
+
+
+def is_unattended() -> bool:
+    return _UNATTENDED.get()
+
+
 def active_tools(caps: frozenset[str] | None = None, pool: list[Any] | None = None) -> list[Any]:
     """``TOOLS`` minus the groups whose backing store is empty. ``caps`` lets a
     caller reuse an already-computed capability set (graph.py computes it once and
     passes it to both the toolset and the prompt); ``pool`` narrows the source list
-    (subagents pass their own reduced pool)."""
+    (subagents pass their own reduced pool). Inside ``unattended()`` the
+    path-reading tools are dropped too."""
     caps = capabilities() if caps is None else caps
     drop: set[str] = set()
     for cap, names in _GATED_TOOLS.items():
         if cap not in caps:
             drop |= names
+    if _UNATTENDED.get():
+        drop |= UNATTENDED_DENY
     return [t for t in (TOOLS if pool is None else pool) if tool_name(t) not in drop]

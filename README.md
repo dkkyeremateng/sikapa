@@ -727,12 +727,26 @@ financial-research-assistant --unschedule s1      # or 'all'
 
 ### Running what's due
 
-Two entry points over the same pass — pick whichever suits the machine:
+Three entry points over the same pass — pick whichever suits the machine:
 
 ```bash
+financial-research-assistant --serve       # the always-on service (see deploy/README.md)
 financial-research-assistant --run-due     # one pass, then exit (for cron/launchd)
 financial-research-assistant --watch 60    # stay running, same pass every 60s
 ```
+
+`--serve` is the one to run on a host that stays up. The job pass, the Telegram
+inbox and the event watchers each get their own loop, so a ten-minute report
+never leaves a phone message waiting. Chat and background work take separate
+model lanes (`FRA_BACKGROUND_RUNS`, default 1), and a loop that crashes is
+restarted with backoff while the others carry on. On SIGTERM it stops claiming
+work and gives running turns `FRA_STOP_GRACE` seconds (60) to finish. A task
+cut off after that hands its claim back, and an unanswered message was never
+marked read, so both are picked up after the restart. A watchdog thread exits
+the process if the event loop freezes or a pass outlives its job timeout
+(`FRA_WATCHDOG_MINUTES`, `FRA_JOB_TIMEOUT_MINUTES`), so the supervisor restarts
+it. `--status` shows what it is doing; `--status --check` is the exit-code form
+for health checks.
 
 `--run-due` is model-free until it actually finds work, so an empty tick costs
 nothing and it's cheap to run often:
@@ -763,8 +777,12 @@ nothing and it's cheap to run often:
 </details>
 
 A scheduled run is an ordinary turn — same tools, same read-only broker boundary,
-same tracing and long-term memory — with its own session id, so it starts from a
-clean conversation instead of inheriting whatever the TUI was mid-thought about.
+same tracing and long-term memory — with its own session id **per run**
+(`task-s1-20260930T091500`), so it starts from a clean conversation instead of
+inheriting whatever the TUI was mid-thought about, or what yesterday's run of the
+same task said. The one difference in tools: nobody is watching an unattended
+turn, so the two tools that read a path on the server's disk
+(`import_ibkr_statement`, `ingest_document`) are not bound for it.
 A recurring task reschedules from its **due** time, not from when it finished, so a
 daily 09:00 brief doesn't creep into the afternoon; a machine that was asleep for
 three days resumes at the next real occurrence rather than firing three catch-ups.
@@ -1002,10 +1020,14 @@ desktop-banner channel is skipped rather than being handed a PDF it can't show.
 
 ### Replying from your phone (opt-in)
 
-With `TELEGRAM_ALLOWED_CHAT_IDS` set, `--run-due`/`--watch` also drain the bot's
-inbox: message it and the agent answers, keeping context per chat. `/tasks` and
-`/cancel <id>` are handled without a model call; anything else is a prompt, so you
-can schedule from the phone too.
+With `TELEGRAM_ALLOWED_CHAT_IDS` set, `--serve` (and `--watch`) read the bot's
+inbox: message it and the agent answers, keeping context per chat. `--run-due`
+does not. Slash commands are handled without a model call: `/status`, `/tasks`,
+`/cancel <id>`, `/help`, and the report, ideas and autonomy commands described
+below. An unknown one gets the help text rather than a model turn. Anything else
+is a prompt, so you can schedule from the phone too. A message is marked read
+only once it has been answered, so a restart mid-answer answers it again rather
+than dropping it.
 
 This is **off unless you list chat ids** — it is not implied by having configured
 outbound. Anyone can message a bot whose username they guess, and an inbound

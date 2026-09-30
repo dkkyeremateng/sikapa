@@ -57,7 +57,30 @@ def test_a_scheduled_run_uses_the_tasks_own_session(answers, delivered):
     whatever the interactive session was mid-conversation about."""
     t = tasks.add_task("brief me", "+0m")
     asyncio.run(scheduler.run_due())
-    assert answers["seen"][0][1] == t["session"] == "task-s1"
+    assert t["session"] == "task-s1"
+    assert answers["seen"][0][1].startswith("task-s1-")
+
+
+def test_each_run_of_a_recurring_task_gets_a_fresh_conversation(answers, delivered, monkeypatch):
+    """Reusing one thread made a daily task carry every earlier day's conversation
+    into the next — a context and a bill that grew for the life of the task — and
+    let a new `s1` reopen an old `s1`'s conversation after the list was cleared."""
+    from datetime import datetime as real_datetime
+
+    t = tasks.add_task("daily brief", "+0m", repeat="daily")
+    first = scheduler.run_session(t, now=real_datetime(2026, 9, 29, 17, 15))
+    second = scheduler.run_session(t, now=real_datetime(2026, 9, 30, 17, 15))
+    assert first != second and first.startswith("task-s1-")
+
+
+def test_a_finished_run_frees_its_conversation_from_memory(answers, delivered, monkeypatch):
+    from financial_research_assistant import adapter
+
+    released: list[str] = []
+    monkeypatch.setattr(adapter, "release_session", released.append)
+    tasks.add_task("brief me", "+0m")
+    asyncio.run(scheduler.run_due())
+    assert released == [answers["seen"][0][1]]
 
 
 def test_the_delivered_message_identifies_itself(answers, delivered):
@@ -196,7 +219,7 @@ def inbox(monkeypatch):
 def test_an_inbound_message_is_answered_in_a_per_chat_session(inbox, answers):
     inbox["monkeypatch"].setattr(
         inbox["telegram"], "get_updates",
-        lambda timeout=0: [{"chat_id": "999", "text": "how is NVDA?", "name": "me"}],
+        lambda timeout=0, **_: [{"chat_id": "999", "text": "how is NVDA?", "name": "me"}],
     )
     asyncio.run(scheduler.poll_inbox())
     assert answers["seen"][0] == ("how is NVDA?", "telegram-999")
@@ -209,7 +232,7 @@ def test_chat_commands_are_answered_without_a_model_call(inbox, answers):
     tasks.add_task("watch AAPL", "+2h")
     inbox["monkeypatch"].setattr(
         inbox["telegram"], "get_updates",
-        lambda timeout=0: [{"chat_id": "999", "text": "/tasks", "name": "me"}],
+        lambda timeout=0, **_: [{"chat_id": "999", "text": "/tasks", "name": "me"}],
     )
     asyncio.run(scheduler.poll_inbox())
     assert answers["seen"] == []
@@ -220,7 +243,7 @@ def test_cancel_command_removes_a_task(inbox, answers):
     tasks.add_task("watch AAPL", "+2h")
     inbox["monkeypatch"].setattr(
         inbox["telegram"], "get_updates",
-        lambda timeout=0: [{"chat_id": "999", "text": "/cancel s1", "name": "me"}],
+        lambda timeout=0, **_: [{"chat_id": "999", "text": "/cancel s1", "name": "me"}],
     )
     asyncio.run(scheduler.poll_inbox())
     assert tasks.load_tasks() == []
@@ -289,7 +312,7 @@ def test_an_inbound_chat_message_gets_no_task_framing(inbox, answers):
     would be false, and would suppress a reasonable clarifying question."""
     inbox["monkeypatch"].setattr(
         inbox["telegram"], "get_updates",
-        lambda timeout=0: [{"chat_id": "999", "text": "how is NVDA?", "name": "me"}],
+        lambda timeout=0, **_: [{"chat_id": "999", "text": "how is NVDA?", "name": "me"}],
     )
     asyncio.run(scheduler.poll_inbox())
     assert answers["seen"][0][0] == "how is NVDA?"
@@ -554,7 +577,7 @@ def test_a_long_poll_leaves_the_rest_of_the_loop_running(inbox, answers):
     tick, an in-flight turn — for the whole window."""
     import time
 
-    def slow_updates(timeout=0):
+    def slow_updates(timeout=0, **_):
         time.sleep(0.15)
         return [{"chat_id": "999", "text": "how is NVDA?", "name": "me"}]
 

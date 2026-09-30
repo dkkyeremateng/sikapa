@@ -256,3 +256,38 @@ def test_the_multipart_body_carries_the_file_and_fields(tmp_path):
     assert ctype.startswith("multipart/form-data; boundary=")
     assert b'name="chat_id"' in body and b"42" in body
     assert b'filename="r.png"' in body and b"\x89PNGDATA" in body
+
+
+# --- at-least-once, for the always-on service -------------------------------------
+
+
+def test_an_uncommitted_poll_leaves_the_message_for_a_restart(monkeypatch):
+    """Every deploy restarts the service. A message fetched but not yet answered
+    when that happens must come back on the next poll, not vanish."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:abc")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "999")
+    monkeypatch.setattr(telegram, "_call", lambda *a, **k: _updates(999))
+    first = telegram.get_updates(commit=False)
+    assert [m["update_id"] for m in first] == [100]
+    assert telegram._read_offset() == 0, "nothing answered yet, so nothing consumed"
+    telegram.commit_update(first[0]["update_id"])
+    assert telegram._read_offset() == 101
+
+
+def test_uncommitted_polling_still_steps_over_leading_strangers(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:abc")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "999")
+    monkeypatch.setattr(telegram, "_call", lambda *a, **k: _updates(777, 999, 777))
+    got = telegram.get_updates(commit=False)
+    assert [m["update_id"] for m in got] == [101]
+    # Past the stranger in front; NOT past the owner's message, and so not past
+    # the stranger behind it either — that one is skipped on a later poll.
+    assert telegram._read_offset() == 101
+
+
+def test_a_late_commit_never_moves_the_cursor_backwards(monkeypatch):
+    telegram._write_offset(205)
+    telegram.commit_update(150)
+    assert telegram._read_offset() == 205
+    telegram.commit_update("not-a-number")
+    assert telegram._read_offset() == 205

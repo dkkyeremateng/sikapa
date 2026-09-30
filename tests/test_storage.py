@@ -148,3 +148,19 @@ def test_read_json_treats_a_corrupt_store_as_its_default(tmp_path):
     bad.write_text("{nope", encoding="utf-8")
     assert storage.read_json(bad, {"k": []}) == {"k": []}
     assert storage.read_json(tmp_path / "missing.json", []) == []
+
+
+def test_an_append_tightens_a_log_created_world_readable(tmp_path):
+    """Transcripts were created 0644 before they went through this helper; the
+    next append must close that, not leave old files readable for ever."""
+    import os
+    import stat
+
+    from financial_research_assistant import storage
+
+    log = tmp_path / "cli.jsonl"
+    log.write_text('{"old": 1}\n', encoding="utf-8")
+    os.chmod(log, 0o644)
+    storage.append_jsonl(log, {"new": 2})
+    assert stat.S_IMODE(os.stat(log).st_mode) == 0o600
+    assert storage.read_jsonl(log) == [{"old": 1}, {"new": 2}]
