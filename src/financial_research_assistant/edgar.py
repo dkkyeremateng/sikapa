@@ -30,6 +30,7 @@ import html
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 
@@ -53,6 +54,28 @@ _PER_SHARE = "USD/shares"  # XBRL unit key for per-share concepts (EPS)
 # worth fetching once, and companyfacts/submissions are large per-company blobs.
 _TICKER_CIK: dict[str, str] = {}
 _JSON_CACHE: dict[str, dict[str, Any]] = {}
+#: When each cached document was fetched. The cache used to live for the whole
+#: process, which was fine for a one-shot CLI and wrong for a service that runs for
+#: months: the submissions feed never refreshed, so a new filing was invisible
+#: until a restart, and a chat question weeks later got weeks-old financials.
+_JSON_FETCHED_AT: dict[str, float] = {}
+_TICKER_LOADED_AT: list[float] = []
+
+#: How long a cached SEC document stays fresh. The submissions feed is what shows
+#: a new filing, so it is short; company facts only change when something is filed.
+_SUBMISSIONS_TTL = 600.0
+_DOCUMENT_TTL = 6 * 3600.0
+_TICKER_MAP_TTL = 24 * 3600.0
+
+
+def _ttl_for(url: str) -> float:
+    return _SUBMISSIONS_TTL if "/submissions/" in url else _DOCUMENT_TTL
+
+
+def _fresh(url: str) -> bool:
+    fetched = _JSON_FETCHED_AT.get(url)
+    # An entry with no timestamp was put there by hand (tests); treat it as fresh.
+    return fetched is None or (time.time() - fetched) < _ttl_for(url)
 
 
 def _edgar_ua() -> str:
@@ -67,7 +90,7 @@ def _fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
     """GET a JSON document from SEC with the required User-Agent, a same-process
     cache, and one retry; ``{}`` on any failure (network, non-JSON, unknown)."""
     cached = _JSON_CACHE.get(url)
-    if isinstance(cached, dict):
+    if isinstance(cached, dict) and _fresh(url):
         return cached
     for _ in range(2):  # one retry — SEC occasionally 5xx / rate-limits
         try:
@@ -83,6 +106,7 @@ def _fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
                 return {}
             if data:
                 _JSON_CACHE[url] = data
+                _JSON_FETCHED_AT[url] = time.time()
             return data
         except Exception:  # noqa: BLE001 — degrade to no-data, never abort the turn
             continue
@@ -104,9 +128,11 @@ def _fetch_text(url: str, max_bytes: int = 6_000_000, timeout: float = 30.0) -> 
 
 def _load_ticker_map() -> dict[str, str]:
     """Ticker → zero-padded 10-digit CIK, from SEC's company_tickers.json (cached)."""
-    if _TICKER_CIK:
+    if _TICKER_CIK and _TICKER_LOADED_AT and time.time() - _TICKER_LOADED_AT[0] < _TICKER_MAP_TTL:
         return _TICKER_CIK
     data = _fetch_json(_COMPANY_TICKERS_URL)
+    if data:
+        _TICKER_LOADED_AT[:] = [time.time()]
     for row in (data or {}).values():
         if not isinstance(row, dict):
             continue

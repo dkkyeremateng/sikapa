@@ -861,6 +861,37 @@ or monthly report assembled by hand through `render_report` is refused, the
 same way a hand-built review is. Set `FRA_DAILY_PDF=1` to get the daily as a
 PDF too.
 
+### Watching between reports (`--serve`)
+
+The service also runs the **event watchers**, every 5 minutes while New York is
+open and every 30 otherwise. Detection is model-free. Each watcher returns facts
+with a stable key, so a quiet market costs a few cached price lookups and no
+tokens:
+
+| Watcher | Fires when |
+|---|---|
+| `price_move` | a holding or watchlist symbol moves more than max(3%, 2σ of its own daily moves) today. It only fires on a bar dated today, so yesterday's move is never re-announced before the open |
+| `alert_level` | one of your alert rules fires. They're now checked on every pass, not only when a digest is built |
+| `sec_filing` | a company you hold files an 8-K, 10-Q, 10-K or 13D. A company's existing filings are recorded the first time it's seen, so starting up doesn't announce history |
+| `earnings_out` | an 8-K with item 2.02: the results are out |
+| `thesis_break` | an open call crosses the invalidation level it named, or moves ±15% since entry |
+| `data_stale` | the positions on file are older than the staleness limit (said once per statement) |
+
+**Routing** decides what an event is worth. Severity comes from what happened
+and how much of the book it touches: a 6% move in a 1% position is background,
+while the same move in a 20% position is news. `high` is pushed at once with a
+two-sentence note from the cheap model (dropped if it cites a figure it wasn't
+given, and skipped when the budget or `FRA_AUTONOMY_EVENT_TOKENS` is spent).
+`medium` is pushed as facts. `low` waits for the daily report's "Also noticed
+today". Quiet hours hold everything but `high` and send one summary when they
+end. A symbol pushed within the cooldown (`FRA_EVENT_COOLDOWN_MIN`, 120) is
+only pushed again if the news is worse. Every decision is logged in
+`events.jsonl`: `/events` shows the latest, and the weekly report lists the
+week's alerts and what each stock did afterwards, the first read on whether
+the thresholds are right. `FRA_EVENTS_SHADOW=1` records everything and pushes
+nothing, which the server template turns on for the first week.
+`FRA_EVENTS=off` removes the watcher loop.
+
 ### Guardrails on autonomous work
 
 An agent that acts on its own needs a way to tell it to stop. There are three,

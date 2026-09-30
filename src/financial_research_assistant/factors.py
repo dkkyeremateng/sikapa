@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 import io
 import re
+import time
 import urllib.request
 import zipfile
 from datetime import date
@@ -31,6 +32,10 @@ _FF_URLS = {
 }
 _FF_UA = "Mozilla/5.0 (compatible; financial-research-assistant)"
 _FF_CACHE: dict[bool, tuple[Any, ...]] = {}
+_FF_AT: dict[bool, float] = {}
+#: The library updates monthly; a day is plenty, and "for the life of the process"
+#: was months for the always-on service.
+_FF_TTL = 24 * 3600.0
 _DATA_ROW = re.compile(r"^\s*(\d{8}),(.*)$")
 
 
@@ -70,7 +75,7 @@ def _parse_ff_csv(text: str) -> tuple[list[str], dict[str, dict[str, Any]]]:
 def _fetch_ff_factors(five_factor: bool = False) -> tuple[list[str], dict[str, dict[str, Any]]]:
     """Download + parse the Fama-French daily factors (cached per run). Returns
     ``([], {})`` on any failure so the caller shows a friendly message."""
-    if five_factor in _FF_CACHE:
+    if five_factor in _FF_CACHE and time.time() - _FF_AT.get(five_factor, 0.0) < _FF_TTL:
         return _FF_CACHE[five_factor]
     try:
         req = urllib.request.Request(_FF_URLS[five_factor], headers={"User-Agent": _FF_UA})
@@ -84,6 +89,9 @@ def _fetch_ff_factors(five_factor: bool = False) -> tuple[list[str], dict[str, d
         parsed = ([], {})
     if parsed[1]:
         _FF_CACHE[five_factor] = parsed
+        _FF_AT[five_factor] = time.time()
+    elif five_factor in _FF_CACHE:
+        return _FF_CACHE[five_factor]  # a failed refresh keeps the last good copy
     return parsed
 
 

@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Any
 import csv
 import io
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,6 +45,10 @@ _UA = "Mozilla/5.0 (compatible; financial-research-assistant)"
 #: series and the digest may re-ask within a turn; FRED is a courtesy endpoint and
 #: hammering it for identical data would be rude as well as slow.
 _CACHE: dict[tuple[str, str, str], list[tuple[str, float]]] = {}
+_CACHED_AT: dict[tuple[str, str, str], float] = {}
+#: FRED revises and extends series; an always-on process refetches after this long.
+_CACHE_TTL = 6 * 3600.0
+_CACHE_MAX = 256
 
 
 class MacroDataUnavailable(RuntimeError):
@@ -142,7 +147,7 @@ def _fetch(series_id: str, start: date, end: date | None) -> list[tuple[str, flo
     if end is not None:
         params["coed"] = end.isoformat()
     key = (series_id, params["cosd"], params.get("coed", ""))
-    if key in _CACHE:
+    if key in _CACHE and time.time() - _CACHED_AT.get(key, 0.0) < _CACHE_TTL:
         return _CACHE[key]
     url = f"{_CSV_URL}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
@@ -165,7 +170,14 @@ def _fetch(series_id: str, start: date, end: date | None) -> list[tuple[str, flo
             rows.append((stamp, float(raw)))
         except ValueError:
             continue
+    # The key carries a start date that moves every day, so without a bound an
+    # always-on process kept one copy of each series per day for as long as it ran.
+    if len(_CACHE) >= _CACHE_MAX:
+        for stale in sorted(_CACHED_AT, key=_CACHED_AT.__getitem__)[: len(_CACHE) // 2]:
+            _CACHE.pop(stale, None)
+            _CACHED_AT.pop(stale, None)
     _CACHE[key] = rows
+    _CACHED_AT[key] = time.time()
     return rows
 
 

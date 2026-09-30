@@ -573,3 +573,43 @@ def test_an_amendment_is_still_used_when_it_is_the_only_filing(monkeypatch):
     ))
     out = edgar.sec_filing_excerpt("AAPL", "supply chain", form_type="10-K")
     assert "aapl-10ka.htm" in out and "restated" in out
+
+
+def test_the_filings_feed_is_refetched_once_it_is_stale(monkeypatch):
+    """The cache used to live as long as the process. For an always-on service that
+    meant a new filing never appeared: the submissions feed was fetched once."""
+    import json as _json
+
+    calls: list[str] = []
+
+    class _Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def urlopen(req, timeout=0):
+        calls.append(req.full_url)
+        return _Resp(_json.dumps({"n": len(calls)}).encode())
+
+    monkeypatch.setattr(edgar.urllib.request, "urlopen", urlopen)
+    clock = [1000.0]
+    monkeypatch.setattr(edgar.time, "time", lambda: clock[0])
+    url = edgar._SUBMISSIONS_URL.format(cik="0000000001")
+    edgar._JSON_CACHE.pop(url, None)
+    try:
+        assert edgar._fetch_json(url) == {"n": 1}
+        clock[0] += 60
+        assert edgar._fetch_json(url) == {"n": 1}, "fresh: served from the cache"
+        clock[0] += edgar._SUBMISSIONS_TTL
+        assert edgar._fetch_json(url) == {"n": 2}, "stale: fetched again"
+    finally:
+        edgar._JSON_CACHE.pop(url, None)
+        edgar._JSON_FETCHED_AT.pop(url, None)
