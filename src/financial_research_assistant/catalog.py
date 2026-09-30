@@ -113,6 +113,8 @@ from .journal import JOURNAL_TOOLS  # noqa: E402
 from .macro import MACRO_TOOLS  # noqa: E402
 from .transcripts import TRANSCRIPT_TOOLS  # noqa: E402
 from .periodic import PERIODIC_TOOLS  # noqa: E402
+from .recommend import RECOMMEND_TOOLS  # noqa: E402
+from .profile import PROFILE_TOOLS  # noqa: E402
 
 # `.extend` rather than `+=`: both mutate in place, but `+=` reads as a rebind of
 # an upper-case (i.e. constant) name to a type checker, which flags every line.
@@ -134,6 +136,8 @@ TOOLS.extend(JOURNAL_TOOLS)
 TOOLS.extend(MACRO_TOOLS)
 TOOLS.extend(TRANSCRIPT_TOOLS)
 TOOLS.extend(PERIODIC_TOOLS)
+TOOLS.extend(RECOMMEND_TOOLS)
+TOOLS.extend(PROFILE_TOOLS)
 
 
 # --- Capability gating -----------------------------------------------------

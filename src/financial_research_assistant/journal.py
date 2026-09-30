@@ -192,14 +192,43 @@ def record_thesis(
     ``benchmark``, and the result becomes a lesson you see next time this ticker
     comes up. Review with `review_theses`.
     """
+    try:
+        entry = record_call(symbol, verdict, thesis, horizon_days, benchmark)
+    except ValueError as exc:
+        return str(exc)
+    return (
+        f"Recorded [{entry['id']}] {entry['verdict'].upper()} {entry['symbol']} at "
+        f"{entry['entry_price']:,.2f} (close {entry['entry_date']}), to be scored on "
+        f"{entry['due']} ({entry['horizon_days']}d) against {entry['benchmark']}. Say "
+        f"that you have logged the call and will be held to it; do not present this "
+        f"as a recommendation."
+    )
+
+
+def record_call(
+    symbol: str,
+    verdict: str,
+    thesis: str,
+    horizon_days: int = DEFAULT_HORIZON_DAYS,
+    benchmark: str = DEFAULT_BENCHMARK,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Store one call and return it. Raises ValueError with a readable reason.
+
+    The one place a call is written, shared by the chat tool and the recommender.
+    ``extra`` carries the recommender's own fields — ``source``, ``run_id``,
+    ``conviction``, ``rank``, ``asset_class``, ``preset``, ``invalidation_price``,
+    ``invalidation_event`` — which the scoring ignores and the track record
+    groups by.
+    """
     sym = (symbol or "").strip().upper()
     if not sym:
-        return "Which ticker? record_thesis needs a symbol."
+        raise ValueError("Which ticker? record_thesis needs a symbol.")
     view = (verdict or "").strip().lower()
     if view not in VERDICTS:
-        return f"verdict must be one of: {', '.join(VERDICTS)} (got {verdict!r})."
+        raise ValueError(f"verdict must be one of: {', '.join(VERDICTS)} (got {verdict!r}).")
     if not (thesis or "").strip():
-        return (
+        raise ValueError(
             "A call needs its reasoning — pass `thesis` with a sentence or two on "
             "why, since that is what gets read back when the call is scored."
         )
@@ -207,7 +236,7 @@ def record_thesis(
                                           _MAX_HORIZON_DAYS))
     price, priced_on = _spot(sym)
     if price is None:
-        return (
+        raise ValueError(
             f"No price data for {sym!r}, so this call could never be scored — not "
             f"recording it. Check the ticker."
         )
@@ -226,15 +255,11 @@ def record_thesis(
             "due": due.isoformat(),
             "benchmark": (benchmark or DEFAULT_BENCHMARK).strip().upper(),
             "status": "open",
+            **{k: v for k, v in extra.items() if v is not None},
         }
         items.append(entry)
         save_entries(items)
-    return (
-        f"Recorded [{entry['id']}] {view.upper()} {sym} at {price:,.2f} "
-        f"(close {priced_on}), to be scored on {due:%Y-%m-%d} ({horizon}d) against "
-        f"{entry['benchmark']}. Say that you have logged the call and will be "
-        f"held to it; do not present this as a recommendation."
-    )
+    return entry
 
 
 # --- scoring --------------------------------------------------------------------
@@ -426,20 +451,27 @@ def _describe_scored(entry: dict[str, Any]) -> str:
     )
 
 
-def review_theses(symbol: str = "") -> str:
+def review_theses(symbol: str = "", source: str = "") -> str:
     """Review the directional calls previously recorded with `record_thesis`: which
     are still open, how the scored ones turned out, and the running hit rate.
 
     Use for 'how have your calls done / what did you say about X before / are you
     any good at this', and check it BEFORE making a fresh call on a ticker you have
     covered — repeating a view that has already been wrong, without saying so, is
-    the failure this exists to prevent. ``symbol`` narrows it to one ticker.
+    the failure this exists to prevent. ``symbol`` narrows it to one ticker;
+    ``source="recommender"`` to the agent's own scheduled ideas, ``"chat"`` to the
+    calls made in conversation.
 
     The record is a small sample of whatever the user happened to ask about, so
     report it as calibration, never as evidence the next call is right.
     """
     sym = (symbol or "").strip().upper()
-    entries = [e for e in load_entries() if not sym or e.get("symbol") == sym]
+    src = (source or "").strip().lower()
+    entries = [
+        e for e in load_entries()
+        if (not sym or e.get("symbol") == sym)
+        and (not src or (e.get("source") or "chat") == src)
+    ]
     if not entries:
         scope = f" for {sym}" if sym else ""
         return (

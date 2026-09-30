@@ -134,6 +134,21 @@ def cli() -> None:
         help="list the reports sent (from the ledger) and the recent runs, then exit",
     )
     parser.add_argument(
+        "--recommend",
+        nargs="?",
+        const="light",
+        choices=["light", "deep"],
+        help=(
+            "run the ideas pipeline now (light: 3 ideas, deep: up to 8), record each "
+            "in the journal, send the sheet, print the summary, and exit"
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="set up the investor profile the ideas are fitted to (interactive), then exit",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="with --status: exit code only (for container health checks)",
@@ -408,6 +423,22 @@ def _run_subcommand(args: argparse.Namespace) -> int | None:
                 print("  " + scheduler.describe_run(r))
         return 0
 
+    if args.profile:
+        return _handle_profile()
+
+    if args.recommend:
+        from . import channels, recommend
+
+        run = asyncio.run(recommend.run(args.recommend, fake=args.fake))
+        files = recommend.render_run(run)
+        print(recommend.sheet(run)["message"])
+        if files and not args.no_deliver:
+            for path in files:
+                channels.deliver_file(path, "", "", True)
+        elif files:
+            print("files: " + ", ".join(files))
+        return 0
+
     if args.report:
         from . import periodic
 
@@ -511,6 +542,50 @@ def _handle_scheduler(args: argparse.Namespace) -> int:
         f"ran {len(results)} task(s), {len(failed)} failed", file=sys.stderr
     )
     return 1 if failed else 0
+
+
+def _handle_profile() -> int:
+    """``--profile``: ask for each setting, Enter keeps what is there."""
+    from . import profile
+
+    current = profile.load()
+    print(profile.describe(current))
+    print("\nPress Enter to keep a value.")
+    questions = [
+        ("risk", "Risk (conservative / moderate / aggressive)"),
+        ("horizon_years", "Horizon in years"),
+        ("targets", "Target mix, e.g. us_equity=60, intl_equity=20, bonds=20 (asset classes: "
+                    + ", ".join(profile.ASSET_CLASSES) + ")"),
+        ("max_position_pct", "Max % of the book in one stock"),
+        ("max_sector_pct", "Max % in one sector"),
+        ("exclude", "Tickers never to recommend (comma-separated)"),
+        ("exclude_sectors", "Sectors never to recommend"),
+        ("account_type", "Account type (taxable / tax-advantaged)"),
+        ("max_expense_ratio_pct", "Max ETF expense ratio %"),
+        ("allow_crypto", "Allow crypto funds (yes / no)"),
+        ("watchlist", "Watchlist tickers"),
+    ]
+    changes: dict[str, Any] = {}
+    try:
+        for field, prompt in questions:
+            shown = current[field]
+            if isinstance(shown, dict):
+                shown = ", ".join(f"{k}={v:g}" for k, v in shown.items())
+            elif isinstance(shown, list):
+                shown = ", ".join(shown)
+            answer = input(f"{prompt} [{shown}]: ").strip()
+            if answer:
+                changes[field] = profile._coerce(field, answer)  # pyright: ignore[reportPrivateUsage]
+    except (KeyboardInterrupt, EOFError):
+        print("\ncancelled — nothing saved", file=sys.stderr)
+        return 1
+    try:
+        updated = profile.save(changes)
+    except ValueError as exc:
+        print(f"not saved: {exc}", file=sys.stderr)
+        return 2
+    print("\n" + profile.describe(updated))
+    return 0
 
 
 def _handle_login(provider: str, tier: str) -> int:
