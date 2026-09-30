@@ -1,5 +1,9 @@
 # Sample eval-regression gate. The offline job needs no secrets and runs on
 # every PR; the live job is opt-in (only when an OPENAI_API_KEY secret exists).
+#
+# Both install from uv.lock, as the Docker image does, so CI tests the versions
+# that ship. A bare `pip install` resolves the newest release each run, and a
+# major one (plotext 6) broke every chart here without a commit to point at.
 name: eval
 
 on:
@@ -13,16 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
       - name: install
-        run: pip install -e '.[dev]'
+        run: uv sync --frozen --extra dev
       - name: smoke tests
-        run: pytest -q
+        run: uv run --frozen pytest -q
       - name: eval harness plumbing (offline; fake can't answer content evals)
         working-directory: eval
-        run: python evaluate.py --fake
+        run: uv run --frozen python evaluate.py --fake
 
   live:
     name: live quality gate
@@ -30,11 +34,11 @@ jobs:
     if: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
       - name: install
-        run: pip install -e '.'
+        run: uv sync --frozen
       - name: eval gate (live)
         working-directory: eval
         env:
@@ -49,7 +53,7 @@ jobs:
           if [ -z "$OPENAI_API_KEY" ]; then
             echo "no OPENAI_API_KEY secret — skipping live gate"; exit 0
           fi
-          python ci_gate.py
+          uv run --frozen python ci_gate.py
 
       - name: upload eval diagnosis (on regression)
         if: ${{ failure() }}
