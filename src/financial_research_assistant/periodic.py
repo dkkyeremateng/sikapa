@@ -909,6 +909,10 @@ def _latest_complete_period(kind: str) -> tuple[Any, str]:
 async def produce(kind: str, arg: Any, period: str, fake: bool = False,
                   account: str = "") -> tuple[Brief, list[str], str]:
     """Build, comment and render one report: ``(brief, files, commentary note)``."""
+    # Sections come from feature modules (the watchers' recap, the ideas); a
+    # report built from the CLI must not be missing them because nothing else
+    # happened to import those modules first.
+    hooks.load_feature_modules()
     if kind == "daily":
         brief = await asyncio.to_thread(build_daily_brief, arg, account)
     elif kind == "weekly":

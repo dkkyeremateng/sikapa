@@ -80,6 +80,12 @@ def _never_touch_the_real_task_store(tmp_path_factory, monkeypatch):
         "FINANCIAL_RESEARCH_TASKS_FILE",
         str(tmp_path_factory.mktemp("tasks") / "tasks.json"),
     )
+    # Alert rules too: a watcher test added a rule and it landed in the
+    # developer's real alerts.json, where the live service would have fired it.
+    monkeypatch.setenv(
+        "FINANCIAL_RESEARCH_ALERTS_FILE",
+        str(tmp_path_factory.mktemp("alerts") / "alerts.json"),
+    )
     monkeypatch.setenv(
         "FINANCIAL_RESEARCH_JOURNAL_FILE",
         str(tmp_path_factory.mktemp("journal") / "journal.json"),
@@ -103,3 +109,29 @@ def _never_touch_the_real_task_store(tmp_path_factory, monkeypatch):
     # An unrecognised key selects no channel, so the default for the suite is
     # "deliver nowhere". Tests that exercise delivery set this themselves.
     monkeypatch.setenv("NOTIFY_CHANNELS", "none")
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
+    """Redirect every remaining store that defaults under the real home.
+
+    The fixtures above cover the stores a test was once caught writing to; the
+    rest had simply never been caught. Rendered reports, ingested documents,
+    exports, the pricing table, the eval dir and the prompt addendum all default
+    under ``~/.financial-research-assistant`` — a full run left ~150 test PDFs in
+    the developer's real reports folder, and a watcher test put an alert rule into
+    their real alerts.json, where the live service would have fired it.
+
+    Not by moving HOME itself: headless Chrome keeps its profile under HOME and
+    stalls on a fresh one, turning every rendering test into a two-minute timeout.
+    """
+    root = tmp_path_factory.mktemp("home")
+    for var, name in (
+        ("FINANCIAL_RESEARCH_REPORTS_DIR", "reports"),
+        ("FINANCIAL_RESEARCH_DOCS_DIR", "documents"),
+        ("FINANCIAL_RESEARCH_EXPORT_DIR", "exports"),
+        ("FINANCIAL_RESEARCH_PRICING_FILE", "pricing.json"),
+        ("FINANCIAL_RESEARCH_EVAL_DIR", "eval"),
+        ("FINANCIAL_RESEARCH_PROMPT_ADDENDUM_FILE", "prompt_addendum.txt"),
+    ):
+        monkeypatch.setenv(var, str(root / name))

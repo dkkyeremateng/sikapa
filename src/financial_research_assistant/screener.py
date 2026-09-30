@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import Any
 import csv
 import io
+import time
 import urllib.request
 
 # A curated large-cap US default universe (spread across sectors) used when the
@@ -65,6 +66,8 @@ _SP500_URL = (
 )
 _UA = "Mozilla/5.0 (compatible; financial-research-assistant)"
 _UNIVERSE_CACHE: dict[str, list[str]] = {}
+#: Index membership changes a few times a quarter; refresh daily in a long-lived process.
+_UNIVERSE_AT: dict[str, float] = {}
 _LARGECAP_LABEL = "built-in large-cap universe"
 
 
@@ -72,7 +75,7 @@ def _fetch_sp500() -> list[str]:
     """The current S&P 500 tickers from the keyless datahub CSV (ticker in the
     first column), normalized to Yahoo's dash form (``BRK.B`` -> ``BRK-B``) and
     deduped. Cached per run; ``[]`` on any network/parse failure."""
-    if "sp500" in _UNIVERSE_CACHE:
+    if "sp500" in _UNIVERSE_CACHE and time.time() - _UNIVERSE_AT.get("sp500", 0.0) < 86400:
         return _UNIVERSE_CACHE["sp500"]
     try:
         req = urllib.request.Request(_SP500_URL, headers={"User-Agent": _UA})
@@ -88,6 +91,7 @@ def _fetch_sp500() -> list[str]:
         syms = []
     if syms:
         _UNIVERSE_CACHE["sp500"] = syms
+        _UNIVERSE_AT["sp500"] = time.time()
     return syms
 
 
