@@ -892,6 +892,49 @@ the thresholds are right. `FRA_EVENTS_SHADOW=1` records everything and pushes
 nothing, which the server template turns on for the first week.
 `FRA_EVENTS=off` removes the watcher loop.
 
+### Research ideas (stocks, ETFs, other asset classes)
+
+The agent researches and recommends on its own: a **light** run every Sunday
+evening (up to 3 ideas) and a **deep** run on the first weekday of the month (up
+to 8), plus on demand with `/ideas now`, `--recommend [light|deep]`, or a chat
+request ("what fills my bond gap?", which calls `recommend_ideas`). Each idea is
+**recorded in the thesis journal** and scored against its asset class's
+benchmark when its horizon ends. The monthly report then shows the track
+record by conviction, which is how you find out whether a conviction of 5 means
+anything.
+
+The pipeline is fixed steps with one model judgement in the middle:
+
+1. **Candidates, model-free.** Asset classes where the book is short of the
+   target mix (filled from a curated catalog of about 65 liquid ETFs covering
+   US and international equity, bonds, TIPS, munis, T-bills, REITs, gold and
+   commodities, and optionally bitcoin/ether; or "add to the fund you already
+   hold for it"). Three stock screens: momentum over the S&P 500, and quality
+   and dividend over the large caps. Your holdings for add/hold/trim. Names the
+   watchers flagged, and your watchlist. Then exclusions, a 30-day cooldown and
+   a transparent score.
+2. **Evidence, per candidate.** Fundamentals, analysts, risk, the latest SEC
+   quarter, news; for a fund, its cost, size, trailing returns vs benchmark,
+   overlap with what you own, and correlation with your book, each with its window.
+3. **Judgement.** One model call argues both sides and returns a typed verdict:
+   verdict, conviction 1–5, thesis, risks, horizon, the evidence ids it rests
+   on, and what would prove it wrong. The schema has no field for a price target.
+   Its text may only cite figures from the evidence, or it's retried and then
+   dropped.
+4. **Fit, model-free.** Position and sector caps, ETF cost and overlap,
+   munis only in a taxable account, and one fund per gap. What doesn't fit is
+   listed with the reason.
+
+The ideas fit your **investor profile**: risk, horizon, target mix by asset
+class, caps, exclusions, account type, ETF cost limit, crypto on/off, and
+watchlist. Set it with `--profile`, `/profile`, or in chat ("set my max position
+to 8%"). Without one, the sheet says **GENERIC MODE** in its subtitle.
+`FRA_IDEAS_SHADOW=1` records and scores every idea but sends nothing. The
+server template sets it for the first four weeks, so there's a track record
+before any idea reaches you. Nothing here can trade: the recommender opens no
+broker session, and a test checks that none of the broker's write tools get
+past the read-only filter.
+
 ### Guardrails on autonomous work
 
 An agent that acts on its own needs a way to tell it to stop. There are three,
