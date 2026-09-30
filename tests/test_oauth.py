@@ -19,6 +19,8 @@ from financial_research_assistant import auth, llm, oauth
 @pytest.fixture(autouse=True)
 def _isolated_store(tmp_path, monkeypatch):
     monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("GEMINI_OAUTH_CLIENT_ID", "test-client.apps.example")
+    monkeypatch.setenv("GEMINI_OAUTH_CLIENT_SECRET", "test-secret")
 
 
 def _cb(**kw):
@@ -313,7 +315,7 @@ def test_authorize_url_is_pkce_shaped(name, monkeypatch):
     )
     q = up.parse_qs(up.urlparse(url).query)
     assert url.startswith(provider.AUTH_URL)
-    assert q["client_id"] == [provider.CLIENT_ID]
+    assert q["client_id"] == [provider.client_credentials()[0]]
     assert q["response_type"] == ["code"]
     assert q["code_challenge_method"] == ["S256"]
     # the challenge must match the verifier that was later sent to the token endpoint
@@ -469,10 +471,27 @@ def test_google_asks_for_a_refresh_token(monkeypatch):
 
 
 def test_google_sends_its_client_secret(monkeypatch):
-    _cred, posted, _url = _login_via_paste(
+    _cred, posted, url = _login_via_paste(
         oauth.get("google"), monkeypatch, {"access_token": "a"}
     )
-    assert posted["payload"]["client_secret"] == oauth.GoogleSubscriptionProvider.CLIENT_SECRET
+    assert posted["payload"]["client_secret"] == "test-secret"
+    assert posted["payload"]["client_id"] == "test-client.apps.example"
+    assert "client_id=test-client.apps.example" in url
+
+
+@pytest.mark.parametrize("missing", ("GEMINI_OAUTH_CLIENT_ID", "GEMINI_OAUTH_CLIENT_SECRET"))
+def test_google_without_its_client_pair_fails_before_any_prompt(missing, monkeypatch):
+    """The pair lives in the environment, not the source; without it the login
+    says which variables to set instead of opening a browser that can't work."""
+    monkeypatch.delenv(missing)
+    asked = []
+    cb = oauth.LoginCallbacks(on_prompt=lambda q: asked.append(q) or "",
+                              on_auth=lambda url: asked.append(url))
+    with pytest.raises(oauth.LoginError, match="GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET"):
+        oauth.get("google").login(cb)
+    assert asked == []
+    with pytest.raises(oauth.LoginError):
+        oauth.get("google").refresh({"refresh": "r"})
 
 
 def test_anthropic_sends_no_client_secret(monkeypatch):
