@@ -803,6 +803,27 @@ brief stays at 09:00 through a daylight-saving change rather than drifting to
 08:00 or 10:00. (`hourly` is the exception, and stays a real hour — there is no
 time-of-day to preserve, and a wall-clock hour would skip a run at fall-back.)
 
+A task can be pinned to a **zone** (`schedule_task(..., time_zone="America/New_York")`),
+and then its wall clock is that zone's, whatever the host runs in. Anything tied
+to the US close is pinned this way. A server in a zone without daylight saving
+would otherwise run a "17:15" job at 16:15 New York all winter, before the close
+it exists to report on. Repeats are `once`, `hourly`, `daily`, `weekdays`,
+`weekly`, `monthly` and `monthly-first-weekday`. `monthly` keeps the day it was
+first set for (Jan 31 → Feb 28 → Mar 31, not stuck on the 28th), and times like
+`1st of the month 8am` or `first weekday of the month 08:00` parse directly.
+
+A **recurring** task that fails all three attempts skips that run and stays
+scheduled for the next one; it tells you once. Parking it, as a one-shot is
+parked, would let one day's provider outage end a daily report for good.
+
+**Jobs.** A task can run a registered job instead of a model turn on its text:
+the reports below and the model-free Flex sync. A job's period comes from the
+occurrence it was scheduled for, not when it ran, and delivered reports are
+entered in a ledger keyed by period, so a retry or restart never sends the same
+week twice. `--reports-setup` schedules the default jobs that apply to this
+install and aren't already scheduled. It's safe to re-run, and the server runs
+it on first start.
+
 ### Delivery channels
 
 Channels are a registry (`channels.py`) in the same shape as the

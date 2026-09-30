@@ -2078,3 +2078,14 @@ async def test_new_conversation_clears_the_rating_targets(monkeypatch, tmp_path)
     from financial_research_assistant.memory import get_memory
 
     assert get_memory().all() == [], "no memory was filed from the closed conversation"
+
+
+def test_the_command_input_does_not_shadow_textuals_expand_flag():
+    """`Widget.expand` is a reactive Textual reads when sizing (`if self.expand:`).
+    A method of the same name is always truthy, so it forced the input wide."""
+    from textual.widget import Widget
+
+    from financial_research_assistant.tui import CommandInput
+
+    assert CommandInput.expand is Widget.expand
+    assert callable(CommandInput.expand_pastes)

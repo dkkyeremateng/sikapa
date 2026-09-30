@@ -72,14 +72,27 @@ def background_runs() -> int:
     return int(raw) if raw.isdigit() and int(raw) > 0 else 1
 
 
+#: Lanes this context already holds. A job holds the background lane for its
+#: whole run; if it then starts a model turn, that turn must not wait for the
+#: very slot its own job is sitting in.
+_HELD: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "fra_lanes_held", default=frozenset()
+)
+
+
 @contextlib.asynccontextmanager
 async def _lane(name: str) -> AsyncIterator[None]:
     lanes = _lanes
-    if lanes is None:
+    key = "chat" if name == "chat" else "background"
+    if lanes is None or key in _HELD.get():
         yield
         return
-    async with lanes["chat" if name == "chat" else "background"]:
-        yield
+    async with lanes[key]:
+        token = _HELD.set(_HELD.get() | {key})
+        try:
+            yield
+        finally:
+            _HELD.reset(token)
 
 
 #: Prepended to every scheduled prompt.
@@ -234,6 +247,42 @@ def run_session(task: dict[str, Any], now: datetime | None = None) -> str:
     return f"{base}-{(now or datetime.now()).strftime('%Y%m%dT%H%M%S')}"
 
 
+# --- jobs ---------------------------------------------------------------------------
+#
+# A task of kind "job" runs a registered function instead of a model turn on its
+# prompt. The reports are jobs because their figures must be COMPUTED, not typed
+# by a model working from a paragraph of instructions (see periodic.py); the Flex
+# sync is a job because it needs no model at all.
+
+
+def register_job(name: str, handler: Any) -> None:
+    """Kept for callers that registered through the scheduler; the registry now
+    lives in ``jobs`` so that module need not import this one."""
+    from . import jobs
+
+    jobs.register_job(name, handler)
+
+
+def registered_jobs() -> list[str]:
+    from . import jobs
+
+    return jobs.registered_jobs()
+
+
+async def _run_job(task: dict[str, Any], fake: bool) -> tuple[bool, str, list[str], bool]:
+    """Run a job task in the background lane; ``(ok, text, files, notify)``."""
+    from . import jobs
+
+    name = str(task.get("job") or "")
+    handler = jobs.handler_for(name)
+    if handler is None:
+        known = ", ".join(jobs.registered_jobs()) or "none"
+        return False, f"unknown job {name!r} (known: {known})", [], True
+    async with _lane("background"):
+        res = await handler(task, fake)
+    return res.ok, res.text, list(res.files), res.notify
+
+
 async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     """Run one claimed task, deliver its answer, and record the outcome.
 
@@ -244,12 +293,18 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     """
     tid = str(task.get("id"))
     prompt = str(task.get("prompt", ""))
+    is_job = task.get("kind") == "job"
     session = run_session(task)
-    _log(f"▶ task {tid}: {prompt[:80]} [{session}]")
+    _log(f"▶ task {tid}: {prompt[:80]}" + ("" if is_job else f" [{session}]"))
+    files: list[str] = []
+    notify = True
     try:
-        # The stored prompt stays clean (it's what `--tasks` shows and what the user
-        # wrote); the framing is added only on the way into the model.
-        ok, answer = await _answer(f"{_TASK_PREAMBLE}\n\n{prompt}", session, fake=fake)
+        if is_job:
+            ok, answer, files, notify = await _run_job(task, fake)
+        else:
+            # The stored prompt stays clean (it's what `--tasks` shows and what the
+            # user wrote); the framing is added only on the way into the model.
+            ok, answer = await _answer(f"{_TASK_PREAMBLE}\n\n{prompt}", session, fake=fake)
     except asyncio.CancelledError:
         # Ctrl-C or a killed watcher: hand the task back rather than leaving it
         # stuck in "running", which nothing would ever claim again.
@@ -266,7 +321,8 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
 
     # A reply that isn't an answer counts as a failure, so the task retries with
     # the framing preamble rather than delivering a shrug as the finished work.
-    reason = _non_answer_reason(answer) if ok else ""
+    # Jobs build their own text, so the gate is for model turns only.
+    reason = _non_answer_reason(answer) if ok and not is_job else ""
     if reason:
         ok = False
         _log(f"  not an answer: {reason}")
@@ -274,14 +330,22 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     # Record BEFORE delivering: whether this is the last attempt decides whether
     # the user hears about the failure now or after the retries are exhausted.
     record = tasks.record_result(tid, ok, reason or answer)
-    if record is not None and not ok and record.get("status") == "pending":
+    if (record is not None and not ok and record.get("status") == "pending"
+            and not record.get("exhausted")):
         # Silent on purpose: three phone notifications for one task that is still
         # being retried is noise, and the outcome is not known yet.
         _log(f"  ✗ task {tid}; retrying next tick "
              f"({record.get('attempts')}/{tasks.MAX_ATTEMPTS})")
         return {"id": tid, "ok": False, "delivered": [], "failed": [], "answer": answer}
 
+    if ok and not notify:
+        _log(f"  ✓ task {tid} (nothing to send)"
+             + (f"; next {record['due']}" if record and record.get("status") == "pending" else ""))
+        return {"id": tid, "ok": True, "delivered": [], "failed": [], "answer": answer}
+
     label = f"task {tid}" + ("" if ok else " (failed)")
+    if record is not None and record.get("exhausted") and record.get("status") == "pending":
+        label += " — skipped this run; it stays scheduled"
     body = f"{_HEADER.format(label=label)}\n\n{answer}"
     delivered, failed = await asyncio.to_thread(
         channels.deliver, body, str(task.get("channel") or "")
@@ -303,6 +367,13 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
             # stdout too, so a cron entry redirecting output still captures it.
             print(body, flush=True)
             _log("  nowhere to deliver — parked for redelivery (see --tasks)")
+    for path in files:
+        sent, lost = await asyncio.to_thread(
+            channels.deliver_file, path, "", str(task.get("channel") or ""), True
+        )
+        if lost or not sent:
+            # The message above names the file's path, and it stays on disk.
+            _log(f"  file not delivered ({', '.join(lost) or 'no file channel'}): {path}")
 
     tail = f"; next {record['due']}" if record and record.get("status") == "pending" else ""
     _log(f"  {'✓' if ok else '✗'} task {tid}"
