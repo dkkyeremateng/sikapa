@@ -21,6 +21,7 @@ from typing import Any, Callable, Protocol, runtime_checkable
 import base64
 import hashlib
 import json
+import os
 import secrets
 import threading
 import urllib.parse
@@ -438,9 +439,14 @@ class _SubscriptionProvider:
     #: Whether the token exchange must echo the state value back.
     SEND_STATE = False
 
+    def client_credentials(self) -> tuple[str, str]:
+        """The OAuth client id and secret (the secret is empty for a public PKCE
+        client). Raises LoginError when the client isn't configured."""
+        return self.CLIENT_ID, self.CLIENT_SECRET
+
     def _authorize_url(self, challenge: str, redirect_uri: str, state: str) -> str:
         params = {
-            "client_id": self.CLIENT_ID,
+            "client_id": self.client_credentials()[0],
             "response_type": "code",
             "redirect_uri": redirect_uri,
             "scope": self.SCOPES,
@@ -454,11 +460,12 @@ class _SubscriptionProvider:
     def _exchange_payload(
         self, code: str, verifier: str, redirect_uri: str, state: str = ""
     ) -> dict[str, Any]:
+        client_id, client_secret = self.client_credentials()
         payload = {
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": redirect_uri,
-            "client_id": self.CLIENT_ID,
+            "client_id": client_id,
             "code_verifier": verifier,
         }
         if self.SEND_STATE:
@@ -466,8 +473,8 @@ class _SubscriptionProvider:
             # doubles as the verifier — see `login` for why that pairing is theirs
             # alone and not a default worth copying.
             payload["state"] = state or verifier
-        if self.CLIENT_SECRET:
-            payload["client_secret"] = self.CLIENT_SECRET
+        if client_secret:
+            payload["client_secret"] = client_secret
         return payload
 
     def _exchange(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -505,6 +512,7 @@ class _SubscriptionProvider:
     def login(self, cb: LoginCallbacks) -> dict[str, Any]:
         if self.login_warning:
             cb.on_status(self.login_warning)
+        self.client_credentials()  # an unconfigured client fails before any prompt
         models = ask_models(cb, self.MODELS)
         window = ask_context_window(
             cb, suggested_window([m["name"] for m in models], self.CONTEXT_WINDOW)
@@ -558,13 +566,14 @@ class _SubscriptionProvider:
         return cred
 
     def refresh(self, cred: dict[str, Any]) -> dict[str, Any]:
+        client_id, client_secret = self.client_credentials()
         token_req = {
             "grant_type": "refresh_token",
             "refresh_token": cred.get("refresh", ""),
-            "client_id": self.CLIENT_ID,
+            "client_id": client_id,
         }
-        if self.CLIENT_SECRET:
-            token_req["client_secret"] = self.CLIENT_SECRET
+        if client_secret:
+            token_req["client_secret"] = client_secret
         token = self._exchange(token_req)
         if not token.get("access_token"):
             return cred
@@ -617,9 +626,11 @@ class GoogleSubscriptionProvider(_SubscriptionProvider):
         "suspended accounts for it, and Code Assist stopped serving the individual "
         "/ AI Pro / AI Ultra tiers on 18 Jun 2026. Use a Gemini API key instead."
     )
-    # Public client credentials embedded in Google's own open-source Gemini CLI.
-    CLIENT_ID = ""
-    CLIENT_SECRET = ""
+    # The public client pair from Google's own open-source Gemini CLI. It comes
+    # from the environment rather than the source: GitHub's push protection
+    # rejects any commit carrying a Google OAuth client secret.
+    CLIENT_ID_ENV = "GEMINI_OAUTH_CLIENT_ID"
+    CLIENT_SECRET_ENV = "GEMINI_OAUTH_CLIENT_SECRET"
     AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
     TOKEN_URL = "https://oauth2.googleapis.com/token"
     SCOPES = (
@@ -631,6 +642,17 @@ class GoogleSubscriptionProvider(_SubscriptionProvider):
     API_BASE = "https://cloudcode-pa.googleapis.com/v1internal"
     MODEL_PROVIDER = "google_genai"
     MODELS = ["gemini-2.5-flash", "gemini-2.5-pro"]
+
+    @override
+    def client_credentials(self) -> tuple[str, str]:
+        client_id = os.environ.get(self.CLIENT_ID_ENV, "").strip()
+        client_secret = os.environ.get(self.CLIENT_SECRET_ENV, "").strip()
+        if not (client_id and client_secret):
+            raise LoginError(
+                f"Gemini sign-in needs {self.CLIENT_ID_ENV} and {self.CLIENT_SECRET_ENV} "
+                "set: the public client pair from Google's open-source Gemini CLI."
+            )
+        return client_id, client_secret
 
     @override
     def _authorize_url(self, challenge: str, redirect_uri: str, state: str) -> str:
