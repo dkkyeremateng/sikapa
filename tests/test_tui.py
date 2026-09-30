@@ -1878,6 +1878,10 @@ async def test_tui_alert_makes_a_sound_and_can_be_silenced(monkeypatch, tmp_path
     silences both while the toast and the transcript line still land."""
     monkeypatch.setenv("FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path))
     monkeypatch.delenv("FINANCIAL_RESEARCH_ALERT_SOUND", raising=False)
+    # The sound file and player are the host's (a CI runner has neither), and
+    # test_alerts covers choosing them; pin both so this tests the TUI's wiring.
+    monkeypatch.setattr(alerts, "alert_sound_file", lambda: "/sounds/alert.wav")
+    monkeypatch.setattr(alerts, "_player_cmd", lambda sound: ["player", sound])
 
     # The same spawn point serves the desktop notifier, so count players only.
     def players():

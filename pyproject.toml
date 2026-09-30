@@ -22,7 +22,9 @@ dependencies = [
     "mcp>=1.9.2,<2.0",
     "textual>=1.0",
     "python-dotenv>=1.0",
-    "plotext>=5.2",
+    # 6.0 is a rewrite that drops the module-level plot/build/clear_figure API
+    # every chart here is drawn with.
+    "plotext>=5.2,<6",
     "ddgs>=9.0",
     "yfinance>=0.2.40",
     "numpy>=1.24",
