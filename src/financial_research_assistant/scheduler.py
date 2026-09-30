@@ -40,7 +40,7 @@ import threading
 import time
 from datetime import datetime
 
-from . import channels, tasks
+from . import channels, hooks, tasks
 
 #: Prefix on every delivered message, so a phone notification is self-identifying
 #: rather than an anonymous wall of analysis.
@@ -595,17 +595,11 @@ async def poll_inbox(fake: bool = False, timeout: int = 0) -> list[dict[str, Any
 
 # --- chat commands ---------------------------------------------------------------
 
-#: A model-free chat command: ``(argument, fake) -> reply``.
-CommandHandler = Callable[[str, bool], Awaitable[str]]
-
-#: Registered commands: name -> (handler, one-line help). Modules that own a
-#: command register it (reports, ideas, the autonomy switch), so this file never
-#: needs to learn their internals.
-_COMMANDS: dict[str, tuple[CommandHandler, str]] = {}
-
-
-def register_command(name: str, handler: CommandHandler, help_line: str) -> None:
-    _COMMANDS[name.lower().lstrip("/")] = (handler, help_line)
+#: Registered commands live in ``hooks`` (so feature modules can add theirs
+#: without importing this one); this is the same dict.
+CommandHandler = hooks.CommandHandler
+_COMMANDS = hooks.COMMANDS
+register_command = hooks.register_command
 
 
 def _parse_command(text: str) -> tuple[str, str] | None:
@@ -620,6 +614,7 @@ def _parse_command(text: str) -> tuple[str, str] | None:
 
 
 def help_text() -> str:
+    hooks.load_feature_modules()
     lines = ["Send me anything and I'll research it. Commands:"]
     lines += [f"  /{name} — {line}" for name, (_h, line) in sorted(_COMMANDS.items())
               if name not in ("start", "help")]
@@ -636,6 +631,7 @@ async def run_command(text: str, fake: bool = False) -> str | None:
     parsed = _parse_command(text)
     if parsed is None:
         return None
+    hooks.load_feature_modules()
     name, arg = parsed
     entry = _COMMANDS.get(name)
     if entry is None:
@@ -710,14 +706,11 @@ async def watch(
 # is responsive. `watch` ran the pass and then the long poll one after the other,
 # so a ten-minute monthly review left a phone message unanswered for ten minutes.
 
-#: Extra loops other modules run inside the service (the event watchers): name ->
-#: ``async (stop, fake) -> None``, returning when ``stop`` is set.
-ServiceLoop = Callable[[asyncio.Event, bool], Awaitable[None]]
-_SERVICE_LOOPS: dict[str, ServiceLoop] = {}
-
-
-def register_service_loop(name: str, loop: ServiceLoop) -> None:
-    _SERVICE_LOOPS[name] = loop
+#: Extra loops feature modules run inside the service (the event watchers). The
+#: registry is ``hooks.SERVICE_LOOPS``; this is the same dict.
+ServiceLoop = hooks.ServiceLoop
+_SERVICE_LOOPS = hooks.SERVICE_LOOPS
+register_service_loop = hooks.register_service_loop
 
 
 #: In-process view of the running service, for `/status`. Mirrored to disk
@@ -944,6 +937,7 @@ async def serve(
             handled.append(sig)
         except (NotImplementedError, RuntimeError, ValueError):
             pass  # not the main thread, or no signal support
+    hooks.load_feature_modules()
     _lanes = {"chat": asyncio.Semaphore(1), "background": asyncio.Semaphore(background_runs())}
     _service.clear()
     _service.update({"pid": os.getpid(), "started": time.time(), "alive": time.time(),
@@ -995,6 +989,7 @@ def service_status() -> dict[str, Any]:
     from .storage import read_json
     from . import telegram
 
+    hooks.load_feature_modules()
     state = dict(_service) if _service else read_json(_state_file(), {})
     now = time.time()
     tick = tasks.last_tick()
@@ -1018,13 +1013,10 @@ def service_status() -> dict[str, Any]:
     }
 
 
-#: Lines other modules add to the status (spend today, autonomy paused…):
-#: name -> ``() -> str``.
-_STATUS_EXTRAS: dict[str, Callable[[], str]] = {}
-
-
-def register_status_line(name: str, fn: Callable[[], str]) -> None:
-    _STATUS_EXTRAS[name] = fn
+#: Lines feature modules add to the status (spend today, autonomy paused…); the
+#: registry is ``hooks.STATUS_LINES``.
+_STATUS_EXTRAS = hooks.STATUS_LINES
+register_status_line = hooks.register_status_line
 
 
 def _safe_call(fn: Callable[[], str]) -> str:

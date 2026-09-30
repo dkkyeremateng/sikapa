@@ -264,6 +264,9 @@ purchase.
         "highlights": highlights,
         "markdown": markdown,
         "facts": {
+            "start": r["start"],
+            "end": r["end"],
+            "truncated": bool(truncated),
             "return_pct": r["return_pct"],
             "monthly_pct": r["monthly_pct"],
             "best_month": r["best_month"],
