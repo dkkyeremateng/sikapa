@@ -249,6 +249,29 @@ def _book_moves(book: dict[str, Any], series: dict[str, list[tuple[str, float]]]
     }
 
 
+def stale_days() -> int:
+    """Positions older than this many days get a warning (``FRA_STALE_POSITIONS_DAYS``, 5)."""
+    raw = (os.environ.get("FRA_STALE_POSITIONS_DAYS") or "").strip()
+    return int(raw) if raw.isdigit() else 5
+
+
+def staleness(book: dict[str, Any], on: date) -> str:
+    """A warning when the positions on file are older than ``stale_days`` at ``on``,
+    else "". A report computed on a book two months old is still correct about
+    those positions — it just isn't about the account any more, and must say so."""
+    if not book.get("as_of"):
+        return ""
+    try:
+        age = (on - date.fromisoformat(book["as_of"])).days
+    except ValueError:
+        return ""
+    if age <= stale_days():
+        return ""
+    return (f"⚠ The positions on file are from {book['as_of']} ({age} days old), so "
+            "holdings figures describe that book, not today's. The IBKR Flex sync "
+            "may be failing — check /runs.")
+
+
 def _book_note(book: dict[str, Any]) -> str:
     return (f"price move of the {len(book['holdings'])} holdings on file "
             f"(positions as of {book['as_of'] or 'the last import'}); excludes cash, "
@@ -430,8 +453,11 @@ def build_daily_brief(session: date, account: str = "",
         "macro": {label: (mv["end"], mv["diff"], mv["pct"]) for label, _u, mv in macro if mv},
         "positions_as_of": book["as_of"],
     }
+    stale = staleness(book, session)
+    if stale:
+        message.append(stale)
     return Brief(
-        kind="daily", period=day, label=_pretty(session),
+        kind="daily", period=day, label=_pretty(session), notes=[stale] if stale else [],
         title=f"Daily Close — {_pretty(session)}",
         subtitle=f"Session {prev_day} → {day} · positions as of {book['as_of'] or 'n/a'}",
         highlights="\n".join(tiles[:6]), markdown="\n".join(md),
@@ -566,6 +592,10 @@ def build_weekly_brief(week_end: date, account: str = "") -> Brief:
                        f"worst {bottom['symbol']} {_pct(bottom['pct'], 1)}")
     if ahead:
         message.append("Next week: " + "; ".join(a[2:].replace("**", "") for a in ahead[:5]))
+    stale = staleness(book, week_end)
+    if stale:
+        message.append(stale)
+        md.insert(0, f"_{stale}_\n")
     message.append("Full report attached.")
     facts = {
         "week": iso_week(week_end), "from": base_day, "to": end,
@@ -697,6 +727,10 @@ def build_monthly_brief(year: int, month: int, account: str = "") -> Brief:
     message = [f"📅 Monthly report · {label}", " · ".join(headline) or "Month in review"]
     if record["all"]["n"]:
         message.append(f"Ideas so far: {record['all']['hits']}/{record['all']['n']} right")
+    stale = staleness(book, last)
+    if stale:
+        notes.append(stale)
+        md.insert(0, f"_{stale}_\n")
     message += notes
     message.append("Full report attached.")
     facts = {

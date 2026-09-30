@@ -861,6 +861,32 @@ or monthly report assembled by hand through `render_report` is refused, the
 same way a hand-built review is. Set `FRA_DAILY_PDF=1` to get the daily as a
 PDF too.
 
+### Guardrails on autonomous work
+
+An agent that acts on its own needs a way to tell it to stop. There are three,
+cheapest first:
+
+- **Quiet** (`/quiet 2h`, `/quiet off`, or nightly via `FRA_QUIET_HOURS=22:00-07:00`):
+  keep working, but hold back pushes that can wait.
+- **Pause** (`/pause`, `--pause`; undo with `/resume` or `--resume-autonomy`;
+  `FRA_AUTONOMY=off` in the env outranks both): no reports, no event analyses,
+  no ideas. Chat still answers. The switch is stored in the state directory, so
+  a restart doesn't undo it.
+- **Budget** (`FRA_AUTONOMY_DAILY_TOKENS`, `FRA_AUTONOMY_MONTHLY_TOKENS`): every
+  model call the agent makes on its own goes through one helper
+  (`autonomy.ask`). Once the day's or month's tokens are spent, that helper
+  stops calling the model, reports go out without commentary, and events go out
+  as plain facts. Scheduled prompt tasks count toward the spend but aren't cut
+  off, since you asked for them. Chat is never counted or capped.
+
+Every job, task and phone turn is recorded in `runs.jsonl`: when, how long, the
+tokens, the tools it called, where the answer went, and the error if it failed.
+`/runs` shows the latest, `--reports` lists the reports sent and the recent runs,
+and `/status` carries the autonomy line (on or paused, tokens today and this
+month). A report built on positions more than `FRA_STALE_POSITIONS_DAYS` (5)
+old says so on the sheet and in the message, because a stale book usually means
+the Flex sync is failing.
+
 ### Delivery channels
 
 Channels are a registry (`channels.py`) in the same shape as the

@@ -116,6 +116,24 @@ def cli() -> None:
         help="with --report: build and print it, but send nothing",
     )
     parser.add_argument(
+        "--pause",
+        nargs="?",
+        const="",
+        metavar="REASON",
+        help="stop autonomous work (reports, watchers, ideas) until --resume; chat still answers",
+    )
+    parser.add_argument(
+        "--resume-autonomy",
+        dest="resume_autonomy",
+        action="store_true",
+        help="restart autonomous work after --pause",
+    )
+    parser.add_argument(
+        "--reports",
+        action="store_true",
+        help="list the reports sent (from the ledger) and the recent runs, then exit",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="with --status: exit code only (for container health checks)",
@@ -357,6 +375,37 @@ def _run_subcommand(args: argparse.Namespace) -> int | None:
         from . import scheduler
 
         asyncio.run(scheduler.serve(fake=args.fake))
+        return 0
+
+    if args.pause is not None:
+        from . import guardrails
+
+        guardrails.pause(args.pause)
+        print("autonomy paused — reports, watchers and ideas stop; chat still answers. "
+              "Undo with --resume-autonomy.")
+        return 0
+
+    if args.resume_autonomy:
+        from . import guardrails
+
+        guardrails.resume()
+        print(guardrails.paused_reason() or "autonomy resumed")
+        return 0
+
+    if args.reports:
+        from . import jobs, scheduler
+
+        sent = jobs.sent_reports(20)
+        print("Reports sent:" if sent else "No reports sent yet.")
+        for e in sent:
+            files = e.get("files") or []
+            print(f"  {str(e.get('at'))[:16].replace('T', ' ')}  {e.get('report'):<8} "
+                  f"{e.get('period'):<10} {files[-1] if files else ''}")
+        runs = scheduler.recent_runs(15)
+        if runs:
+            print("Recent runs:")
+            for r in runs:
+                print("  " + scheduler.describe_run(r))
         return 0
 
     if args.report:

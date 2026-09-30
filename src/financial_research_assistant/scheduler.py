@@ -186,9 +186,33 @@ async def _answer(prompt: str, session_id: str, fake: bool = False) -> tuple[boo
     """
     from . import catalog
 
-    async with _lane(_CURRENT_LANE.get()):
+    lane = _CURRENT_LANE.get()
+    async with _lane(lane):
         with catalog.unattended():
-            return await _answer_unlocked(prompt, session_id, fake)
+            ok, text = await _answer_unlocked(prompt, session_id, fake)
+    if lane != "chat":
+        # A background turn is autonomous spend — a scheduled task nobody is
+        # waiting on — so it counts toward the budget line like the reports'
+        # commentary does. It is not BLOCKED by the budget: the user asked for it.
+        stats = _LAST_TURN.get()
+        if stats.get("tokens_in") or stats.get("tokens_out"):
+            from . import autonomy
+
+            try:
+                autonomy.record_usage("task", stats["tokens_in"], stats["tokens_out"],
+                                      str(stats.get("model") or ""))
+            except OSError:
+                pass
+    return ok, text
+
+
+#: What the last turn in this context cost: tokens and the tools it called. Set by
+#: ``_answer_unlocked`` and read by its caller after the await (an awaited
+#: coroutine shares its caller's context), so the return type every test fake
+#: implements stays ``(ok, text)``.
+_LAST_TURN: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "fra_last_turn", default={}
+)
 
 
 async def _answer_unlocked(prompt: str, session_id: str, fake: bool) -> tuple[bool, str]:
@@ -201,6 +225,8 @@ async def _answer_unlocked(prompt: str, session_id: str, fake: bool) -> tuple[bo
     model = "scripted-fake" if fake else _resolved_model(None)
     final = ""
     error = ""
+    stats: dict[str, Any] = {"tokens_in": 0, "tokens_out": 0, "tools": [], "model": model}
+    _LAST_TURN.set(stats)
     async for ev in traced(
         run_turn(prompt, session_id, fake=fake),
         user_msg=prompt, session_id=session_id, model=model, fake=fake,
@@ -209,6 +235,11 @@ async def _answer_unlocked(prompt: str, session_id: str, fake: bool) -> tuple[bo
             final = ev.text
         elif ev.kind == "error":
             error = ev.text
+        elif ev.kind == "usage":
+            stats["tokens_in"] += ev.tokens_in
+            stats["tokens_out"] += ev.tokens_out
+        elif ev.kind == "tool_end":
+            stats["tools"].append(ev.tool)
         elif ev.kind == "alert":
             # A rule that fires inside a scheduled run still deserves a push — it
             # is exactly the "tell me when" the user asked for, and there is no
@@ -295,6 +326,8 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     prompt = str(task.get("prompt", ""))
     is_job = task.get("kind") == "job"
     session = run_session(task)
+    started = time.monotonic()
+    _LAST_TURN.set({})
     _log(f"▶ task {tid}: {prompt[:80]}" + ("" if is_job else f" [{session}]"))
     files: list[str] = []
     notify = True
@@ -336,11 +369,16 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
         # being retried is noise, and the outcome is not known yet.
         _log(f"  ✗ task {tid}; retrying next tick "
              f"({record.get('attempts')}/{tasks.MAX_ATTEMPTS})")
+        log_run("job" if is_job else "task", tid, False, started, session=session,
+                name=str(task.get("job") or prompt[:60]), error=(reason or answer)[:200],
+                retrying=True)
         return {"id": tid, "ok": False, "delivered": [], "failed": [], "answer": answer}
 
     if ok and not notify:
         _log(f"  ✓ task {tid} (nothing to send)"
              + (f"; next {record['due']}" if record and record.get("status") == "pending" else ""))
+        log_run("job" if is_job else "task", tid, True, started, session=session,
+                name=str(task.get("job") or prompt[:60]), note=answer[:200])
         return {"id": tid, "ok": True, "delivered": [], "failed": [], "answer": answer}
 
     label = f"task {tid}" + ("" if ok else " (failed)")
@@ -378,6 +416,9 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     tail = f"; next {record['due']}" if record and record.get("status") == "pending" else ""
     _log(f"  {'✓' if ok else '✗'} task {tid}"
          + (f" → {', '.join(delivered)}" if delivered else "") + tail)
+    log_run("job" if is_job else "task", tid, ok, started, session=session,
+            name=str(task.get("job") or prompt[:60]), delivered=delivered, files=files,
+            error="" if ok else (reason or answer)[:200])
     return {"id": tid, "ok": ok, "delivered": delivered, "failed": failed, "answer": answer}
 
 
@@ -574,12 +615,16 @@ async def poll_inbox(fake: bool = False, timeout: int = 0) -> list[dict[str, Any
             ok, reply = False, f"That command failed: {describe_error(exc)}"
         if reply is None:
             token = _CURRENT_LANE.set("chat")
+            started = time.monotonic()
+            _LAST_TURN.set({})
             try:
                 ok, reply = await _answer(
                     text, _CHAT_SESSION.format(chat_id=chat_id), fake=fake
                 )
             finally:
                 _CURRENT_LANE.reset(token)
+            log_run("chat", str(msg.get("update_id") or ""), ok, started,
+                    session=_CHAT_SESSION.format(chat_id=chat_id), name=text[:60])
         try:
             await asyncio.to_thread(telegram.send_message, reply, chat_id=chat_id)
         except RuntimeError as exc:
@@ -975,6 +1020,66 @@ async def serve(
         _service["stopped"] = time.time()
         _save_state()
         _log("stopped")
+
+
+# --- run history ----------------------------------------------------------------------
+
+
+def runs_log():
+    from .storage import state_file
+
+    return state_file("runs.jsonl", "FRA_RUNS_LOG")
+
+
+def log_run(kind: str, ident: str, ok: bool, started: float, **extra: Any) -> None:
+    """One line per job, task and chat turn: what ran, how long, what it cost and
+    which tools it used. Never raises — the history is a record, not a gate."""
+    from .storage import append_jsonl
+
+    turn = _LAST_TURN.get()
+    rec: dict[str, Any] = {
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "kind": kind, "id": ident, "ok": bool(ok),
+        "seconds": round(time.monotonic() - started, 1),
+        "tokens_in": int(turn.get("tokens_in") or 0),
+        "tokens_out": int(turn.get("tokens_out") or 0),
+        "tools": list(turn.get("tools") or []),
+    }
+    rec.update({k: v for k, v in extra.items() if v not in (None, "", [], False)})
+    try:
+        append_jsonl(runs_log(), rec)
+    except OSError:
+        pass
+
+
+def recent_runs(limit: int = 10) -> list[dict[str, Any]]:
+    from .storage import read_jsonl
+
+    return read_jsonl(runs_log(), limit=limit)
+
+
+def describe_run(r: dict[str, Any]) -> str:
+    mark = "✓" if r.get("ok") else ("…" if r.get("retrying") else "✗")
+    tokens = (int(r.get("tokens_in") or 0) + int(r.get("tokens_out") or 0))
+    bits = [f"{mark} {str(r.get('at') or '')[5:16].replace('T', ' ')}",
+            f"{r.get('kind')} {r.get('id')}", str(r.get("name") or "")[:40],
+            f"{r.get('seconds')}s"]
+    if tokens:
+        bits.append(f"{tokens:,} tok")
+    if r.get("error"):
+        bits.append(f"— {str(r['error'])[:80]}")
+    return "  ".join(b for b in bits if b)
+
+
+async def _cmd_runs(arg: str, _fake: bool) -> str:
+    n = int(arg) if (arg or "").isdigit() else 10
+    runs = recent_runs(min(n, 50))
+    if not runs:
+        return "Nothing has run yet."
+    return "Recent runs (newest last):\n" + "\n".join(describe_run(r) for r in runs)
+
+
+register_command("runs", _cmd_runs, "the last runs and what they cost: /runs 20")
 
 
 # --- status ------------------------------------------------------------------------
