@@ -19,6 +19,8 @@ from financial_research_assistant import auth, llm, oauth
 @pytest.fixture(autouse=True)
 def _isolated_store(tmp_path, monkeypatch):
     monkeypatch.setenv("FINANCIAL_RESEARCH_AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setenv("ANTHROPIC_OAUTH_CLIENT_ID", "test-anthropic-client")
+    monkeypatch.setenv("CODEX_OAUTH_CLIENT_ID", "test-codex-client")
     monkeypatch.setenv("GEMINI_OAUTH_CLIENT_ID", "test-client.apps.example")
     monkeypatch.setenv("GEMINI_OAUTH_CLIENT_SECRET", "test-secret")
 
@@ -479,19 +481,33 @@ def test_google_sends_its_client_secret(monkeypatch):
     assert "client_id=test-client.apps.example" in url
 
 
-@pytest.mark.parametrize("missing", ("GEMINI_OAUTH_CLIENT_ID", "GEMINI_OAUTH_CLIENT_SECRET"))
-def test_google_without_its_client_pair_fails_before_any_prompt(missing, monkeypatch):
-    """The pair lives in the environment, not the source; without it the login
+@pytest.mark.parametrize("name, missing, named", [
+    ("anthropic", "ANTHROPIC_OAUTH_CLIENT_ID", "needs ANTHROPIC_OAUTH_CLIENT_ID set"),
+    ("codex", "CODEX_OAUTH_CLIENT_ID", "needs CODEX_OAUTH_CLIENT_ID set"),
+    ("google", "GEMINI_OAUTH_CLIENT_ID", "GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET"),
+    ("google", "GEMINI_OAUTH_CLIENT_SECRET", "GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET"),
+])
+def test_an_unconfigured_client_fails_before_any_prompt(name, missing, named, monkeypatch):
+    """Client ids live in the environment, not the source; without one the login
     says which variables to set instead of opening a browser that can't work."""
     monkeypatch.delenv(missing)
     asked = []
     cb = oauth.LoginCallbacks(on_prompt=lambda q: asked.append(q) or "",
                               on_auth=lambda url: asked.append(url))
-    with pytest.raises(oauth.LoginError, match="GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET"):
-        oauth.get("google").login(cb)
+    with pytest.raises(oauth.LoginError, match=named):
+        oauth.get(name).login(cb)
     assert asked == []
     with pytest.raises(oauth.LoginError):
-        oauth.get("google").refresh({"refresh": "r"})
+        oauth.get(name).refresh({"refresh": "r"})
+
+
+@pytest.mark.parametrize("name, client_id", [
+    ("anthropic", "test-anthropic-client"), ("codex", "test-codex-client"),
+])
+def test_the_client_id_comes_from_the_environment(name, client_id, monkeypatch):
+    _cred, posted, url = _login_via_paste(oauth.get(name), monkeypatch, {"access_token": "a"})
+    assert posted["payload"]["client_id"] == client_id
+    assert f"client_id={client_id}" in url
 
 
 def test_anthropic_sends_no_client_secret(monkeypatch):

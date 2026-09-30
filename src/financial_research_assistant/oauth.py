@@ -417,8 +417,13 @@ class _SubscriptionProvider:
     name = ""
     label = ""
     login_warning = ""
-    CLIENT_ID = ""
-    CLIENT_SECRET = ""  # public, embedded in the vendor's own open-source client
+    #: Environment variables naming the vendor's OAuth client. The values are
+    #: public (each vendor ships them in its own client) but are kept out of the
+    #: source; no secret variable means a public PKCE client with no secret.
+    CLIENT_ID_ENV = ""
+    CLIENT_SECRET_ENV = ""
+    #: Where those values come from, named in the error when one is missing.
+    CLIENT_SOURCE = ""
     AUTH_URL = ""
     TOKEN_URL = ""
     SCOPES = ""
@@ -441,8 +446,17 @@ class _SubscriptionProvider:
 
     def client_credentials(self) -> tuple[str, str]:
         """The OAuth client id and secret (the secret is empty for a public PKCE
-        client). Raises LoginError when the client isn't configured."""
-        return self.CLIENT_ID, self.CLIENT_SECRET
+        client), read from the environment at call time so it works whether or
+        not .env was loaded before import. Raises LoginError when one is unset."""
+        names = [n for n in (self.CLIENT_ID_ENV, self.CLIENT_SECRET_ENV) if n]
+        values = {n: os.environ.get(n, "").strip() for n in names}
+        if not self.CLIENT_ID_ENV or not all(values.values()):
+            raise LoginError(
+                f"{self.name} sign-in needs {' and '.join(names)} set: the public "
+                f"client {'pair' if len(names) > 1 else 'id'} from {self.CLIENT_SOURCE}."
+            )
+        secret = values[self.CLIENT_SECRET_ENV] if self.CLIENT_SECRET_ENV else ""
+        return values[self.CLIENT_ID_ENV], secret
 
     def _authorize_url(self, challenge: str, redirect_uri: str, state: str) -> str:
         params = {
@@ -595,7 +609,8 @@ class AnthropicSubscriptionProvider(_SubscriptionProvider):
         "unlock. Only Haiku serves. For Sonnet/Opus use `/login anthropic-key` with "
         "a key from console.anthropic.com."
     )
-    CLIENT_ID = ""
+    CLIENT_ID_ENV = "ANTHROPIC_OAUTH_CLIENT_ID"
+    CLIENT_SOURCE = "Claude Code"
     AUTH_URL = "https://claude.ai/oauth/authorize"
     TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
     SCOPES = "org:create_api_key user:profile user:inference"
@@ -626,11 +641,11 @@ class GoogleSubscriptionProvider(_SubscriptionProvider):
         "suspended accounts for it, and Code Assist stopped serving the individual "
         "/ AI Pro / AI Ultra tiers on 18 Jun 2026. Use a Gemini API key instead."
     )
-    # The public client pair from Google's own open-source Gemini CLI. It comes
-    # from the environment rather than the source: GitHub's push protection
-    # rejects any commit carrying a Google OAuth client secret.
+    # GitHub's push protection rejects any commit carrying a Google OAuth client
+    # secret, which is the other reason this pair can't live in the source.
     CLIENT_ID_ENV = "GEMINI_OAUTH_CLIENT_ID"
     CLIENT_SECRET_ENV = "GEMINI_OAUTH_CLIENT_SECRET"
+    CLIENT_SOURCE = "Google's open-source Gemini CLI"
     AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
     TOKEN_URL = "https://oauth2.googleapis.com/token"
     SCOPES = (
@@ -642,17 +657,6 @@ class GoogleSubscriptionProvider(_SubscriptionProvider):
     API_BASE = "https://cloudcode-pa.googleapis.com/v1internal"
     MODEL_PROVIDER = "google_genai"
     MODELS = ["gemini-2.5-flash", "gemini-2.5-pro"]
-
-    @override
-    def client_credentials(self) -> tuple[str, str]:
-        client_id = os.environ.get(self.CLIENT_ID_ENV, "").strip()
-        client_secret = os.environ.get(self.CLIENT_SECRET_ENV, "").strip()
-        if not (client_id and client_secret):
-            raise LoginError(
-                f"Gemini sign-in needs {self.CLIENT_ID_ENV} and {self.CLIENT_SECRET_ENV} "
-                "set: the public client pair from Google's open-source Gemini CLI."
-            )
-        return client_id, client_secret
 
     @override
     def _authorize_url(self, challenge: str, redirect_uri: str, state: str) -> str:
@@ -673,7 +677,8 @@ class CodexSubscriptionProvider(_SubscriptionProvider):
         "drawing from your ChatGPT plan, and calls are routed through a local "
         "proxy that speaks the Codex request shape."
     )
-    CLIENT_ID = ""
+    CLIENT_ID_ENV = "CODEX_OAUTH_CLIENT_ID"
+    CLIENT_SOURCE = "OpenAI's open-source Codex CLI"
     AUTH_URL = "https://auth.openai.com/oauth/authorize"
     TOKEN_URL = "https://auth.openai.com/oauth/token"
     SCOPES = "openid profile email offline_access"
