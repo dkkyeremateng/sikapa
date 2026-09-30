@@ -40,12 +40,15 @@ def _transcript_path(session_id: str) -> Path:
 
 
 def log_turn(session_id: str, query: str, answer: str) -> None:
-    """Append one (query, answer) turn to the session's transcript."""
-    d = store_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    """Append one (query, answer) turn to the session's transcript.
+
+    Written ``0600``: a transcript is the conversation itself — holdings, account
+    figures, whatever was asked — and it used to be created world-readable.
+    """
+    from .storage import append_jsonl
+
     rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "query": query, "answer": answer}
-    with _transcript_path(session_id).open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
+    append_jsonl(_transcript_path(session_id), rec)
 
 
 def read_transcript(session_id: str) -> list[dict[str, Any]]:

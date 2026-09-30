@@ -252,6 +252,19 @@ def reset_session(session_id: str) -> None:
     _delete_durable_thread(session_id)
 
 
+def release_session(session_id: str) -> None:
+    """Free a finished session's in-process state, keeping its durable record.
+
+    For sessions that are never continued — one scheduled run each. A long-lived
+    service otherwise keeps every run's ``MemorySaver`` for the life of the
+    process: a daily job alone is 365 conversations a year held in memory. The
+    transcript and any durable checkpoint rows stay, so ``--resume`` still works.
+    """
+    _forget_cached(_fake_graphs, session_id)
+    _forget_cached(_checkpointers, session_id)
+    _last_input.pop(session_id, None)
+
+
 # Auto-compaction (interface-agnostic): per session, the size of the context the
 # last turn ran in — its FINAL model call's input tokens, not the sum over the
 # turn's calls — used to decide whether to compact *before* the next turn. This makes

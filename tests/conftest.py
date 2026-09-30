@@ -89,6 +89,11 @@ def _never_touch_the_real_task_store(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(
         "FINANCIAL_RESEARCH_HOME", str(tmp_path_factory.mktemp("state"))
     )
+    # Transcripts too: a scheduled run logs one, and without this it appended to
+    # the developer's real `task-s1.jsonl`.
+    monkeypatch.setenv(
+        "FINANCIAL_RESEARCH_SESSIONS_DIR", str(tmp_path_factory.mktemp("sessions"))
+    )
     monkeypatch.setenv(
         "FINANCIAL_RESEARCH_TELEGRAM_STATE",
         str(tmp_path_factory.mktemp("tg") / "offset.json"),

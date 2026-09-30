@@ -74,9 +74,30 @@ def cli() -> None:
         action="store_true",
         help=(
             "run every scheduled task that is due now, push each answer to the "
-            "configured channels, then exit — the cron/launchd entry point. Also "
-            "drains the Telegram inbox when inbound is enabled"
+            "configured channels, then exit — the cron/launchd entry point. Does "
+            "not read the Telegram inbox (--watch and --serve do)"
         ),
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help=(
+            "run the always-on service: scheduled jobs, the Telegram inbox and the "
+            "watchers side by side, until SIGTERM/Ctrl-C. See deploy/README.md"
+        ),
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help=(
+            "show whether the always-on service is running and what is next, then "
+            "exit; with --check, print nothing and exit 1 unless it is healthy"
+        ),
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="with --status: exit code only (for container health checks)",
     )
     parser.add_argument(
         "--watch",
@@ -310,6 +331,21 @@ def _run_subcommand(args: argparse.Namespace) -> int | None:
 
     if args.run_due or args.watch is not None:
         return _handle_scheduler(args)
+
+    if args.serve:
+        from . import scheduler
+
+        asyncio.run(scheduler.serve(fake=args.fake))
+        return 0
+
+    if args.status:
+        from . import scheduler
+
+        status = scheduler.service_status()
+        if args.check:
+            return 0 if status["healthy"] else 1
+        print(scheduler.format_status(status))
+        return 0
 
     if args.flex_sync:
         # Model-free IBKR Flex Web Service pull (token from IBKR_FLEX_TOKEN). Saves

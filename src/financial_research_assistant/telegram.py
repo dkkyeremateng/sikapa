@@ -337,12 +337,22 @@ def _write_offset(offset: int) -> None:
         pass  # a lost cursor costs a duplicate answer, not a crash
 
 
-def get_updates(timeout: int = POLL_TIMEOUT) -> list[dict[str, Any]]:
-    """Fetch new messages from allowed chats. Returns ``[{chat_id, text, name}]``.
+def get_updates(timeout: int = POLL_TIMEOUT, commit: bool = True) -> list[dict[str, Any]]:
+    """Fetch new messages from allowed chats. Returns
+    ``[{chat_id, text, name, update_id}]``.
 
-    The cursor advances past EVERY update, including the ones the allowlist drops —
-    otherwise a message from a stranger is re-fetched forever and the queue never
-    moves past it.
+    ``commit=True`` advances the cursor past EVERY update fetched, including the
+    ones the allowlist drops — otherwise a message from a stranger is re-fetched
+    forever and the queue never moves past it. That makes delivery at-most-once:
+    a runner killed between this call and its reply has consumed the message and
+    will never answer it.
+
+    ``commit=False`` is the always-on service's mode, and it is at-least-once. The
+    cursor moves only past the leading run of updates that need no answer
+    (strangers, non-text); each returned message is committed by the caller with
+    ``commit_update`` once it has been answered. A restart mid-answer — every
+    deploy is a restart — re-fetches the message instead of losing it; the cost of
+    a crash in the wrong second is one duplicate answer rather than silence.
 
     The whole read-fetch-write span runs under ``_inbox_lock``, so a second runner
     polling at the same moment gets nothing rather than a second copy of the same
@@ -361,19 +371,40 @@ def get_updates(timeout: int = POLL_TIMEOUT) -> list[dict[str, Any]]:
         data = _call("getUpdates", payload, timeout=timeout + 10)
         out: list[dict[str, Any]] = []
         highest = offset
-        for upd in data.get("result", []):
-            highest = max(highest, int(upd.get("update_id", 0)) + 1)
+        updates = sorted(data.get("result", []), key=lambda u: int(u.get("update_id", 0)))
+        for upd in updates:
+            uid = int(upd.get("update_id", 0))
             msg = upd.get("message") or {}
             chat = (msg.get("chat") or {}).get("id")
             text = (msg.get("text") or "").strip()
-            if not text or chat is None or not is_allowed(chat):
+            answerable = bool(text) and chat is not None and is_allowed(chat)
+            # Uncommitted mode may only step over updates that come BEFORE the
+            # first unanswered message; jumping past one would lose it.
+            if commit or (not answerable and not out):
+                highest = max(highest, uid + 1)
+            if not answerable:
                 continue
             frm = msg.get("from") or {}
             out.append({
                 "chat_id": str(chat),
                 "text": text,
                 "name": frm.get("username") or frm.get("first_name") or str(chat),
+                "update_id": uid,
             })
         if highest != offset:
             _write_offset(highest)
     return out
+
+
+def commit_update(update_id: Any) -> None:
+    """Mark one message answered, so the next poll starts after it.
+
+    Never moves the cursor backwards: messages are answered in order, but a
+    stray late commit must not re-open ones already done.
+    """
+    try:
+        uid = int(update_id)
+    except (TypeError, ValueError):
+        return
+    if uid + 1 > _read_offset():
+        _write_offset(uid + 1)
