@@ -4,7 +4,35 @@ Open items from the scheduled-tasks + delivery-channels work (2026-08-06).
 Unchecked boxes are pending; what shipped is described in README → "Scheduled
 tasks" and in the git history.
 
+## Always-on agent (2026-09-30) — built; what is left needs you
+
+Everything in the always-on plan is merged: `--serve`, the reports, the event
+watchers, the recommender, the guardrails (see README and `deploy/README.md`).
+What code can't do from here:
+
+- [ ] **Pick and provision the host** (VPS or home server) and follow
+      `deploy/README.md`. This replaces the launchd options below.
+- [ ] **An API key for the server** (`ANTHROPIC_API_KEY`), rather than copying
+      the `/login` OAuth session.
+- [ ] **Turn on inbound Telegram** on the server: `TELEGRAM_ALLOWED_CHAT_IDS`.
+- [ ] **Set the investor profile** (`--profile`); ideas run in generic mode until then.
+- [ ] **Dead-man check** at an outside service, URL into `FRA_HEALTHCHECK_URL`.
+- [ ] **One week of `FRA_EVENTS_SHADOW=1`**, then read `/events` together and tune
+      `FRA_EVENT_FLOOR_PCT` / `FRA_EVENT_SIGMA` before pushes go live.
+- [ ] **Four weeks of `FRA_IDEAS_SHADOW=1`**, then read the first scored ideas
+      (`--theses`, the monthly report) before ideas are sent.
+- [ ] **Unload the old scheduler agent on the Mac**: it is still loaded and
+      failing every 15 minutes on the TCC error below (see `scheduler.log`):
+      `launchctl unload -w ~/Library/LaunchAgents/com.teckdroids.fra-scheduler.plist`.
+- [ ] **Decide what to do with the test PDFs** in `~/.financial-research-assistant/reports`:
+      the suite wrote rendered fixtures there on every full run until 2026-09-30
+      (now redirected). Not deleted, since real reports sit in the same folder.
+- [ ] **The Flex sync has not run since 7 August** — the reports flag the book as
+      stale until the `flex-sync` job (or `--flex-sync`) runs.
+
 ## Blocking — nothing runs scheduled work across a reboot
+
+Superseded by the always-on service above; kept for the Mac-fallback history.
 
 - [ ] **Pick a permanent runner.** Right now the queue only drains while
       `financial-research-assistant --watch 60` is running in a terminal, which dies
