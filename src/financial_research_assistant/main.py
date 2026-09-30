@@ -95,6 +95,14 @@ def cli() -> None:
         ),
     )
     parser.add_argument(
+        "--reports-setup",
+        action="store_true",
+        help=(
+            "schedule the default jobs (Flex sync, daily/weekly/monthly reports, "
+            "ideas) that aren't already scheduled, then exit; safe to re-run"
+        ),
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="with --status: exit code only (for container health checks)",
@@ -336,6 +344,13 @@ def _run_subcommand(args: argparse.Namespace) -> int | None:
         from . import scheduler
 
         asyncio.run(scheduler.serve(fake=args.fake))
+        return 0
+
+    if args.reports_setup:
+        from . import jobs
+
+        print("Default jobs:")
+        print(jobs.describe_setup(jobs.ensure_default_jobs()))
         return 0
 
     if args.status:

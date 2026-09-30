@@ -795,12 +795,12 @@ def flex_sync(
     token: str | None = None,
     retry_delay: float = 5.0,
 ) -> str:
-    """Fetch the configured Flex statement and save its XML; returns a summary.
+    """Fetch the configured Flex statement, save its XML, and import it into the
+    statement store; returns a summary.
 
     ``token`` defaults to ``IBKR_FLEX_TOKEN`` (never taken from a model), ``query_id``
-    to the arg or ``IBKR_FLEX_QUERY_ID``. Once ``parse_flex_xml`` is implemented this
-    will also import into the store; today it saves the XML and points at the manual
-    CSV path for querying."""
+    to the arg or ``IBKR_FLEX_QUERY_ID``. A summary starting "Fetched" without
+    "could not be imported" is a success — the ``flex-sync`` job reads it that way."""
     token = (token or os.environ.get("IBKR_FLEX_TOKEN") or "").strip()
     qid = (query_id or os.environ.get("IBKR_FLEX_QUERY_ID") or "").strip()
     if not token:

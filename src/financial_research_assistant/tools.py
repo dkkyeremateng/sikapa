@@ -151,12 +151,12 @@ class PriceDataUnavailable(RuntimeError):
     outage is never misreported as a bad symbol."""
 
 
-# Same-process cache: (symbol, range) -> (series, fetched_at). Yahoo's keyless
+# Same-process cache: (symbol, range, adjusted) -> (series, fetched_at). Yahoo's keyless
 # endpoint is a single point of failure with no SLA; caching within a run avoids
 # re-fetching the same series across tools (e.g. compare_prices + risk_metrics +
 # benchmark) and cushions transient failures. Entries expire after _price_ttl()
 # so a long-lived session never serves yesterday's closes as "latest".
-_PRICE_CACHE: dict[tuple[str, str], tuple[list[tuple[str, float]], float]] = {}
+_PRICE_CACHE: dict[tuple[str, str, bool], tuple[list[tuple[str, float]], float]] = {}
 
 
 def _price_ttl() -> float:

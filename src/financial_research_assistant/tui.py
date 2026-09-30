@@ -287,8 +287,12 @@ class CommandInput(Input):
         self._pastes[token] = text
         self.insert_text_at_cursor(f"[pasted {len(text.splitlines())} lines #{token}]")
 
-    def expand(self, value: str) -> str:
-        """The submitted text with every surviving paste marker restored."""
+    def expand_pastes(self, value: str) -> str:
+        """The submitted text with every surviving paste marker restored.
+
+        Not named ``expand``: that is a reactive on ``Widget`` which Textual reads
+        when sizing (``if self.expand:``), and a bound method is always truthy, so
+        the override silently told the layout to stretch this input."""
         return self._PASTE_MARK.sub(
             lambda m: self._pastes.get(m.group(1), m.group(0)), value
         )
@@ -1113,7 +1117,7 @@ class AgentApp(App[Any]):
         # reached the input only to be sent as "[pasted 52 lines #1]" would be the
         # same silent loss in a new costume.
         typed = event.value.strip()
-        msg = event.input.expand(typed).strip()
+        msg = event.input.expand_pastes(typed).strip()
         try:
             palette = self.query_one("#command-list", OptionList)
         except Exception:

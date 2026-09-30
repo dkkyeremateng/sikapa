@@ -13,7 +13,9 @@ quote position sizes and account names::
     {"id": "s1",
      "prompt": "NOMD reported. Pull actuals vs consensus and give a call.",
      "due": "2026-08-14T13:30:00+00:00",   # always UTC in the file
-     "repeat": "once",                      # once | hourly | daily | weekdays | weekly
+     "repeat": "once",                      # see REPEATS
+     "tz": "America/New_York",              # optional; else the host's local zone
+     "kind": "prompt",                      # prompt | job (a registered job, below)
      "session": "task-s1", "channel": "",   # "" = every configured channel
      "status": "pending",                   # pending | done | error
      "runs": 0, "last_run": null, "last_ok": null, "last_result": ""}
@@ -41,17 +43,28 @@ Nothing here reaches the network or the model. ``scheduler`` runs the turn,
 from __future__ import annotations
 
 from typing import Any
+import calendar
 import json
 import os
 import re
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .storage import write_private
 
 #: How a finished task picks its next due time. "once" retires it.
-REPEATS = ("once", "hourly", "daily", "weekdays", "weekly")
+#: ``monthly`` keeps the day of the month it was first scheduled for (clamped to
+#: short months, then restored); ``monthly-first-weekday`` is the first Monday–Friday
+#: of each month, which is what a month-end review wants.
+REPEATS = ("once", "hourly", "daily", "weekdays", "weekly", "monthly",
+           "monthly-first-weekday")
+
+#: What a task runs. ``prompt`` is a model turn on its text; ``job`` is a named,
+#: registered job (``scheduler.register_job``) — a report built from computed
+#: figures, a model-free data sync — whose ``prompt`` is only its description.
+KINDS = ("prompt", "job")
 
 #: Cap on stored result text. The store is read on every tick and re-serialised on
 #: every write; keeping whole reports here would turn a 2 KB file into megabytes.
@@ -279,13 +292,64 @@ def _to_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def parse_when(text: str, now: datetime | None = None) -> datetime:
+def zone(name: str | None) -> tzinfo | None:
+    """The IANA zone for a task, or None for the host's local zone. Raises
+    ValueError for a name the zone database doesn't know."""
+    if not name:
+        return None
+    try:
+        return ZoneInfo(str(name))
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(
+            f"unknown time zone {name!r} — use an IANA name like America/New_York"
+        ) from None
+
+
+def _as_local(dt: datetime, tz: tzinfo | None) -> datetime:
+    return dt.astimezone(tz) if tz is not None else dt.astimezone()
+
+
+def _localize(naive: datetime, tz: tzinfo | None) -> datetime:
+    """Attach ``tz`` to a naive wall time using THAT DAY's offset.
+
+    The distinction that matters: an aware "now" carries today's offset, and
+    ``now + timedelta(days=3)`` keeps it — so "monday 9am" typed on a Friday before
+    the clocks change landed at 08:00 or 10:00 Monday. Building the wall time
+    first and attaching the zone afterwards asks the zone for Monday's offset.
+    """
+    if tz is not None:
+        return naive.replace(tzinfo=tz)
+    return naive.astimezone()  # naive → the host's zone rules for that date
+
+
+def _month_day(year: int, month: int, day: int) -> date:
+    """``day`` of that month, clamped to its length (the 31st in April is the 30th)."""
+    return date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def _first_weekday(year: int, month: int) -> date:
+    d = date(year, month, 1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+def _add_months(year: int, month: int, by: int) -> tuple[int, int]:
+    idx = year * 12 + (month - 1) + by
+    return idx // 12, idx % 12 + 1
+
+
+def parse_when(text: str, now: datetime | None = None, tz: str | None = None) -> datetime:
     """Turn a human time expression into a UTC datetime. Raises ValueError.
 
     Accepts what a person actually types at a chat prompt or a shell:
     ``2026-08-14T13:30``, ``2026-08-14 09:00``, ``2026-08-14`` (09:00 local),
     ``tomorrow 9am``, ``today 16:00``, ``tonight``, ``monday 8:30``, ``+2h``,
-    ``+30m``, ``+3d``.
+    ``+30m``, ``+3d``, ``1st of the month 8am``, ``first weekday of the month 8am``.
+
+    Wall-clock expressions are read in ``tz`` (an IANA name) when given, else in
+    the host's local zone — so a job pinned to America/New_York means 17:15 in New
+    York whatever zone the server runs in.
 
     Bare dates default to 09:00 local rather than midnight: "monitor X on Friday"
     means during the day, and a midnight run would report on a market that has been
@@ -296,10 +360,14 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
     "tonight" used to mean the run happened the moment it was scheduled.
     """
     now = now or now_utc()
-    local_now = now.astimezone()
+    tzi = zone(tz)
+    local_now = _as_local(now, tzi)
     raw = (text or "").strip().lower()
     if not raw:
         raise ValueError("no time given")
+
+    def at(day: date, hour: int, minute: int) -> datetime:
+        return _localize(datetime.combine(day, dtime(hour, minute)), tzi)
 
     # Relative: +90m, +2h, +3d, +1w (also accepted without the leading '+')
     m = re.fullmatch(r"\+?(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?|w|weeks?)", raw)
@@ -312,6 +380,27 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
         if unit.startswith("d"):
             return now + timedelta(days=n)
         return now + timedelta(weeks=n)
+
+    # Monthly anchors: "1st of the month 8am", "first weekday of the month 08:00".
+    m = re.fullmatch(
+        r"(?:the\s+)?(?:(\d{1,2})(?:st|nd|rd|th)?|(first)\s+(?:weekday|business\s+day))"
+        r"\s+of\s+(?:the\s+|each\s+|every\s+)?month(?:\s+(.+))?",
+        raw,
+    )
+    if m:
+        hour, minute = _parse_clock(m.group(3)) if m.group(3) else (_DEFAULT_HOUR, 0)
+        for ahead in range(0, 3):
+            y, mo = _add_months(local_now.year, local_now.month, ahead)
+            if m.group(2):
+                day = _first_weekday(y, mo)
+            else:
+                n = int(m.group(1))
+                if not 1 <= n <= 31:
+                    raise ValueError(f"no day {n} in a month")
+                day = _month_day(y, mo, n)
+            target = at(day, hour, minute)
+            if target > local_now:
+                return _to_utc(target)
 
     # Optional leading day word, with the rest treated as a time-of-day. Each word
     # carries its own default hour, because the default is what the user gets when
@@ -340,9 +429,8 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
 
     if day_offset is not None:
         hour, minute = _parse_clock(rest) if rest else (default_hour, 0)
-        target = (local_now + timedelta(days=day_offset)).replace(
-            hour=hour, minute=minute, second=0, microsecond=0
-        )
+        day = local_now.date() + timedelta(days=day_offset)
+        target = at(day, hour, minute)
         # Only "today"/"tonight" can land in the past, and the two ways they get
         # there want opposite answers.
         #
@@ -354,7 +442,7 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
         # clock, and the next occurrence of that time is the reading the bare-time
         # branch below already uses for "16:00" — so it stays consistent with it.
         if target <= local_now:
-            target = local_now if not rest else target + timedelta(days=1)
+            target = local_now if not rest else at(day + timedelta(days=1), hour, minute)
         return _to_utc(target)
 
     # Absolute: ISO-ish date, optionally with a time.
@@ -367,7 +455,7 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
             continue
         if fmt == "%Y-%m-%d":
             dt = dt.replace(hour=_DEFAULT_HOUR)
-        return _to_utc(dt)
+        return _to_utc(_localize(dt, tzi))
 
     # A bare time of day: the next occurrence of it.
     try:
@@ -375,11 +463,11 @@ def parse_when(text: str, now: datetime | None = None) -> datetime:
     except ValueError:
         raise ValueError(
             f"could not read a time from {text!r} — try '2026-08-14 09:00', "
-            "'tomorrow 9am', 'friday', or '+2h'"
+            "'tomorrow 9am', 'friday', '1st of the month 8am', or '+2h'"
         ) from None
-    target = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    target = at(local_now.date(), hour, minute)
     if target <= local_now:
-        target += timedelta(days=1)
+        target = at(local_now.date() + timedelta(days=1), hour, minute)
     return _to_utc(target)
 
 
@@ -413,38 +501,65 @@ def _parse_due(value: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _add_wall_clock(moment: datetime, step: timedelta) -> datetime:
-    """Add ``step`` to ``moment`` on the LOCAL wall clock, returned in UTC.
+def _add_wall_clock(moment: datetime, step: timedelta, tz: tzinfo | None = None) -> datetime:
+    """Add ``step`` to ``moment`` on the wall clock of ``tz`` (the host's local zone
+    when None), returned in UTC.
 
-    The arithmetic is done on the naive local time and the zone re-attached
+    The arithmetic is done on the naive wall time and the zone re-attached
     afterwards, which is the whole trick: adding to the aware value carries the
     offset that was in force at ``moment`` across a transition, so 09:00 the day
     before the clocks change becomes 08:00 or 10:00 the day after.
     """
-    local = moment.astimezone().replace(tzinfo=None)
-    return (local + step).astimezone().astimezone(timezone.utc)
+    local = _as_local(moment, tz).replace(tzinfo=None)
+    return _localize(local + step, tz).astimezone(timezone.utc)
 
 
-def next_due(due: datetime, repeat: str) -> datetime | None:
+def next_due(
+    due: datetime, repeat: str, tz: str | None = None, anchor_day: int | None = None
+) -> datetime | None:
     """The following occurrence after ``due``, or None when the task is done.
 
     Advanced from the scheduled time and rolled forward until it is in the future:
     a machine that was asleep for three days resumes on the next real occurrence
     rather than firing three catch-up runs of a daily task.
 
-    Day-and-longer repeats step the LOCAL wall clock, honouring this module's
-    promise that a task is scheduled against the clock the user is looking at. A
-    fixed delta on the stored UTC instant would move "daily 09:00" to 08:00 (or
-    10:00) on the day a DST transition falls between two runs — and leave it
-    there, because every later occurrence is computed from the drifted one.
+    Day-and-longer repeats step the wall clock of the task's zone (``tz``, else the
+    host's), honouring this module's promise that a task is scheduled against the
+    clock the user is looking at. A fixed delta on the stored UTC instant would
+    move "daily 09:00" to 08:00 (or 10:00) on the day a DST transition falls
+    between two runs — and leave it there, because every later occurrence is
+    computed from the drifted one.
 
     ``hourly`` is the exception and stays fixed in real time: it names a duration,
     not a time of day, so on the two transition days a wall-clock hour would mean
     either a skipped run or the same hour run twice.
+
+    ``monthly`` lands on ``anchor_day`` (the day it was first scheduled for) in
+    every month that has one, and on the last day of any month that doesn't — so
+    a task on the 31st runs Jan 31, Feb 28, Mar 31, rather than drifting to the
+    28th for good after the first short month.
     """
     repeat = (repeat or "once").strip().lower()
     if repeat not in REPEATS or repeat == "once":
         return None
+    tzi = zone(tz)
+    now = now_utc()
+    if repeat in ("monthly", "monthly-first-weekday"):
+        local = _as_local(due, tzi)
+        clock = dtime(local.hour, local.minute)
+        anchor = int(anchor_day or local.day)
+
+        def month_after(moment: datetime) -> datetime:
+            cur = _as_local(moment, tzi)
+            y, mo = _add_months(cur.year, cur.month, 1)
+            day = _first_weekday(y, mo) if repeat == "monthly-first-weekday" else (
+                _month_day(y, mo, anchor))
+            return _localize(datetime.combine(day, clock), tzi).astimezone(timezone.utc)
+
+        nxt = month_after(due)
+        while nxt <= now:
+            nxt = month_after(nxt)
+        return nxt
     step = {
         "hourly": timedelta(hours=1),
         "daily": timedelta(days=1),
@@ -452,23 +567,50 @@ def next_due(due: datetime, repeat: str) -> datetime | None:
         "weekly": timedelta(weeks=1),
     }[repeat]
     advance = (lambda m: m + step) if repeat == "hourly" else (
-        lambda m: _add_wall_clock(m, step)
+        lambda m: _add_wall_clock(m, step, tzi)
     )
     nxt = advance(due)
-    now = now_utc()
     while nxt <= now:
         nxt = advance(nxt)
     if repeat == "weekdays":
-        while nxt.astimezone().weekday() >= 5:  # local Sat/Sun -> next Monday
+        while _as_local(nxt, tzi).weekday() >= 5:  # Sat/Sun in the task's zone -> Monday
             nxt = advance(nxt)
     return nxt
+
+
+def _next_for(task: dict[str, Any], due: datetime) -> datetime | None:
+    return next_due(due, str(task.get("repeat") or "once"), task.get("tz") or None,
+                    task.get("anchor_day"))
+
+
+def _give_up_on_this_run(t: dict[str, Any], now: datetime) -> bool:
+    """A run has failed ``MAX_ATTEMPTS`` times. Returns whether the task goes on.
+
+    A one-shot is parked as ``error``. A RECURRING task skips this occurrence and
+    stays scheduled: parking it would make one bad day — a provider outage, a
+    market-data blip three times running — the end of the daily report for good,
+    silently, on an agent whose whole point is that it keeps running.
+    """
+    nxt = _next_for(t, _parse_due(t.get("due")) or now)
+    if nxt is None:
+        t["status"] = "error"
+        return False
+    t["status"] = "pending"
+    t["due"] = nxt.isoformat()
+    t["attempts"] = 0
+    t["missed_runs"] = int(t.get("missed_runs") or 0) + 1
+    return True
 
 
 def describe(task: dict[str, Any]) -> str:
     """One line for a listing — local time, since that's the clock the user set it
     against, with the repeat and last outcome when there is one."""
     due = _parse_due(task.get("due"))
-    when = due.astimezone().strftime("%Y-%m-%d %H:%M") if due else "?"
+    try:
+        tzi = zone(task.get("tz") or None)
+    except ValueError:
+        tzi = None
+    when = _as_local(due, tzi).strftime("%Y-%m-%d %H:%M %Z").strip() if due else "?"
     bits = [f"[{task.get('id')}] {when}"]
     repeat = (task.get("repeat") or "once").lower()
     if repeat != "once":
@@ -500,22 +642,42 @@ def add_task(
     repeat: str = "once",
     channel: str = "",
     session: str = "",
+    *,
+    tz: str = "",
+    kind: str = "prompt",
+    job: str = "",
+    options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Store a task and return it. Raises ValueError on an unreadable time.
 
     Each task gets its own session id by default, so a scheduled run starts from a
     clean conversation instead of inheriting whatever the interactive session was
     talking about — and so two tasks can never compact each other's history.
+
+    ``tz`` pins the task's wall clock to an IANA zone; ``kind="job"`` with a ``job``
+    name makes it run a registered job instead of a model turn on ``prompt``.
     """
-    due = parse_when(when)
+    zone(tz)  # validate before anything is stored
+    due = parse_when(when, tz=tz or None)
     rep = (repeat or "once").strip().lower()
     if rep not in REPEATS:
         raise ValueError(f"repeat must be one of: {', '.join(REPEATS)}")
     if not (prompt or "").strip():
         raise ValueError("a task needs a prompt")
+    if rep == "weekdays":
+        # "16:45 on weekdays" asked on a Friday evening must first run on Monday,
+        # not on the Saturday that happens to be the next 16:45.
+        tzi = zone(tz or None)
+        while _as_local(due, tzi).weekday() >= 5:
+            due = _add_wall_clock(due, timedelta(days=1), tzi)
+    knd = (kind or "prompt").strip().lower()
+    if knd not in KINDS:
+        raise ValueError(f"kind must be one of: {', '.join(KINDS)}")
+    if knd == "job" and not (job or "").strip():
+        raise ValueError("a job task needs a job name")
     with _locked():
         items = load_tasks()
-        task = {
+        task: dict[str, Any] = {
             "id": _next_id(items),
             "prompt": prompt.strip(),
             "due": due.isoformat(),
@@ -530,6 +692,15 @@ def add_task(
             "last_ok": None,
             "last_result": "",
         }
+        if tz:
+            task["tz"] = tz
+        if rep == "monthly":
+            task["anchor_day"] = _as_local(due, zone(tz or None)).day
+        if knd == "job":
+            task["kind"] = "job"
+            task["job"] = job.strip()
+            if options:
+                task["options"] = dict(options)
         task["session"] = (session or "").strip() or f"task-{task['id']}"
         items.append(task)
         save_tasks(items)
@@ -628,8 +799,8 @@ def claim_due(now: datetime | None = None, limit: int | None = None) -> list[dic
                     f"(claim expired after {claim_timeout_minutes()} minutes)"
                 )
                 if t["attempts"] >= MAX_ATTEMPTS:
-                    t["status"] = "error"
                     t.pop("claimed_at", None)
+                    _give_up_on_this_run(t, now)
                     continue
             elif status != "pending":
                 continue
@@ -680,10 +851,11 @@ def record_result(task_id: str, ok: bool, result: str, now: datetime | None = No
             t["last_run"] = now.isoformat()
             t["last_ok"] = bool(ok)
             t["last_result"] = (result or "")[:_RESULT_SNIPPET]
+            exhausted = False
             if ok:
                 t["attempts"] = 0
                 due = _parse_due(t.get("due")) or now
-                nxt = next_due(due, str(t.get("repeat") or "once"))
+                nxt = _next_for(t, due)
                 if nxt is None:
                     t["status"] = "done"
                 else:
@@ -691,9 +863,16 @@ def record_result(task_id: str, ok: bool, result: str, now: datetime | None = No
                     t["due"] = nxt.isoformat()
             else:
                 t["attempts"] = int(t.get("attempts") or 0) + 1
-                t["status"] = "pending" if t["attempts"] < MAX_ATTEMPTS else "error"
+                if t["attempts"] < MAX_ATTEMPTS:
+                    t["status"] = "pending"
+                else:
+                    exhausted = True
+                    _give_up_on_this_run(t, now)
             save_tasks(items)
-            return t
+            # `exhausted` is for the caller, not the store: this run is over and
+            # its failure should be reported now, even though a recurring task is
+            # "pending" again (for its next occurrence).
+            return dict(t, exhausted=True) if exhausted else t
     return None
 
 
@@ -763,7 +942,9 @@ def purge(keep_errors: bool = True) -> int:
 # --- Model-facing tools --------------------------------------------------------
 
 
-def schedule_task(prompt: str, when: str, repeat: str = "once", channel: str = "") -> str:
+def schedule_task(
+    prompt: str, when: str, repeat: str = "once", channel: str = "", time_zone: str = ""
+) -> str:
     """Create a scheduled task that runs later and pushes its answer to the user.
 
     Call this for ANY request about a future moment: 'monitor NOMD earnings
@@ -776,21 +957,26 @@ def schedule_task(prompt: str, when: str, repeat: str = "once", channel: str = "
     ``prompt`` is the instruction the future run receives — write it standalone, as
     if to a fresh assistant that cannot see this conversation ("NOMD reported Q3 on
     Aug 13; pull actual EPS/revenue vs consensus and give a buy/hold/sell").
-    ``when`` accepts '2026-08-14 09:00', 'tomorrow 9am', 'friday', '+2h'.
-    ``repeat`` is once (default), hourly, daily, weekdays or weekly.
+    ``when`` accepts '2026-08-14 09:00', 'tomorrow 9am', 'friday', '+2h',
+    '1st of the month 8am', 'first weekday of the month 8am'.
+    ``repeat`` is once (default), hourly, daily, weekdays, weekly, monthly or
+    monthly-first-weekday.
+    ``time_zone`` (IANA, e.g. 'America/New_York') pins the clock — use it for
+    anything tied to a market's hours; blank means the user's local time.
     ``channel`` is a delivery channel name (e.g. 'telegram'); blank sends to every
     configured one. Manage with `list_scheduled_tasks` / `cancel_scheduled_task`.
     """
     try:
-        task = add_task(prompt, when, repeat, channel)
+        task = add_task(prompt, when, repeat, channel, tz=time_zone)
     except ValueError as exc:
         return f"Could not schedule that: {exc}"
-    due_local = (_parse_due(task["due"]) or now_utc()).astimezone()
+    due_local = _as_local(_parse_due(task["due"]) or now_utc(), zone(time_zone or None))
     from . import channels
 
     where = channels.describe_targets(task["channel"])
     return (
-        f"Scheduled [{task['id']}] for {due_local:%Y-%m-%d %H:%M} local"
+        f"Scheduled [{task['id']}] for {due_local:%Y-%m-%d %H:%M} "
+        f"{time_zone or 'local'}"
         f"{'' if task['repeat'] == 'once' else ', repeating ' + task['repeat']}. "
         f"The answer will be sent to {where}."
         # Never promise a delivery nothing will make: a queued task with no runner
