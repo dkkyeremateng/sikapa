@@ -824,6 +824,43 @@ week twice. `--reports-setup` schedules the default jobs that apply to this
 install and aren't already scheduled. It's safe to re-run, and the server runs
 it on first start.
 
+### Daily, weekly and monthly reports
+
+Three scheduled reports, built as **jobs**. Code resolves the period, fetches
+the data and computes every figure; the model only writes the commentary.
+`--reports-setup` schedules them, together with a model-free Flex sync at 16:45
+New York so each report reads fresh positions:
+
+| Report | When | Covers | Model |
+|---|---|---|---|
+| Daily close | weekdays 17:15 New York | the session just closed: your holdings, indexes, sectors, rates/dollar/oil/gold/VIX, movers, earnings and ex-dividends in the next 7 days, open calls that have moved past ±10% | quick tier, ≤120 words |
+| Weekly | Saturday 09:00, your zone | the week from the close before Monday to Friday's: what carried it (P/L by holding), vs the S&P 500, sectors, the account's time-weighted return where the Flex file reaches, next week's calendar, calls settled | primary, 3–5 bullets |
+| Monthly | first weekday 08:00, your zone | last calendar month: the performance review, the track record of the agent's own ideas by conviction, plus the sections other features add | primary, 4–6 bullets |
+
+Every figure is labelled with what it measured. "Your holdings −1.11%" is the
+price move of the positions on file between two named closes. It excludes
+cash, options and trades since the statement, and it isn't the account's
+return, which comes from the IBKR file where that file covers the window. If
+the file covers only part of a month, the title says so and the S&P beside it
+covers the same days. Windows are labelled from the session they really start
+on (the Friday before a Monday, not a Sunday with no close). The period comes
+from the schedule, so a weekly report that runs late still covers its week.
+The report ledger sends each period once, and a daily report on a market
+holiday sends nothing.
+
+**The commentary is checked.** Every number in it must round from a figure on
+the sheet. The model may write "0.8%" for the sheet's 0.84%, but may not compute
+a difference or an average. A draft that does is retried once with the
+offending figures named, and if it still does, the report goes out without
+commentary and says why.
+
+On demand: `/report daily|weekly|monthly` from the phone,
+`--report weekly [--no-deliver]` from the shell, or ask in chat ("send me
+last month's report"), which calls the `periodic_report` tool. A daily, weekly
+or monthly report assembled by hand through `render_report` is refused, the
+same way a hand-built review is. Set `FRA_DAILY_PDF=1` to get the daily as a
+PDF too.
+
 ### Delivery channels
 
 Channels are a registry (`channels.py`) in the same shape as the

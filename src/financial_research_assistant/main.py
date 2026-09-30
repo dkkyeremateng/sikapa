@@ -103,6 +103,19 @@ def cli() -> None:
         ),
     )
     parser.add_argument(
+        "--report",
+        choices=["daily", "weekly", "monthly"],
+        help=(
+            "build the latest daily/weekly/monthly report now (figures computed, "
+            "commentary by the model), send its files, print its message, and exit"
+        ),
+    )
+    parser.add_argument(
+        "--no-deliver",
+        action="store_true",
+        help="with --report: build and print it, but send nothing",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="with --status: exit code only (for container health checks)",
@@ -344,6 +357,13 @@ def _run_subcommand(args: argparse.Namespace) -> int | None:
         from . import scheduler
 
         asyncio.run(scheduler.serve(fake=args.fake))
+        return 0
+
+    if args.report:
+        from . import periodic
+
+        print(asyncio.run(periodic.report_now(
+            args.report, deliver=not args.no_deliver, fake=args.fake)))
         return 0
 
     if args.reports_setup:

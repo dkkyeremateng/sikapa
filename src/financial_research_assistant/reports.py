@@ -1142,6 +1142,28 @@ _STOCK_REFUSAL = (
 # --- Model-facing tool ---------------------------------------------------------
 
 
+_PERIODIC_RE = re.compile(
+    r"\b(daily|weekly|monthly)\s+(report|brief|recap|wrap|close|summary|update)\b"
+    r"|\bweek\s+in\s+review\b|\bmonth\s+in\s+review\b|\bend[- ]of[- ](day|week|month)\b",
+    re.IGNORECASE,
+)
+
+_PERIODIC_REFUSAL = (
+    "NOT RENDERED — this is one of the scheduled reports, and those are built from "
+    "computed figures: call `periodic_report(kind)` with kind daily, weekly or "
+    "monthly. It resolves the period, computes every figure with its window, adds "
+    "your commentary check and sends the PDF. Building it here would mean typing "
+    "the figures, which is how wrong numbers reached delivered sheets before."
+)
+
+
+def _looks_like_a_periodic_report(title: str, subtitle: str) -> bool:
+    """A hand-built daily/weekly/monthly report. The scheduled ones never pass
+    through here — they render with ``render`` directly — so the title alone is a
+    safe signal: nothing legitimate calls this with "Weekly Report" on it."""
+    return bool(_PERIODIC_RE.search(f"{title} {subtitle}"))
+
+
 def render_report(
     title: str,
     markdown: str,
@@ -1227,6 +1249,10 @@ def render_report(
     if (not _rendering_stock.get()
             and _looks_like_a_stock_report(title, subtitle, highlights)):
         return _STOCK_REFUSAL
+    # And the daily / weekly / monthly reports, which `periodic_report` builds
+    # from computed figures. See `_looks_like_a_periodic_report`.
+    if _looks_like_a_periodic_report(title, subtitle):
+        return _PERIODIC_REFUSAL
 
     # Refuse a chartless body rather than shipping a cover of tiles and text.
     # A narrative report is a legitimate outcome, but it should be a decision:

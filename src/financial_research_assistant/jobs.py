@@ -184,14 +184,9 @@ def register_default_job(job: DefaultJob) -> None:
 def _load_job_modules() -> None:
     """Import the modules that register jobs, so the registry and the default
     schedule are complete before either is read."""
-    import importlib
+    from . import hooks
 
-    for name in ("periodic", "recommend"):
-        try:
-            importlib.import_module(f"{__package__}.{name}")
-        except ModuleNotFoundError as exc:
-            if exc.name != f"{__package__}.{name}":
-                raise
+    hooks.load_feature_modules()
 
 
 def ensure_default_jobs() -> list[tuple[str, dict[str, Any] | None, str]]:

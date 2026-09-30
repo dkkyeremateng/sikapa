@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from .catalog import active_tools, capabilities
+from .messages import message_text  # noqa: F401 - re-exported; long-standing import path
 from .llm import _make_llm, quick_llm, resolved_model
 from .tools import ibkr_tools_session
 from .tools import think as think_tool  # aliased: `think` the param shadows it below
@@ -686,31 +687,6 @@ SUMMARY_SYSTEM_PROMPT = (
 )
 
 
-def message_text(message: BaseMessage) -> str:
-    """The readable text of a chat message, whichever shape the provider used.
-
-    A string is the common case. Anthropic-style providers instead report content
-    as a LIST of typed blocks — text, thinking, tool_use, and whatever a future
-    model adds — and ``str()`` on that list yields a Python repr: the answer
-    wrapped in dict syntax, with the model's raw chain-of-thought and tool
-    arguments alongside it. That repr then leaks wherever the text was headed (a
-    subagent's findings, a compaction seed, the answer read back from state), so
-    the text blocks are picked out and concatenated instead. Non-text blocks are
-    dropped rather than summarized: they are the model's working, and every caller
-    here wants what it SAID.
-    """
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return str(content) if content else ""
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict):
-            parts.append(block.get("text", ""))
-    return "".join(parts)
 
 
 def _render_transcript(messages: list[BaseMessage]) -> str:
