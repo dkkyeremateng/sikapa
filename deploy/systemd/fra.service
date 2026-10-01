@@ -13,12 +13,17 @@ Requires=docker.service
 Type=simple
 # A container left over from a crash would hold the name and fail the start.
 ExecStartPre=-/usr/bin/docker rm -f fra
+# Host-specific `docker run` flags, e.g. FRA_DOCKER_ARGS=--dns 1.1.1.1 --dns 8.8.8.8
+# where the provider's resolvers fail a name the agent needs (IBKR's Flex
+# download host, on one VPS). Optional: unset, it adds nothing.
+EnvironmentFile=-/etc/fra/docker.env
 # No -p/--publish: nothing listens. Telegram is long-polled outbound, and every
 # model/market-data call is outbound too.
 ExecStart=/usr/bin/docker run --rm --name fra \
     --env-file /etc/fra/env \
     -v /srv/fra/data:/home/app/.financial-research-assistant \
     --tmpfs /tmp \
+    $FRA_DOCKER_ARGS \
     fra:latest --serve
 # `--serve` stops claiming work on SIGTERM and lets a running turn finish; give
 # it room before docker escalates to SIGKILL.

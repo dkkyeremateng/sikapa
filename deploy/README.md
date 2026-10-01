@@ -93,6 +93,17 @@ sudo docker exec fra financial-research-assistant --reports-setup   # the defaul
 
 Then send `/status` to your bot from your phone.
 
+**If a host name won't resolve in the container.** Some VPS providers' resolvers
+fail names the agent needs. One returned SERVFAIL for IBKR's Flex download host
+(`gdcdyn.interactivebrokers.com`), so every Flex sync failed with "Temporary
+failure in name resolution". Check with `dig @<resolver> <name>` against
+`dig @1.1.1.1 <name>`, then give just this container public resolvers:
+
+```bash
+echo 'FRA_DOCKER_ARGS=--dns 1.1.1.1 --dns 8.8.8.8' | sudo tee /etc/fra/docker.env
+sudo systemctl restart fra
+```
+
 ## 6. Knowing when it's down
 
 A process that has died can't report its own death, so liveness is checked
