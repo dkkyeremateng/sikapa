@@ -1239,3 +1239,71 @@ def test_the_oauth_path_still_builds_when_the_package_is_there():
     params = client._client_params
     assert params["auth_token"] == "tok-abc"
     assert params["api_key"] is None
+
+
+# --- the model list, asked of the provider after sign-in ----------------------
+
+
+def _serve_models(monkeypatch, payload):
+    """Answer the provider's model-list request with ``payload``."""
+    from financial_research_assistant import provider_models
+
+    monkeypatch.setattr(provider_models, "_get", lambda url, headers, timeout=15.0: payload)
+
+
+def test_a_gateway_login_offers_its_newest_model(monkeypatch):
+    _serve_models(monkeypatch, {"data": [
+        {"id": "auto", "created": 0},
+        {"id": "gw/model-new", "created": 1_790_000_000, "context_length": 400000},
+        {"id": "gw/model-old", "created": 1_700_000_000},
+    ]})
+    said = []
+    cb = oauth.LoginCallbacks(on_secret=lambda _q: "sk-gw", on_status=said.append,
+                              on_prompt=_answer(**{"base url": "https://gateway.example/v1"}))
+    cred = oauth.get("openai-key").login(cb)
+    assert [m["name"] for m in cred["models"]] == ["gw/model-new"]
+    assert cred["models"][0]["context_window"] == 400000, "the gateway's window, not a guess"
+    assert any("best first: gw/model-new, gw/model-old, auto" in s for s in said)
+
+
+def test_a_failed_list_falls_back_to_the_built_in_defaults():
+    """Offline (the suite's default), the login still completes, and says why."""
+    said = []
+    cb = oauth.LoginCallbacks(on_secret=lambda _q: "sk-ant", on_status=said.append,
+                              on_prompt=lambda _q: "")
+    cred = oauth.get("anthropic-key").login(cb)
+    assert [m["name"] for m in cred["models"]] == oauth.get("anthropic-key").MODELS
+    assert any("couldn't load the model list" in s for s in said)
+
+
+def test_codex_offers_the_newest_model_after_sign_in(monkeypatch):
+    _serve_models(monkeypatch, {"models": [
+        {"slug": "gpt-5.5", "visibility": "list", "priority": 13, "context_window": 272000},
+        {"slug": "gpt-6.1-sol", "visibility": "list", "priority": 1, "context_window": 272000},
+        {"slug": "codex-auto-review", "visibility": "hide", "priority": 43},
+    ]})
+    order = []
+    real_ask = oauth.ask_models
+    monkeypatch.setattr(oauth, "ask_models", lambda cb, suggested, listed=None:
+                        order.append("models") or real_ask(cb, suggested, listed))
+    posted = _patch_token_endpoint(monkeypatch, {"access_token": "a", "refresh_token": "r"})
+    monkeypatch.setattr(oauth, "LOGIN_TIMEOUT", 0.2)
+    cb = oauth.LoginCallbacks(on_auth=lambda _u: order.append("browser"),
+                              on_prompt=lambda q: "the-code" if "code" in q.lower() else "")
+    cred = oauth.get("codex").login(cb)
+    assert order == ["browser", "models"], "only the signed-in account can say what it is served"
+    assert posted["payload"]["code"] == "the-code"
+    assert [m["name"] for m in cred["models"]] == ["gpt-6.1-sol", "gpt-5.5"]
+    assert cred["models"][0]["context_window"] == 272000
+
+
+def test_a_claude_subscription_is_offered_only_its_newest_haiku(monkeypatch):
+    _serve_models(monkeypatch, {"data": [
+        {"id": "claude-opus-5-5", "created_at": "2026-08-20T00:00:00Z"},
+        {"id": "claude-haiku-5", "created_at": "2026-06-01T00:00:00Z"},
+        {"id": "claude-sonnet-5", "created_at": "2026-05-01T00:00:00Z"},
+        {"id": "claude-haiku-4-5-20251001", "created_at": "2025-10-01T00:00:00Z"},
+    ]})
+    cred, _posted, _url = _login_via_paste(oauth.get("anthropic"), monkeypatch,
+                                           {"access_token": "a", "refresh_token": "r"})
+    assert [m["name"] for m in cred["models"]] == ["claude-haiku-5", "claude-haiku-4-5-20251001"]

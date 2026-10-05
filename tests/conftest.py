@@ -62,6 +62,20 @@ def _never_actually_play_audio(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_ask_a_real_provider_for_its_models(monkeypatch):
+    """Every login now asks the provider for its model list, so a login test
+    would otherwise call the vendor with a fake key. Offline, the login falls back
+    to its built-in defaults, as it does on a real network failure; a test that
+    wants a list patches ``provider_models._get`` itself."""
+    from financial_research_assistant import provider_models
+
+    def offline(url, headers, timeout=15.0):
+        raise OSError(f"no network in tests: {url}")
+
+    monkeypatch.setattr(provider_models, "_get", offline)
+
+
+@pytest.fixture(autouse=True)
 def _never_touch_the_real_task_store(tmp_path_factory, monkeypatch):
     """Point every test at a throwaway tasks.json and journal.json, and unset the
     delivery channels.

@@ -333,11 +333,6 @@ class OpenRouterProvider:
     CONTEXT_WINDOW: int | None = None
 
     def login(self, cb: LoginCallbacks) -> dict[str, Any]:
-        models = ask_models(cb, self.MODELS)
-        window = ask_context_window(
-            cb, suggested_window([m["name"] for m in models], self.CONTEXT_WINDOW)
-        )
-        models = apply_window(models, window)
         verifier, challenge = pkce_pair()
         # No state to compare: this authorize endpoint takes `callback_url` and the
         # challenge, and nothing else — a parameter it does not know is a parameter
@@ -375,17 +370,24 @@ class OpenRouterProvider:
         key = (resp or {}).get("key")
         if not key:
             raise LoginError("OpenRouter returned no key")
-        cred = {
+        cred: dict[str, Any] = {
             "provider": self.name,
             "type": "api_key",
             "key": key,
             # Pinned so the key is never paired with a stale OPENAI_API_BASE —
             # see graph._credentials.
             "base_url": self.BASE_URL,
-            "models": models,
         }
+        models = ask_models(cb, self.MODELS, listed_models(cb, self, cred))
+        window = ask_context_window(cb, window_hint(models, self.CONTEXT_WINDOW))
+        cred["models"] = apply_window(models, window)
         stash_window(cred, models, window)
         return cred
+
+    def list_models(self, cred: dict[str, Any]) -> list[dict[str, Any]]:
+        from . import provider_models
+
+        return provider_models.openai_compatible(self.BASE_URL, cred["key"])
 
     def refresh(self, cred: dict[str, Any]) -> dict[str, Any]:
         return cred  # a minted key does not expire
@@ -527,11 +529,6 @@ class _SubscriptionProvider:
         if self.login_warning:
             cb.on_status(self.login_warning)
         self.client_credentials()  # an unconfigured client fails before any prompt
-        models = ask_models(cb, self.MODELS)
-        window = ask_context_window(
-            cb, suggested_window([m["name"] for m in models], self.CONTEXT_WINDOW)
-        )
-        models = apply_window(models, window)
         verifier, challenge = pkce_pair()
         # `state` is public and the verifier is not. state rides in the authorize
         # URL and comes back through the redirect, so it lands in browser history,
@@ -575,7 +572,12 @@ class _SubscriptionProvider:
             raise LoginError(f"could not exchange the code: {exc}") from exc
         if not token.get("access_token"):
             raise LoginError(f"{self.name} returned no access token")
-        cred = self._credential(token, models)
+        # Models are chosen after sign-in: only the token can say which models
+        # this account is actually served.
+        cred = self._credential(token, [])
+        models = ask_models(cb, self.MODELS, listed_models(cb, self, cred))
+        window = ask_context_window(cb, window_hint(models, self.CONTEXT_WINDOW))
+        cred["models"] = apply_window(models, window)
         stash_window(cred, models, window)
         return cred
 
@@ -631,6 +633,14 @@ class AnthropicSubscriptionProvider(_SubscriptionProvider):
     # is on a promotional-credit flag rather than the balance. Defaulting to a
     # model that cannot answer would make every login look broken.
     MODELS = ["claude-haiku-4-5-20251001"]
+
+    def list_models(self, cred: dict[str, Any]) -> list[dict[str, Any]]:
+        from . import provider_models
+
+        # The newest Haiku, for the reason above: the list also names Sonnet and
+        # Opus, which this token is refused.
+        return [m for m in provider_models.anthropic(oauth_token=cred["access"])
+                if "haiku" in m["name"]]
 
 
 class GoogleSubscriptionProvider(_SubscriptionProvider):
@@ -709,19 +719,39 @@ class CodexSubscriptionProvider(_SubscriptionProvider):
         fresh.setdefault("account_id", cred.get("account_id", ""))
         return fresh
 
+    def list_models(self, cred: dict[str, Any]) -> list[dict[str, Any]]:
+        from . import provider_models
 
-def ask_models(cb: LoginCallbacks, suggested: list[str]) -> list[dict[str, Any]]:
+        return provider_models.codex(self.API_BASE, cred["access"], cred.get("account_id", ""))
+
+
+def ask_models(
+    cb: LoginCallbacks, suggested: list[str], listed: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Ask which models this credential should offer; the first is its default.
 
     Asked at login because the answer belongs with the credential: a model name is
     only meaningful alongside the key that can serve it. Blank keeps the suggested
     list, so the common case is one Enter.
 
+    ``listed`` is what the provider said this credential can use, best first (see
+    ``provider_models``). When there is one, its first entry becomes the default,
+    followed by any built-in suggestion it still serves. The provider's context
+    window for a model then outranks the built-in table's.
+
     Each name is returned as a config dict with per-1M costs filled in from the
     built-in table where it knows them — which is the "set by default for
     non-OpenAI providers" case, since those are the models the table covers. A
     gateway model it has never heard of gets a bare entry to fill in by hand.
     """
+    windows: dict[str, int] = {}
+    if listed:
+        available = [m["name"] for m in listed]
+        windows = {m["name"]: m["context_window"] for m in listed if m.get("context_window")}
+        more = f" (+{len(available) - 5} more)" if len(available) > 5 else ""
+        cb.on_status(f"{len(available)} model(s) available, best first: "
+                     f"{', '.join(available[:5])}{more}")
+        suggested = [available[0]] + [n for n in suggested if n in available and n != available[0]]
     hint = ", ".join(suggested) if suggested else "none configured"
     answer = (cb.on_prompt(f"models, comma-separated [{hint}]: ") or "").strip()
     names: list[str] = []
@@ -730,7 +760,35 @@ def ask_models(cb: LoginCallbacks, suggested: list[str]) -> list[dict[str, Any]]
             name = part.strip()
             if name and name not in names:
                 names.append(name)
-    return [_model_config_for(n) for n in (names or suggested)]
+    configs = [_model_config_for(n) for n in (names or suggested)]
+    return [{**c, "context_window": windows[c["name"]]} if c["name"] in windows else c
+            for c in configs]
+
+
+def window_hint(models: list[dict[str, Any]], declared: int | None) -> int | None:
+    """The context window to offer at login: the first chosen model's (already
+    the provider's figure, or the built-in table's), else the provider constant."""
+    for model in models:
+        window = model.get("context_window")
+        if isinstance(window, int) and window > 0:
+            return window
+    return declared
+
+
+def listed_models(cb: LoginCallbacks, provider: Any, cred: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Ask the provider which models ``cred`` can use. A provider that has no way to
+    say returns None; a failure is reported and also returns None, so the login
+    falls back to the built-in defaults rather than failing over a model list."""
+    lister = getattr(provider, "list_models", None)
+    if lister is None:
+        return None
+    try:
+        listed = lister(cred)
+    except Exception as exc:  # network, HTTP error, an unexpected shape
+        cb.on_status(f"couldn't load the model list ({type(exc).__name__}: "
+                     f"{str(exc)[:120]}); offering the defaults")
+        return None
+    return listed or None
 
 
 def _model_config_for(name: str) -> dict[str, Any]:
@@ -786,23 +844,6 @@ def apply_window(models: list[dict[str, Any]], window: int | None) -> list[dict[
     if not window:
         return models
     return [{**m, "context_window": window} for m in models]
-
-
-def suggested_window(models: list[str], declared: int | None) -> int | None:
-    """What to offer as the context window at login.
-
-    The built-in table first: it is keyed per model and already correct for public
-    names, whereas anything declared here is one value for a credential that may
-    serve models with different windows. A provider constant is the fallback for a
-    vendor the table has never heard of.
-    """
-    from .pricetables import known_context
-
-    for model in models:
-        known = known_context(model)
-        if known:
-            return known
-    return declared
 
 
 def ask_context_window(cb: LoginCallbacks, suggested: int | None) -> int | None:
@@ -986,13 +1027,30 @@ class ApiKeyProvider:
             if base:
                 cred["base_url"] = base
                 cb.on_status(f"models served by {base}")
-        models = ask_models(cb, self.MODELS)
-        window = ask_context_window(
-            cb, suggested_window([m["name"] for m in models], self.CONTEXT_WINDOW)
-        )
+        models = ask_models(cb, self.MODELS, listed_models(cb, self, cred))
+        window = ask_context_window(cb, window_hint(models, self.CONTEXT_WINDOW))
         cred["models"] = apply_window(models, window)
         stash_window(cred, models, window)
         return cred
+
+    #: Where each lane lists its models; the OpenAI lane uses the chosen endpoint.
+    _LIST_BASE = {"groq": "https://api.groq.com/openai/v1"}
+
+    def list_models(self, cred: dict[str, Any]) -> list[dict[str, Any]] | None:
+        from . import provider_models
+
+        key = str(cred.get("key", ""))
+        if key.startswith("!"):
+            return None  # a command is run when the key is used, not to list models
+        if key.startswith("$"):
+            key = os.environ.get(key[1:].strip("{}"), "")
+        if self.MODEL_PROVIDER == "anthropic":
+            return provider_models.anthropic(key=key)
+        if self.MODEL_PROVIDER == "google_genai":
+            return provider_models.google(key)
+        base = (self._LIST_BASE.get(self.MODEL_PROVIDER) or str(cred.get("base_url") or "")
+                or os.environ.get("OPENAI_API_BASE") or "https://api.openai.com/v1")
+        return provider_models.openai_compatible(base, key)
 
     def refresh(self, cred: dict[str, Any]) -> dict[str, Any]:
         return cred  # an API key does not expire
@@ -1061,8 +1119,9 @@ register(ApiKeyProvider(
     console="https://console.groq.com/keys",
 ))
 register(ApiKeyProvider(
-    # No MODEL: OPENAI_MODEL already names the model for this lane, and pinning
-    # one here would silently override it.
+    # No built-in MODEL: a gateway can serve anything. The login offers the
+    # endpoint's own newest model; when its list can't be loaded, nothing is
+    # pinned and OPENAI_MODEL keeps naming the model for this lane.
     "openai-key", "OpenAI", "OpenAI or any compatible gateway — API key",
     "openai", [],
     ask_base_url=True, console="https://platform.openai.com/api-keys",
