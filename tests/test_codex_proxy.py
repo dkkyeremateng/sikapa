@@ -401,6 +401,46 @@ def test_make_llm_routes_codex_through_the_proxy(monkeypatch):
         codex_proxy.shutdown()
 
 
+@pytest.mark.parametrize("model", ["gpt-5.5-codex", "gpt-5.5"])
+def test_the_real_client_reaches_the_proxy_for_a_codex_model(model, monkeypatch):
+    """The test above swaps ChatOpenAI for a recorder, so it can't see which path
+    the real client calls. LangChain sends any model with "codex" in its name to
+    /v1/responses by itself, and the proxy answered that with a 404 HTML page as
+    the user's first message after `/login codex`. Here the real client talks to
+    the real proxy; only the ChatGPT backend is faked."""
+    auth.set_credential(
+        "default",
+        {"provider": "codex", "type": "oauth", "access": "tok",
+         "expires": 4_000_000_000_000, "base_url": "https://chatgpt.com/backend-api/codex"},
+    )
+    sent = []
+
+    def upstream(payload, cred, timeout=300.0):
+        sent.append(payload)
+        return iter([
+            {"type": "response.output_text.delta", "delta": "O"},
+            {"type": "response.output_text.delta", "delta": "K"},
+            {"type": "response.completed", "response": {}},
+        ])
+
+    monkeypatch.setattr(codex_proxy, "_upstream_events", upstream)
+    try:
+        reply = llm._make_llm(model).invoke("say OK")
+    finally:
+        codex_proxy.shutdown()
+    assert reply.content == "OK"
+    assert sent and sent[0]["model"] == model
+
+
+def test_only_the_proxy_gets_chat_completions_pinned(monkeypatch):
+    """On OpenAI itself codex models are Responses-only, so the pin must not
+    leak to an ordinary endpoint."""
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    plain = llm._make_llm("gpt-5.5-codex", api_key="sk-test")
+    assert plain._use_responses_api({}) is True
+    assert not codex_proxy.serves("https://api.openai.com/v1")
+
+
 # --- who may talk to the proxy ------------------------------------------------
 
 

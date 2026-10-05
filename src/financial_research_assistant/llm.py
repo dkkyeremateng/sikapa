@@ -322,13 +322,20 @@ def _make_llm(
         from langchain_openai import ChatOpenAI
         from pydantic import SecretStr
 
+        from . import codex_proxy
+
         # A local server (llama.cpp / Ollama / LM Studio) needs no real key, but
         # the client insists on one being present.
         api_key = api_key or ("dummy" if base_url else None)
+        # The Codex proxy translates Chat Completions only, and LangChain on its
+        # own sends any model with "codex" in its name to /v1/responses, which the
+        # proxy answers with a bare 404 page. Elsewhere the choice stays
+        # LangChain's (None): on OpenAI itself those models are Responses-only.
         return ChatOpenAI(
             model=model,
             base_url=base_url,
             api_key=SecretStr(api_key) if api_key else None,
+            use_responses_api=False if codex_proxy.serves(base_url) else None,
         )
     # Every provider below is an optional extra, so a missing package is the
     # expected first failure rather than an exceptional one. One wrapper covers

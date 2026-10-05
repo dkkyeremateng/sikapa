@@ -105,7 +105,7 @@ def to_responses_request(body: dict[str, Any]) -> dict[str, Any]:
         })
 
     payload = {
-        "model": body.get("model", "gpt-5.5-codex"),
+        "model": body.get("model", "gpt-5.5"),
         "instructions": "\n\n".join(t for t in instructions if t),
         "input": items,
         "stream": True,  # always stream upstream; we re-batch if the caller didn't ask
@@ -384,7 +384,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         wants_stream = bool(body.get("stream"))
-        translator = ResponseStreamTranslator(body.get("model", "gpt-5.5-codex"))
+        translator = ResponseStreamTranslator(body.get("model", "gpt-5.5"))
         try:
             events = _upstream_events(to_responses_request(body), cred)
             if wants_stream:
@@ -504,6 +504,13 @@ def ensure_running() -> str:
             _server.daemon_threads = True
             threading.Thread(target=_server.serve_forever, daemon=True).start()
         return f"http://127.0.0.1:{_server.server_port}/v1"
+
+
+def serves(base_url: str | None) -> bool:
+    """Whether ``base_url`` is this process's running proxy."""
+    with _lock:
+        return (_server is not None
+                and base_url == f"http://127.0.0.1:{_server.server_port}/v1")
 
 
 def shutdown() -> None:

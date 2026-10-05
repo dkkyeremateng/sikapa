@@ -689,7 +689,10 @@ class CodexSubscriptionProvider(_SubscriptionProvider):
     REDIRECT_PATH = "/auth/callback"
     # Reached through codex_proxy, which presents an OpenAI-compatible surface.
     MODEL_PROVIDER = "openai"
-    MODELS = ["gpt-5.5-codex"]
+    # What the backend serves a ChatGPT account (its /codex/models list, Oct
+    # 2026). The API's "-codex" names are refused there: "not supported when
+    # using Codex with a ChatGPT account".
+    MODELS = ["gpt-5.5"]
 
     @override
     def _credential(self, token: dict[str, Any], models: list[dict[str, Any]] | None = None) -> dict[str, Any]:
