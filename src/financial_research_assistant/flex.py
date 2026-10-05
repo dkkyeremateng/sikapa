@@ -34,12 +34,13 @@ secret — never passed through the model); the **query id** from
 from __future__ import annotations
 
 from typing import Any
+import json
 import os
 import re
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -842,3 +843,55 @@ def flex_sync(
     for warning in parsed.get("warnings") or []:
         out += f"\n  warning: {warning}"
     return out
+
+
+#: At most one on-demand Flex pull per this many minutes. IBKR throttles the
+#: Flex Web Service, and a holiday leaves the statement "stale" all day.
+REFRESH_EVERY_MINUTES = 30
+
+
+def _last_business_day(today: date) -> date:
+    """The weekday before ``today``: the newest day a nightly Flex statement can
+    cover. Exchange holidays aren't known here; the throttle covers them."""
+    day = today - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def refresh_if_stale(account: str = "", now: datetime | None = None) -> str:
+    """Pull a fresh Flex statement when the positions on file predate the last
+    business day, so a portfolio question is answered from the newest statement
+    IBKR has, not whatever was imported last. Most useful when the live broker
+    connection is down, since this needs no sign-in, only ``IBKR_FLEX_TOKEN``.
+
+    Returns a one-line note for the tool's output ("" when nothing was needed or
+    no Flex token is set). Never raises. Concurrent callers share one pull: the
+    second waits on the lock and then finds the statement fresh."""
+    from . import market, statements
+    from .storage import locked, read_json, state_file
+
+    if not (os.environ.get("IBKR_FLEX_TOKEN") and os.environ.get("IBKR_FLEX_QUERY_ID")):
+        return ""
+    clock = now or datetime.now(timezone.utc)
+    wanted = _last_business_day(market.ny_now(clock).date()).isoformat()
+    before = statements.positions_as_of(account or None)
+    if before and before >= wanted:
+        return ""
+    path = state_file("flex-refresh.json", "FRA_FLEX_REFRESH_FILE")
+    try:
+        with locked(path):
+            if (statements.positions_as_of(account or None) or "") >= wanted:
+                return ""  # another call refreshed it while this one waited
+            last = str(read_json(path, {}).get("attempted") or "")
+            if last and clock - datetime.fromisoformat(last) < timedelta(minutes=REFRESH_EVERY_MINUTES):
+                return ""
+            write_private(path, json.dumps({"attempted": clock.isoformat()}), prefix=".flex-refresh-")
+            out = flex_sync()
+    except Exception as exc:  # the lock or the state file; flex_sync itself never raises
+        return f"Couldn't refresh from IBKR Flex ({type(exc).__name__}: {exc}); using the statement on file."
+    if out.startswith("Fetched") and "could not be imported" not in out:
+        after = statements.positions_as_of(account or None)
+        return (f"Refreshed from IBKR Flex just now: positions as of {after or 'unknown'} "
+                f"(the statement on file was from {before or 'nothing imported'}).")
+    return f"Couldn't refresh from IBKR Flex ({out.splitlines()[0][:160]}); using the statement on file."

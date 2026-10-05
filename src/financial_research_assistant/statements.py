@@ -1629,6 +1629,47 @@ def allocation(account: str | None = None, fx: dict[str, Any] | None = None) -> 
     }
 
 
+def stale_days() -> int:
+    """Positions older than this many days get a warning (``FRA_STALE_POSITIONS_DAYS``, 5)."""
+    raw = (os.environ.get("FRA_STALE_POSITIONS_DAYS") or "").strip()
+    return int(raw) if raw.isdigit() else 5
+
+
+def staleness(book: dict[str, Any], on: date) -> str:
+    """A warning when the positions on file are older than ``stale_days`` at ``on``,
+    else "". A report computed on a book two months old is still correct about
+    those positions — it just isn't about the account any more, and must say so."""
+    if not book.get("as_of"):
+        return ""
+    try:
+        age = (on - date.fromisoformat(book["as_of"])).days
+    except ValueError:
+        return ""
+    if age <= stale_days():
+        return ""
+    return (f"⚠ The positions on file are from {book['as_of']} ({age} days old), so "
+            "holdings figures describe that book, not today's. The IBKR Flex sync "
+            "may be failing — check /runs.")
+
+
+def positions_as_of(account: str | None = None) -> str:
+    """The date the newest import's positions are AS OF (its period's end date,
+    ISO), for ``account`` or the newest import overall; "" when none is stored.
+    Every figure read from the store describes that day, so a tool must say it."""
+    for imp in list_imports():
+        if account and imp.get("account") != account:
+            continue
+        dates = []
+        for text in re.findall(r"[A-Z][a-z]+ \d{1,2}, \d{4}", str(imp.get("period") or "")):
+            try:
+                dates.append(datetime.strptime(text, "%B %d, %Y").date())
+            except ValueError:
+                continue
+        if dates:
+            return max(dates).isoformat()
+    return ""
+
+
 def list_imports() -> list[dict[str, Any]]:
     """Every stored import (account, period, counts), newest first."""
     if not db_path().exists():

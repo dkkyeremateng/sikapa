@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 from . import hooks, jobs
+from .statements import staleness
 
 KINDS = ("daily", "weekly", "monthly")
 
@@ -151,19 +152,7 @@ def _positions_as_of(account: str) -> str:
     A report built on a two-week-old statement must say so."""
     from . import statements
 
-    for imp in statements.list_imports():
-        if account and imp.get("account") != account:
-            continue
-        found = re.findall(r"[A-Z][a-z]+ \d{1,2}, \d{4}", str(imp.get("period") or ""))
-        dates = []
-        for text in found:
-            try:
-                dates.append(datetime.strptime(text, "%B %d, %Y").date())
-            except ValueError:
-                continue
-        if dates:
-            return max(dates).isoformat()
-    return ""
+    return statements.positions_as_of(account or None)
 
 
 #: IBKR asset categories priced from Yahoo, as the Activity CSV and the Flex XML
@@ -247,29 +236,6 @@ def _book_moves(book: dict[str, Any], series: dict[str, list[tuple[str, float]]]
         "dollars": total if usd else None,
         "pct": (total / base * 100) if base else None,
     }
-
-
-def stale_days() -> int:
-    """Positions older than this many days get a warning (``FRA_STALE_POSITIONS_DAYS``, 5)."""
-    raw = (os.environ.get("FRA_STALE_POSITIONS_DAYS") or "").strip()
-    return int(raw) if raw.isdigit() else 5
-
-
-def staleness(book: dict[str, Any], on: date) -> str:
-    """A warning when the positions on file are older than ``stale_days`` at ``on``,
-    else "". A report computed on a book two months old is still correct about
-    those positions — it just isn't about the account any more, and must say so."""
-    if not book.get("as_of"):
-        return ""
-    try:
-        age = (on - date.fromisoformat(book["as_of"])).days
-    except ValueError:
-        return ""
-    if age <= stale_days():
-        return ""
-    return (f"⚠ The positions on file are from {book['as_of']} ({age} days old), so "
-            "holdings figures describe that book, not today's. The IBKR Flex sync "
-            "may be failing — check /runs.")
 
 
 def _book_note(book: dict[str, Any]) -> str:

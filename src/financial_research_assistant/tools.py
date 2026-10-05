@@ -694,6 +694,24 @@ def portfolio_performance_chart(account: str = "") -> str:
     )
 
 
+def _snapshot_header(account: str = "") -> list[str]:
+    """Lines that open every answer read from the statement store: a Flex refresh
+    when the statement on file is out of date, the day the positions are AS OF,
+    and a warning if they are still old. Without the date, a stale book reads
+    exactly like a live one."""
+    from datetime import date
+
+    from . import flex, statements
+
+    lines = [note] if (note := flex.refresh_if_stale(account)) else []
+    as_of = statements.positions_as_of(account or None)
+    if as_of:
+        lines.append(f"Positions as of {as_of} (latest IBKR statement on file; not a live balance).")
+        if warning := statements.staleness({"as_of": as_of}, date.today()):
+            lines.append(warning)
+    return lines
+
+
 def query_portfolio(symbol: str = "", account: str = "") -> str:
     """Read the portfolio snapshot from the most recently imported IBKR statement
     (populated by `import_ibkr_statement`): open positions — each with quantity,
@@ -701,18 +719,23 @@ def query_portfolio(symbol: str = "", account: str = "") -> str:
     ISIN — plus the net-asset-value breakdown by asset class and the account's
     time-weighted return. ``symbol`` optionally filters positions to one ticker;
     ``account`` optionally picks which account (default: the newest import's).
-    Returns plain text; 'no positions' if no statement has been imported."""
+    When the statement on file is out of date and a Flex token is set, a fresh
+    one is pulled from IBKR Flex first (no live sign-in needed), so this is the
+    fallback when the live broker tools are unavailable. Returns plain text,
+    headed by the date the positions are as of; 'no positions' if nothing has
+    been imported."""
     from . import statements
 
+    header = _snapshot_header(account)
     positions = statements.query_positions(symbol=symbol or None, account=account or None)
     nav = statements.query_nav(account=account or None)
     if not positions and not nav["rows"]:
-        return (
+        return "\n".join(header + [
             "No portfolio data found. Import an IBKR statement first with "
-            "`import_ibkr_statement`."
-        )
+            "`import_ibkr_statement`, or set IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID."
+        ])
 
-    lines: list[str] = []
+    lines: list[str] = header + ([""] if header else [])
     if positions:
         lines.append("OPEN POSITIONS (symbol · name [ISIN] · qty · cost basis · value · unrealized P/L):")
         for p in positions:
@@ -1282,9 +1305,12 @@ def allocation(account: str = "") -> str:
     open positions: each position's weight as a % of the book, the largest
     position, top-5 concentration, and a breakdown by asset category. Use for
     'allocation / concentration / diversification / biggest position / how
-    exposed am I' questions. ``account`` scopes to one account."""
+    exposed am I' questions. ``account`` scopes to one account. Like
+    `query_portfolio`, refreshes an out-of-date statement from IBKR Flex first
+    and says the date the positions are as of."""
     from . import statements
 
+    header = _snapshot_header(account)
     # Convert any non-base-currency positions to USD before weighting, so a
     # multi-currency book isn't summed across currencies. Rates fetched here
     # (statements.allocation stays offline and just applies the supplied map).
@@ -1300,16 +1326,16 @@ def allocation(account: str = "") -> str:
             fx[c] = r
     res = statements.allocation(account=account or None, fx=fx)
     if not res["positions"]:
-        return (
+        return "\n".join(header + [
             "No positions found. Import a statement with open positions using "
             "`import_ibkr_statement`."
-        )
+        ])
     ccy_note = ""
     if res["currencies_converted"]:
         ccy_note = f" · converted to {BASE_CURRENCY}: {', '.join(res['currencies_converted'])}"
     if fx_missing:
         ccy_note += f" · no FX rate for {', '.join(fx_missing)} (used raw values)"
-    lines = [f"ALLOCATION (total {res['total_value']:,.2f} {BASE_CURRENCY}{ccy_note}):"]
+    lines = header + [f"ALLOCATION (total {res['total_value']:,.2f} {BASE_CURRENCY}{ccy_note}):"]
     for p in res["positions"]:
         lines.append(
             f"  {p['symbol']:<6} {p['weight_pct']:>5.1f}%  "

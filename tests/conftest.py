@@ -42,6 +42,15 @@ def _never_write_to_the_real_portfolio(tmp_path_factory, monkeypatch):
         "FINANCIAL_RESEARCH_FLEX_DIR",
         str(tmp_path_factory.mktemp("flex")),
     )
+    # Reading the portfolio now pulls a fresh Flex statement when the one on
+    # file is old. With a developer's real token in the environment, that would
+    # fetch the real account during a test, so no test starts with one.
+    monkeypatch.delenv("IBKR_FLEX_TOKEN", raising=False)
+    monkeypatch.delenv("IBKR_FLEX_QUERY_ID", raising=False)
+    monkeypatch.setenv(
+        "FRA_FLEX_REFRESH_FILE",
+        str(tmp_path_factory.mktemp("flex-refresh") / "flex-refresh.json"),
+    )
 
 
 @pytest.fixture(autouse=True)
