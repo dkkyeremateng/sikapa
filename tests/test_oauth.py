@@ -1297,13 +1297,18 @@ def test_codex_offers_the_newest_model_after_sign_in(monkeypatch):
     assert cred["models"][0]["context_window"] == 272000
 
 
-def test_a_claude_subscription_is_offered_only_its_newest_haiku(monkeypatch):
+def test_a_claude_subscription_is_offered_only_the_haiku_it_is_served(monkeypatch):
+    """/v1/models lists claude-haiku-5-5 to a subscription token, but a call to it
+    gets the same bare 429 as Sonnet and Opus. Offering the newest Haiku made a
+    model that cannot answer the default."""
     _serve_models(monkeypatch, {"data": [
+        {"id": "claude-haiku-5-5", "created_at": "2026-09-01T00:00:00Z", "max_input_tokens": 1_000_000},
         {"id": "claude-opus-5-5", "created_at": "2026-08-20T00:00:00Z"},
-        {"id": "claude-haiku-5", "created_at": "2026-06-01T00:00:00Z"},
         {"id": "claude-sonnet-5", "created_at": "2026-05-01T00:00:00Z"},
-        {"id": "claude-haiku-4-5-20251001", "created_at": "2025-10-01T00:00:00Z"},
+        {"id": "claude-haiku-4-5-20251001", "created_at": "2025-10-01T00:00:00Z",
+         "max_input_tokens": 200_000},
     ]})
     cred, _posted, _url = _login_via_paste(oauth.get("anthropic"), monkeypatch,
                                            {"access_token": "a", "refresh_token": "r"})
-    assert [m["name"] for m in cred["models"]] == ["claude-haiku-5", "claude-haiku-4-5-20251001"]
+    assert [m["name"] for m in cred["models"]] == ["claude-haiku-4-5-20251001"]
+    assert cred["models"][0]["context_window"] == 200_000

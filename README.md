@@ -1622,7 +1622,7 @@ config file and stays off unless `FINANCIAL_RESEARCH_AUTH_ALLOW_EXEC=1`.
 | `anthropic-key`, `google-key`, `groq-key`, `openai-key` | **Works.** Paste a vendor API key. `openai-key` also accepts a gateway base URL. |
 | `openrouter` | **Works.** PKCE mints a real API key billed from your credits; nothing expires, nothing to refresh. |
 | `codex` | **Works, with caveats.** ChatGPT OAuth routed through a local shim (`codex_proxy.py`) that speaks the Codex request shape. Since 4 Apr 2026 third-party traffic bills as *overage*, not against your ChatGPT plan. |
-| `anthropic` | **Haiku only.** Since 28 Apr 2026 Sonnet and Opus return a bare 429 (no `anthropic-ratelimit` headers — a hard block, not a quota) for third-party OAuth clients, and loading an extra-usage balance does **not** lift it: the gate is on a promotional-credit flag, not your balance. Use `anthropic-key` for Sonnet/Opus. |
+| `anthropic` | **Haiku 4.5 only.** Since 28 Apr 2026 Sonnet and Opus return a bare 429 (no `anthropic-ratelimit` headers — a hard block, not a quota) for third-party OAuth clients, and loading an extra-usage balance does **not** lift it: the gate is on a promotional-credit flag, not your balance. Haiku 5.5 is blocked the same way, though `/v1/models` still lists it, so the login offers only Haiku 4.5. Use `anthropic-key` for anything newer. |
 | `google` | **Blocked.** Banned Feb 2026 with account suspensions (incl. paid Ultra); Code Assist stopped serving the individual / AI Pro / AI Ultra tiers on 18 Jun 2026. Use `google-key`. |
 
 The blocked subscription flows are implemented and tested end to end — PKCE,
