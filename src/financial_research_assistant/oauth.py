@@ -604,12 +604,12 @@ class _SubscriptionProvider:
 
 class AnthropicSubscriptionProvider(_SubscriptionProvider):
     name = "anthropic"
-    label = "Claude Pro/Max — Haiku only; Sonnet/Opus blocked for third parties"
+    label = "Claude Pro/Max — Haiku 4.5 only; newer models blocked for third parties"
     login_warning = (
         "warning: since 28 Apr 2026 Anthropic blocks Sonnet and Opus for third-party "
-        "OAuth clients — they return a bare 429 that extra-usage credit does NOT "
-        "unlock. Only Haiku serves. For Sonnet/Opus use `/login anthropic-key` with "
-        "a key from console.anthropic.com."
+        "OAuth clients, and Haiku 5.5 too — they return a bare 429 that extra-usage "
+        "credit does NOT unlock. Only Haiku 4.5 serves. For anything newer use "
+        "`/login anthropic-key` with a key from console.anthropic.com."
     )
     CLIENT_ID_ENV = "ANTHROPIC_OAUTH_CLIENT_ID"
     CLIENT_SOURCE = "Claude Code"
@@ -637,10 +637,13 @@ class AnthropicSubscriptionProvider(_SubscriptionProvider):
     def list_models(self, cred: dict[str, Any]) -> list[dict[str, Any]]:
         from . import provider_models
 
-        # The newest Haiku, for the reason above: the list also names Sonnet and
-        # Opus, which this token is refused.
+        # Only the models above, not "the newest Haiku": the gate is per model, not
+        # per family. /v1/models lists claude-haiku-5-5 to this token, and it gets
+        # the same bare 429 as Sonnet and Opus (2026-10-14), so the newest Haiku
+        # was a default that could not answer. The listing still contributes the
+        # vendor's context window; a name not listed here can be typed at login.
         return [m for m in provider_models.anthropic(oauth_token=cred["access"])
-                if "haiku" in m["name"]]
+                if m["name"] in self.MODELS]
 
 
 class GoogleSubscriptionProvider(_SubscriptionProvider):
