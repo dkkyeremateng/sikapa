@@ -310,6 +310,15 @@ def _recently_recommended(days: int = COOLDOWN_DAYS) -> set[str]:
             if e.get("source") == "recommender" and str(e.get("opened", "")) >= cutoff}
 
 
+def _open_call(symbol: str, direction: str) -> dict[str, Any] | None:
+    """The recommender's open call on ``symbol`` in ``direction``, if there is one."""
+    from . import journal
+
+    return next((e for e in journal.load_entries()
+                 if e.get("source") == "recommender" and e.get("status") == "open"
+                 and e.get("symbol") == symbol.upper() and e.get("verdict") == direction), None)
+
+
 def candidates(book: dict[str, Any], prof: dict[str, Any], mode: str = "light",
                focus: str = "") -> tuple[list[Candidate], list[tuple[str, str]], str]:
     """``(kept, dropped, universe label)``: ranked candidates to evaluate, and
@@ -346,7 +355,9 @@ def candidates(book: dict[str, Any], prof: dict[str, Any], mode: str = "light",
             why = "crypto is excluded in your profile"
         elif sym in held and not c.held:
             why = "already held (reviewed as a holding instead)"
-        elif sym in cooling and not c.held:
+        elif sym in cooling:
+            # Holdings too: an over-cap position reviewed every week drew the same
+            # "trim" five weeks running, each a fresh journal call.
             why = f"recommended within the last {COOLDOWN_DAYS} days"
         elif focus and not _matches_focus(c, focus):
             why = f"outside the focus '{focus}'"
@@ -637,6 +648,12 @@ async def run(mode: str = "light", fake: bool = False, focus: str = "",
         idea.rank = n
         direction = _DIRECTION.get(idea.verdict)
         if record and direction:
+            earlier = await asyncio.to_thread(_open_call, idea.candidate.symbol, direction)
+            if earlier:
+                # The same call again is the old call still running: a second entry
+                # would restart its clock at today's price and score it twice.
+                idea.journal_id, idea.due = earlier["id"], earlier["due"]
+                continue
             try:
                 entry = await asyncio.to_thread(
                     journal.record_call, idea.candidate.symbol, direction, idea.thesis,

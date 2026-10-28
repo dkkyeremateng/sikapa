@@ -128,13 +128,39 @@ def test_shadow_mode_records_and_pushes_nothing(world, monkeypatch):
 def test_quiet_holds_all_but_the_urgent_then_summarises(world, monkeypatch):
     guardrails.set_quiet(60)
     world["prices"]["AAPL"] = _series(1.0, -6.0)   # high: goes through
-    world["prices"]["KO"] = _series(0.5, 3.4)      # medium: waits
+    world["prices"]["KO"] = _series(0.5, 0.1)
+    alerts.add_alert("KO", "above", 1.0)           # medium: waits
     decided = {e.symbol: d for e, d in _pass()}
     assert decided == {"AAPL": "push", "KO": "held"}
     assert len(world["pushed"]) == 1
     guardrails.clear_quiet()
     _pass()
-    assert world["pushed"][-1].startswith("While you were quiet:\n• KO +3.4% today")
+    assert world["pushed"][-1].startswith("While you were quiet:\n• 🔔 KO at")
+
+
+def test_a_routine_move_waits_for_the_daily_report(world):
+    """KO is 6% of the book: +3.4% is unusual for KO but worth 0.2% of the book,
+    so it is listed at the close instead of interrupting."""
+    world["prices"]["AAPL"] = _series(1.0, 0.1)
+    world["prices"]["KO"] = _series(0.5, 3.4)
+    decided = [(e.symbol, e.severity, d) for e, d in _pass()]
+    assert decided == [("KO", "low", "digest")]
+    assert world["pushed"] == []
+    assert "KO +3.4% today" in watchers._daily_section({"session": TODAY})
+
+
+def test_the_push_bar_is_the_books_share_of_the_move(world, monkeypatch):
+    monkeypatch.setenv("FRA_EVENT_PUSH_IMPACT_PCT", "0.2")
+    world["prices"]["AAPL"] = _series(1.0, 0.1)
+    world["prices"]["KO"] = _series(0.5, 3.4)
+    assert [(e.severity, d) for e, d in _pass()] == [("high", "push")]
+    assert world["pushed"][0].startswith("⚡ KO +3.4% today")
+
+
+def test_a_move_twice_the_stocks_threshold_is_pushed_whatever_its_size(world):
+    world["prices"]["AAPL"] = _series(1.0, 0.1)
+    world["prices"]["KO"] = _series(0.5, 7.0)   # band 2 on a 3% threshold
+    assert [(e.severity, d) for e, d in _pass()] == [("high", "push")]
 
 
 def test_an_invented_figure_drops_the_analysis_not_the_alert(world, monkeypatch):
@@ -169,6 +195,8 @@ def test_filings_are_primed_then_announced(world, monkeypatch):
          "desc": "", "items": "2.02,9.01"},
         {"date": "2026-09-28", "form": "10-Q", "accession": "new-2", "doc": "q2.htm",
          "desc": "", "items": ""},
+        {"date": "2026-09-28", "form": "8-K", "accession": "new-3", "doc": "d.htm",
+         "desc": "", "items": "5.02"},
     ] + [{"date": "2026-09-28", "form": "4", "accession": f"f4-{i}", "doc": "x",
           "desc": "", "items": ""} for i in range(3)]
     state = watchers._load_state()
@@ -176,8 +204,33 @@ def test_filings_are_primed_then_announced(world, monkeypatch):
     state = watchers._load_state()
     state["last_run"]["sec_filing"] = 0
     watchers._save_state(state)
-    got = {(e.kind, e.severity) for e, _d in _pass()}
-    assert got == {("earnings_out", "high"), ("sec_filing", "medium"), ("insider_cluster", "low")}
+    got = sorted((e.kind, e.facts.get("form", ""), e.severity) for e, _d in _pass())
+    assert got == [("earnings_out", "8-K", "high"), ("insider_cluster", "", "low"),
+                   ("sec_filing", "10-Q", "low"), ("sec_filing", "8-K", "medium")]
+
+
+def test_the_biggest_news_in_a_pass_goes_first_and_covers_the_rest(world, monkeypatch):
+    """MSFT's earnings 8-K and a routine 8-K were filed in the same minute and
+    both were pushed, the routine one first. Routed by severity, the earnings
+    push starts the cooldown and the routine filing waits for the digest."""
+    world["prices"]["AAPL"] = _series(1.0, 0.1)
+    feed = [{"date": "2026-09-01", "form": "8-K", "accession": "old", "doc": "o.htm",
+             "desc": "", "items": "8.01"}]
+    monkeypatch.setattr(edgar, "_cik_for", lambda sym: "0000320193" if sym == "AAPL" else None)
+    monkeypatch.setattr(edgar, "_submission_recent", lambda cik: ("Apple", list(feed)))
+    _pass()
+    feed[:0] = [
+        {"date": "2026-09-29", "form": "8-K", "accession": "routine", "doc": "r.htm",
+         "desc": "", "items": "8.01,9.01"},
+        {"date": "2026-09-29", "form": "8-K", "accession": "results", "doc": "e.htm",
+         "desc": "", "items": "2.02,9.01"},
+    ]
+    state = watchers._load_state()
+    state["last_run"]["sec_filing"] = 0
+    watchers._save_state(state)
+    decided = [(e.kind, d) for e, d in _pass()]
+    assert decided == [("earnings_out", "push"), ("sec_filing", "cooldown")]
+    assert len(world["pushed"]) == 1
 
 
 def test_a_user_alert_rule_fires_on_the_pass(world):

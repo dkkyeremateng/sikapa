@@ -175,6 +175,18 @@ def test_light_mode_reviews_only_holdings_with_something_to_say(world):
     assert "above your 50% position cap" in aapl.reason
 
 
+def test_a_holding_called_recently_is_not_called_again(world):
+    """An over-cap holding qualifies for review every week; one call a month is
+    the ceiling, held or not."""
+    profile.save({"max_position_pct": 50})
+    journal.save_entries([{"id": "t1", "symbol": "AAPL", "source": "recommender",
+                           "verdict": "bearish", "status": "open",
+                           "opened": (datetime.now() - timedelta(days=7)).isoformat()}])
+    kept, dropped, _l = recommend.candidates(periodic.load_book(), profile.load(), "light")
+    assert "AAPL" not in {c.symbol for c in kept}
+    assert dict(dropped)["AAPL"].startswith("recommended within the last 30 days")
+
+
 def test_crypto_needs_the_profiles_permission(world):
     profile.save({"watchlist": ["IBIT"]})
     _kept, dropped, _l = recommend.candidates(periodic.load_book(), profile.load(), "deep")
@@ -281,6 +293,21 @@ def test_a_run_records_every_call_against_its_asset_classes_benchmark(world):
     assert "Considered and Dropped" in s["markdown"] or not run_["dropped"]
     assert "scored in the journal on" in s["markdown"]
     assert s["message"].startswith("💡 Deep ideas")
+
+
+def test_the_same_call_again_points_at_the_open_one(world):
+    """Past the cooldown, the same verdict on the same symbol is the earlier call
+    still running: no second entry restarting the clock at today's price."""
+    profile.save({"targets": {"us_equity": 60, "intl_equity": 20, "bonds": 20}})
+    opened = (datetime.now() - timedelta(days=40)).isoformat()
+    journal.save_entries([{"id": "t1", "symbol": "BND", "source": "recommender",
+                           "verdict": "bullish", "status": "open", "opened": opened,
+                           "entry_price": 90.0, "due": "2027-03-01"}])
+    run_ = asyncio.run(recommend.run("deep", fake=True))
+    bnd = next(r for r in run_["ideas"] if r["symbol"] == "BND")
+    assert bnd["journal_id"] == "t1" and bnd["due"] == "2027-03-01"
+    assert [e["id"] for e in journal.load_entries() if e["symbol"] == "BND"] == ["t1"]
+    assert len(journal.load_entries()) == len(run_["ideas"]), "the other ideas are still recorded"
 
 
 def test_generic_mode_is_said_out_loud(world):

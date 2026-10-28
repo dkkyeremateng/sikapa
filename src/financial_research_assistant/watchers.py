@@ -15,7 +15,9 @@ happened AND how much of the book it touches: a 6% move in a 1% position is
 background, the same move in a 20% position is news. Then:
 
 - ``high`` is pushed now, with a short analysis from the cheap model when the
-  budget allows (facts only when it doesn't);
+  budget allows (facts only when it doesn't). For a held stock's price move that
+  takes a move worth ``FRA_EVENT_PUSH_IMPACT_PCT`` of the book, or twice the
+  stock's own threshold; a smaller one is in the daily close report hours later;
 - ``medium`` is pushed as facts, no model;
 - ``low`` waits for the daily report;
 - during quiet hours only ``high`` goes out; the rest is held and summarised
@@ -83,6 +85,17 @@ def sigmas() -> float:
     (``FRA_EVENT_SIGMA``, 2). A 3% day is noise for a volatile name and news for
     a utility; the floor keeps a sleepy stock's 0.8% "two-sigma" day quiet."""
     return _env_float("FRA_EVENT_SIGMA", 2.0)
+
+
+def push_impact_pct() -> float:
+    """How much of the book a held stock's move must be worth to be pushed rather
+    than listed in the daily report (``FRA_EVENT_PUSH_IMPACT_PCT``, 0.5).
+
+    The first month live pushed fifteen routine moves of $70-$250, five of them
+    the same stock edging up 3% on different days; only one was worth half a
+    percent of the book. The daily close report already lists the rest.
+    """
+    return _env_float("FRA_EVENT_PUSH_IMPACT_PCT", 0.5)
 
 
 def cooldown_minutes() -> float:
@@ -172,10 +185,8 @@ def price_moves(ctx: dict[str, Any]) -> list[Event]:
         weight = float(h["weight_pct"]) if h else 0.0
         dollars = h["units"] * (last - prev) if h and h["currency"] == "USD" else None
         impact = weight * abs(move) / 100  # percent of the book this move is worth
-        if h and (impact >= 0.5 or band >= 2):
+        if h and (impact >= push_impact_pct() or band >= 2):
             severity = "high"
-        elif h:
-            severity = "medium"
         else:
             severity = "medium" if band >= 2 else "low"
         out.append(Event(
@@ -214,6 +225,9 @@ def alert_rules(ctx: dict[str, Any]) -> list[Event]:
 
 
 #: Forms worth a message, and what they are called on one.
+#: The periodic reports (10-Q, 10-K) arrive a day or so after the earnings 8-K
+#: that carried the news, so they are listed in the daily report, not pushed.
+_PERIODIC = {"10-Q", "10-K"}
 _FORMS = {"8-K": "8-K", "10-Q": "quarterly report (10-Q)", "10-K": "annual report (10-K)",
           "SC 13D": "activist stake (13D)", "SC 13D/A": "activist stake amended (13D/A)"}
 _FILINGS_EVERY = 30 * 60.0
@@ -271,7 +285,7 @@ def filings(ctx: dict[str, Any]) -> list[Event]:
             label = _FORMS[form]
             detail = edgar._decode_items(items) if items else ""  # pyright: ignore[reportPrivateUsage]
             out.append(Event(key=f"filing:{f['accession']}", symbol=sym, kind="sec_filing",
-                             severity="medium",
+                             severity="low" if form in _PERIODIC else "medium",
                              title=f"{sym} filed {label}" + (f": {detail}" if detail else ""),
                              facts={"form": form, "items": items, "date": f["date"], "url": url}))
         for day, n in form4.items():
@@ -422,7 +436,10 @@ async def route(events: list[Event], state: dict[str, Any], now: datetime,
     from . import channels
 
     done: list[tuple[Event, str]] = []
-    for ev in events:
+    # Most severe first, so the cooldown it starts holds back the lesser news on
+    # the same symbol: an earnings 8-K and a routine 8-K filed in the same minute
+    # are one message, not two.
+    for ev in sorted(events, key=lambda e: -_RANK[e.severity]):
         if ev.key in state["seen"]:
             continue
         state["seen"][ev.key] = now.isoformat()
