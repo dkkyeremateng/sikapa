@@ -511,7 +511,11 @@ async def _rewrite_thread(graph: Any, as_node: str, config: RunnableConfig, fake
     else:
         summary = await summarize_messages(head, model=model)
 
-    seed = HumanMessage(content=f"Summary of the earlier conversation:\n{summary}")
+    # The summary keeps the gist; the exact words are still in the transcript.
+    seed = HumanMessage(content=(
+        f"Summary of the earlier conversation:\n{summary}\n\n"
+        "(The full text of those turns is searchable with `search_history`.)"
+    ))
     await graph.aupdate_state(
         config,
         {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), seed, *tail]},

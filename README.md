@@ -526,6 +526,11 @@ once the previous turn's input reached that fraction — emitting a `status` eve
 behavior is unchanged. It applies per long-running process/session; a fresh
 `--prompt` one-shot has no prior turn to measure.
 
+A summary keeps the gist, not every detail. The exact words of each turn stay in
+the session's transcript, and the `search_history` tool lets the agent read them
+back ("what stop did I set for AAPL?"). It searches the current conversation, or
+every saved one with `all_sessions`, and the summary tells the agent it's there.
+
 ## Deep-research reports (`--research`)
 
 `--research SYMBOL` produces a structured, cited markdown research report on a
