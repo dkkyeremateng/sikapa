@@ -411,6 +411,11 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     if record is not None and record.get("exhausted") and record.get("status") == "pending":
         label += " — skipped this run; it stays scheduled"
     body = f"{_HEADER.format(label=label)}\n\n{answer}"
+    if not ok:
+        from .remedies import advice
+
+        if fix := advice(reason or answer):
+            body += f"\n\nWhat to do: {fix}"
     delivered, failed = await asyncio.to_thread(
         channels.deliver, body, str(task.get("channel") or "")
     )

@@ -28,7 +28,7 @@ STATUS_LINES: dict[str, Callable[[], str]] = {}
 
 #: Modules that register into the above when imported.
 FEATURE_MODULES = ("jobs", "periodic", "guardrails", "autonomy", "profile", "watchers",
-                   "recommend")
+                   "recommend", "checkin")
 
 
 def register_command(name: str, handler: CommandHandler, help_line: str) -> None:

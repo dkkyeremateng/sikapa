@@ -139,7 +139,7 @@ restore: `age -d -i fra-backup.key fra-….tar.gz.age | tar -xz -C /srv/fra/data
 
 ## 8. Using it
 
-- **Phone:** message the bot. `/status`, `/report daily`, `/ideas`, `/pause`,
+- **Phone:** message the bot. `/status`, `/report daily`, `/ideas`, `/checkin`, `/pause`,
   `/resume`, `/quiet 2h`, `/tasks`, `/cancel <id>`, or just ask a question.
 - **Terminal:** `ssh -t server sudo docker exec -it fra financial-research-assistant`
   opens the TUI inside the running container, against the live state.
