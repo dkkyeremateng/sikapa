@@ -1124,6 +1124,27 @@ def _recall_and_frame(user_msg: str) -> tuple[str, str | None]:
     return content, detail
 
 
+#: How a runner marks framing it puts in front of the user's own words: one
+#: paragraph starting with this, then a blank line, then the instruction. The
+#: scheduler's task preamble is the one that exists.
+FRAMING_MARK = "[SCHEDULED TASK]"
+
+
+def instruction(user_msg: str) -> str:
+    """The user's own words in ``user_msg``, without a runner's framing.
+
+    The claim checks match the REQUEST, and framing is not one: the task preamble
+    says "if it refers to a report… PRODUCE that work", which reads as asking for
+    a report. Checked against it, every scheduled answer that rendered no file
+    was told "no report was produced", and the note's length carried a too-short
+    non-answer past the scheduler's gate.
+    """
+    if not user_msg.startswith(FRAMING_MARK):
+        return user_msg
+    _framing, _sep, rest = user_msg.partition("\n\n")
+    return rest
+
+
 async def run_turn(
     user_msg: str,
     session_id: str,
@@ -1298,12 +1319,15 @@ async def run_turn(
                 # how full the window is now — not the cumulative session input.
                 context_tokens=context_in,
             )
+            # The checks ask what the USER asked for, so they read past any framing
+            # a runner put in front of it (see ``instruction``).
+            asked = instruction(user_msg)
             settled = await settle_schedule_claim(
-                user_msg, answer, called_tools, fake
+                asked, answer, called_tools, fake
             )
             yield AgentEvent(
                 "final",
-                await settle_delivery_claim(settled, called_tools, fake, user_msg),
+                await settle_delivery_claim(settled, called_tools, fake, asked),
             )
     except Exception as e:  # surface as an event, never raise into the UI
         yield AgentEvent("error", describe_error(e))
