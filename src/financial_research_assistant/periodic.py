@@ -26,7 +26,7 @@ time-weighted return from it is used instead, and labelled as that.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 import asyncio
 import calendar
@@ -872,9 +872,98 @@ def _latest_complete_period(kind: str) -> tuple[Any, str]:
     return (y, m), f"{y}-{m:02d}"
 
 
+# --- drafts ------------------------------------------------------------------------------
+#
+# A report is built in three phases: the figures (model-free), the commentary (a
+# paid model call that cites those figures) and the render. A run that dies after
+# the commentary — in the render, or before the ledger records the report — used
+# to pay for the commentary again on the retry. So the figures and the commentary
+# are kept together as a draft, and a rerun of the same report goes straight to
+# the render. Together, because the commentary is checked against THESE figures:
+# rebuilt figures with an old commentary could cite numbers no longer in it.
+
+#: How long a draft is reused: the retries of one occurrence land within this.
+DRAFT_HOURS = 6
+
+
+def drafts_file():
+    from .storage import state_file
+
+    return state_file("report-drafts.json", "FRA_REPORT_DRAFTS")
+
+
+def _draft_key(kind: str, period: str, account: str) -> str:
+    return f"{kind}:{period}:{account}"
+
+
+def _load_draft(key: str, now: datetime | None = None) -> tuple[Brief, str, str] | None:
+    from .storage import read_json
+
+    entry = read_json(drafts_file(), {}).get(key)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        at = datetime.fromisoformat(str(entry["at"]))
+        if (now or datetime.now(timezone.utc)) - at > timedelta(hours=DRAFT_HOURS):
+            return None
+        return Brief(**entry["brief"]), str(entry["commentary"]), str(entry.get("note") or "")
+    except (KeyError, TypeError, ValueError):
+        return None  # a draft from an older shape: build afresh
+
+
+def _save_draft(key: str, brief: Brief, commentary: str, note: str,
+                now: datetime | None = None) -> None:
+    from .storage import locked, read_json, write_private
+
+    now = now or datetime.now(timezone.utc)
+    path = drafts_file()
+    with locked(path):
+        data = read_json(path, {})
+        if not isinstance(data, dict):
+            data = {}
+        kept = {}
+        for k, v in data.items():
+            try:
+                if now - datetime.fromisoformat(str(v["at"])) <= timedelta(hours=DRAFT_HOURS):
+                    kept[k] = v
+            except (KeyError, TypeError, ValueError):
+                continue
+        kept[key] = {"at": now.isoformat(timespec="seconds"), "brief": asdict(brief),
+                     "commentary": commentary, "note": note}
+        write_private(path, json.dumps(kept, default=str))
+
+
 async def produce(kind: str, arg: Any, period: str, fake: bool = False,
-                  account: str = "") -> tuple[Brief, list[str], str]:
-    """Build, comment and render one report: ``(brief, files, commentary note)``."""
+                  account: str = "", drafts: bool = False) -> tuple[Brief, list[str], str]:
+    """Build, comment and render one report: ``(brief, files, commentary note)``.
+
+    With ``drafts``, a draft of the same report from the last ``DRAFT_HOURS``
+    (see above) skips the figures and the commentary. Only the scheduled job
+    asks: an on-demand daily report can cover a session still trading, and its
+    draft must not stand in for the close."""
+    key = _draft_key(kind, period, account)
+    draft = await asyncio.to_thread(_load_draft, key) if drafts else None
+    if draft is not None:
+        brief, commentary, note = draft
+    else:
+        brief, commentary, note = await _build_and_comment(kind, arg, account, fake)
+        if commentary and drafts:
+            # Only a paid-for commentary is worth keeping; without one (paused,
+            # over budget) the rerun should try again.
+            await asyncio.to_thread(_save_draft, key, brief, commentary, note)
+    want_pdf = kind != "daily" or (os.environ.get("FRA_DAILY_PDF") or "").strip() in ("1", "true", "yes")
+    files = await asyncio.to_thread(_render, brief, commentary, note) if want_pdf else []
+    if commentary:
+        head, _, rest = brief.message.partition("\n")
+        brief.message = f"{head}\n{rest}\n\n{commentary}".strip()
+    if note:
+        brief.message += f"\n\n({note})"
+    return brief, files, note
+
+
+async def _build_and_comment(kind: str, arg: Any, account: str,
+                             fake: bool) -> tuple[Brief, str, str]:
+    """The figures and the model's reading of them: ``(brief, commentary, note)``."""
     # Sections come from feature modules (the watchers' recap, the ideas); a
     # report built from the CLI must not be missing them because nothing else
     # happened to import those modules first.
@@ -886,14 +975,7 @@ async def produce(kind: str, arg: Any, period: str, fake: bool = False,
     else:
         brief = await asyncio.to_thread(build_monthly_brief, arg[0], arg[1], account)
     commentary, note = await write_commentary(brief, fake=fake)
-    want_pdf = kind != "daily" or (os.environ.get("FRA_DAILY_PDF") or "").strip() in ("1", "true", "yes")
-    files = await asyncio.to_thread(_render, brief, commentary, note) if want_pdf else []
-    if commentary:
-        head, _, rest = brief.message.partition("\n")
-        brief.message = f"{head}\n{rest}\n\n{commentary}".strip()
-    if note:
-        brief.message += f"\n\n({note})"
-    return brief, files, note
+    return brief, commentary, note
 
 
 def _job(kind: str) -> Callable[[dict[str, Any], bool], Any]:
@@ -917,7 +999,8 @@ def _job(kind: str) -> Callable[[dict[str, Any], bool], Any]:
                 return jobs.JobResult(True, f"no session on {period}", notify=False)
         options = task.get("options") or {}
         brief, files, _note = await produce(kind, arg, period, fake=fake,
-                                            account=str(options.get("account") or ""))
+                                            account=str(options.get("account") or ""),
+                                            drafts=True)
         jobs.record_sent(kind, period, {"files": files, "title": brief.title})
         return jobs.JobResult(True, brief.message, files=files)
 

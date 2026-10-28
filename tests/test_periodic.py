@@ -359,3 +359,78 @@ def test_a_partial_month_compares_the_market_over_the_same_days(market_data, boo
     assert "2026-08-03 → 2026-08-07" in brief.message
     assert brief.message.startswith("📅 Monthly report · August 2026 (data covers")
     assert any("same days" in n for n in brief.notes)
+
+
+# --- drafts: a rerun does not pay for the commentary twice ---------------------------------------
+
+
+def _counting(monkeypatch, comment="- Holdings rose 0.84% on the week."):
+    """Count the figure builds and the (paid) commentary calls."""
+    calls = {"build": 0, "comment": 0}
+    real_build = periodic.build_weekly_brief
+
+    def build(*a, **k):
+        calls["build"] += 1
+        return real_build(*a, **k)
+
+    async def write_commentary(brief, fake=False):
+        calls["comment"] += 1
+        return comment, ""
+
+    monkeypatch.setattr(periodic, "build_weekly_brief", build)
+    monkeypatch.setattr(periodic, "write_commentary", write_commentary)
+    return calls
+
+
+_WEEKLY_TASK = {"id": "s1", "due": datetime(2026, 10, 3, 13, 0, tzinfo=timezone.utc).isoformat(),
+                "tz": "America/New_York", "kind": "job", "job": "report-weekly"}
+
+
+def test_a_report_that_died_in_the_render_reuses_its_commentary(market_data, book, monkeypatch):
+    calls = _counting(monkeypatch)
+    renders = []
+
+    def render(brief, commentary, note):
+        renders.append(commentary)
+        if len(renders) == 1:
+            raise MemoryError("killed while drawing the PDF")
+        return ["/r/x.png", "/r/x.pdf"]
+
+    monkeypatch.setattr(periodic, "_render", render)
+    run = jobs.handler_for("report-weekly")
+    with pytest.raises(MemoryError):
+        asyncio.run(run(_WEEKLY_TASK, True))
+    assert jobs.already_sent("weekly", "2026-W40") is None
+
+    again = asyncio.run(run(_WEEKLY_TASK, True))
+    assert again.ok and again.files == ["/r/x.png", "/r/x.pdf"]
+    assert calls == {"build": 1, "comment": 1}, "the retry goes straight to the render"
+    assert renders == ["- Holdings rose 0.84% on the week."] * 2
+    assert "Holdings rose 0.84%" in again.text
+
+
+def test_a_draft_is_not_kept_past_its_window(market_data, book, quiet_render, monkeypatch):
+    calls = _counting(monkeypatch)
+    old = datetime.now(timezone.utc) - timedelta(hours=periodic.DRAFT_HOURS + 1)
+    key = periodic._draft_key("weekly", "2026-W40", "")
+    periodic._save_draft(key, _brief(period="2026-W40"), "- stale reading", "", now=old)
+    res = asyncio.run(jobs.handler_for("report-weekly")(_WEEKLY_TASK, True))
+    assert calls == {"build": 1, "comment": 1} and "stale reading" not in res.text
+
+
+def test_no_draft_without_a_commentary(market_data, book, quiet_render, monkeypatch):
+    """Nothing was paid for, so the rerun should try for a commentary again."""
+    _counting(monkeypatch, comment="")
+    asyncio.run(periodic.produce("weekly", date(2026, 10, 2), "2026-W40", fake=True, drafts=True))
+    assert periodic._load_draft(periodic._draft_key("weekly", "2026-W40", "")) is None
+
+
+def test_an_on_demand_report_neither_uses_nor_leaves_a_draft(market_data, book, quiet_render,
+                                                           monkeypatch):
+    """It can cover a session still trading; its figures must not stand in for the
+    close the scheduled report sends."""
+    calls = _counting(monkeypatch)
+    asyncio.run(periodic.produce("weekly", date(2026, 10, 2), "2026-W40", fake=True))
+    asyncio.run(periodic.produce("weekly", date(2026, 10, 2), "2026-W40", fake=True))
+    assert calls == {"build": 2, "comment": 2}
+    assert periodic._load_draft(periodic._draft_key("weekly", "2026-W40", "")) is None
