@@ -1307,7 +1307,7 @@ def _trade_split_events(
             params.append(acct)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(
-            f"SELECT import_id, account, symbol, datetime, quantity, trade_price, "
+            f"SELECT import_id, account, symbol, currency, datetime, quantity, trade_price, "
             f"proceeds, basis FROM trades{where} ORDER BY datetime ASC, id ASC",
             params,
         ).fetchall()
@@ -1386,6 +1386,66 @@ def open_lots(
     return {
         s: [{"qty": l[0], "cost_per_share": l[1], "open_date": l[2]} for l in dq]
         for s, dq in lots.items() if dq
+    }
+
+
+def covered_since(account: str | None = None) -> str:
+    """The first day of the unbroken run of imported statements that ends with the
+    newest one, for ``account`` (ISO), or "" when none parses.
+
+    Walking holdings back from today is exact only over days whose trades are all
+    in the store; a gap between two imports, or a day before the oldest, may hold
+    trades nobody imported."""
+    acct = account or default_account()
+    spans = sorted(
+        (b for imp in list_imports()
+         if imp.get("account") == acct and (b := _period_bounds(str(imp.get("period") or "")))),
+        key=lambda b: b[1], reverse=True,
+    )
+    if not spans:
+        return ""
+    since = spans[0][0]
+    for start, end in spans[1:]:
+        # Unbroken: this one reaches at least the day before the run starts.
+        if date.fromisoformat(end).toordinal() + 1 >= date.fromisoformat(since).toordinal():
+            since = min(since, start)
+    return since
+
+
+def holdings_on(day: date, account: str | None = None) -> dict[str, Any] | None:
+    """What ``account`` held at the end of ``day``: ``{symbol: {"quantity",
+    "currency"}}`` under ``"positions"``, with ``"since"`` (``covered_since``).
+
+    Today's positions with every trade and split after ``day`` undone — a buy
+    since is taken back off, a sale since is put back (so a position closed since
+    reappears), and a split since divides the shares back down. The trades are
+    the deduplicated stream ``realized_gains`` walks. None when ``day`` is before
+    the imported history, where trades that would have to be undone are missing.
+    """
+    since = covered_since(account)
+    if not since or day.isoformat() < since:
+        return None
+    held: dict[str, dict[str, Any]] = {}
+    for p in query_positions(account=account):
+        sym = str(p.get("symbol") or "").upper()
+        if sym:
+            row = held.setdefault(sym, {"quantity": 0.0, "currency": p.get("currency") or ""})
+            row["quantity"] += float(p.get("quantity") or 0.0)
+    cut = day.isoformat()
+    for when, _order, kind, payload in reversed(_trade_split_events(account=account)):
+        if when <= cut:
+            break
+        if kind == "split":
+            sym, factor = payload
+            if sym in held and factor:
+                held[sym]["quantity"] /= factor
+            continue
+        sym = str(payload["symbol"] or "").upper()
+        row = held.setdefault(sym, {"quantity": 0.0, "currency": payload["currency"] or ""})
+        row["quantity"] -= float(payload["quantity"] or 0.0)
+    return {
+        "since": since,
+        "positions": {s: r for s, r in held.items() if abs(r["quantity"]) > 1e-9},
     }
 
 

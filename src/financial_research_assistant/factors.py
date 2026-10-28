@@ -112,35 +112,59 @@ def _ticker_returns(
 
 def _portfolio_returns(
     days: int, account: str | None = None, as_of: date | None = None
-) -> list[tuple[str, float]]:
-    """Value-weighted daily portfolio returns from current holdings: each holding's
-    daily return times its (base-currency value) weight, summed per day.
+) -> tuple[list[tuple[str, float]], str]:
+    """Value-weighted daily portfolio returns: each holding's daily return times
+    its (base-currency value) weight, summed per day. Returns ``(returns, note)``,
+    the note saying whose weights they are when that is not obvious.
 
-    ``as_of`` cuts the RETURN series, not the holdings — the weights are whatever
-    is held now, because the statement store records positions as of its import,
-    not a position history to reconstruct. So a dated portfolio regression answers
-    "how would today's book have loaded on the factors back then", which is the
-    same approximation `portfolio_risk` makes and states."""
+    Undated, the weights are today's book. Dated, they are what was held at the
+    end of ``as_of`` (``statements.holdings_on``: today's positions with every
+    trade since undone), valued at that day's closes — so the answer is about the
+    portfolio of the time. Before the imported history reaches, that can't be
+    rebuilt, and today's book stands in, with a note saying so."""
     from . import statements
     from .fundamentals import _num
     from .tools import BASE_CURRENCY, _aligned_closes, _fx_rate
 
-    positions = statements.query_positions(account=account)
-    weights, total = {}, 0.0
-    for p in positions:
-        sym = (p.get("symbol") or "").upper()
-        val = _num(p.get("value")) or 0.0
-        r = _fx_rate((p.get("currency") or BASE_CURRENCY).upper()) or 1.0
-        if sym and val > 0:
-            weights[sym] = weights.get(sym, 0.0) + val * r
-            total += val * r
-    if not weights or total <= 0:
-        return []
-    syms = list(weights)
-    dates, closes = _aligned_closes(syms, days, as_of=as_of)
-    present = [s for s in syms if s in closes]
+    then = statements.holdings_on(as_of, account=account) if as_of else None
+    if as_of is not None and then is not None:
+        held = {s: (float(r["quantity"]), str(r["currency"] or BASE_CURRENCY).upper())
+                for s, r in then["positions"].items() if r["quantity"] > 0}
+        syms = list(held)
+        dates, closes = _aligned_closes(syms, days, as_of=as_of)
+        weights = {}
+        for s in syms:
+            if s in closes and closes[s]:
+                qty, ccy = held[s]
+                weights[s] = qty * closes[s][-1] * (_fx_rate(ccy) or 1.0)
+        note = (f"weights: what you held on {dates[-1] if dates else as_of.isoformat()}, "
+                "rebuilt from your positions and the trades since, valued at that "
+                "day's closes (FX at today's rate).")
+    else:
+        weights = {}
+        for p in statements.query_positions(account=account):
+            sym = (p.get("symbol") or "").upper()
+            val = _num(p.get("value")) or 0.0
+            r = _fx_rate((p.get("currency") or BASE_CURRENCY).upper()) or 1.0
+            if sym and val > 0:
+                weights[sym] = weights.get(sym, 0.0) + val * r
+        syms = list(weights)
+        if not syms:
+            return [], ""
+        dates, closes = _aligned_closes(syms, days, as_of=as_of)
+        note = ""
+        if as_of:
+            since = statements.covered_since(account)
+            note = (
+                "note: the returns are as of the date above, but the weights are your "
+                "CURRENT holdings — this is how today's book would have loaded back "
+                "then, not what you actually held"
+                + (f" (your imported trades only reach back to {since})." if since
+                   else " (no imported trades to rebuild the holdings from).")
+            )
+    present = [s for s in syms if s in closes and weights.get(s, 0.0) > 0]
     if len(dates) < 2 or not present:
-        return []
+        return [], note
     wsum = sum(weights[s] for s in present) or 1.0
     out = []
     for i in range(1, len(dates)):
@@ -150,7 +174,7 @@ def _portfolio_returns(
             if prev:
                 r += (weights[s] / wsum) * (closes[s][i] - prev) / prev
         out.append((dates[i], r))
-    return out
+    return out, note
 
 
 def _regress(returns: list[tuple[str, float]], five_factor: bool):
@@ -208,10 +232,11 @@ def factor_exposure(symbol: str = "", days: int = 365, five_factor: bool = False
     except AsOfError as exc:
         return str(exc)
     subject = symbol.strip().upper() if symbol.strip() else "PORTFOLIO"
-    returns = (
-        _ticker_returns(subject, days, as_of=stamp) if symbol.strip()
-        else _portfolio_returns(days, as_of=stamp)
-    )
+    weights_note = ""
+    if symbol.strip():
+        returns = _ticker_returns(subject, days, as_of=stamp)
+    else:
+        returns, weights_note = _portfolio_returns(days, as_of=stamp)
     if not returns:
         return (
             f"Not enough return data for {subject}"
@@ -256,15 +281,10 @@ def factor_exposure(symbol: str = "", days: int = 365, five_factor: bool = False
         "(Regression estimate over the window — loadings and alpha are noisy and "
         "not significance-tested; delayed data, not investment advice.)"
     )
-    if stamp and not symbol.strip():
-        # The returns are point-in-time; the WEIGHTS are not, and only the portfolio
-        # branch has weights. Saying so is the difference between an approximation
-        # and a misreading.
-        lines.append(
-            "note: the returns are as of the date above, but the weights are your "
-            "CURRENT holdings — this is how today's book would have loaded back "
-            "then, not what you actually held."
-        )
+    if weights_note:
+        # Only the portfolio branch has weights, and a dated one has to say whose:
+        # the book of the time, or today's standing in for it.
+        lines.append(weights_note)
     return "\n".join(lines)
 
 

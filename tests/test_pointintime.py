@@ -344,27 +344,62 @@ def test_factor_exposure_regresses_only_over_the_window(monkeypatch):
     assert _days(dated) < _days(current), "the regression must use fewer days"
 
 
-def test_a_dated_portfolio_regression_says_the_weights_are_current(monkeypatch):
-    """The returns are point-in-time; the weights are whatever is held NOW, because
-    the statement store has no position history. An unlabelled answer would read as
-    'this is what you held then', which it is not."""
+def _two_holdings(monkeypatch, held_then):
+    """Today the book is all AAA; ``held_then`` is what ``holdings_on`` reports
+    for the dated day (None: the history doesn't reach it). AAA and BBB move
+    differently, so the returns say whose weights were used."""
+    import financial_research_assistant.tools as t
+    from financial_research_assistant import statements
+
+    _fake_factors(monkeypatch)
+    paths = {
+        "AAA": [(d, 100.0 + i * 0.4 + (i % 7)) for i, d in enumerate(_ff_dates())],
+        "BBB": [(d, 50.0 + (i % 3) * 2.0) for i, d in enumerate(_ff_dates())],
+    }
+    monkeypatch.setattr(t, "_fetch_daily", lambda sym, days, strict=False, as_of=None, **_kw:
+                        pit.as_of_series(paths.get(sym, []), as_of))
+    monkeypatch.setattr(statements, "query_positions", lambda account=None: [
+        {"symbol": "AAA", "value": 1000.0, "currency": "USD"}])
+    monkeypatch.setattr(statements, "holdings_on", lambda day, account=None: held_then)
+    monkeypatch.setattr(statements, "covered_since", lambda account=None: "2025-02-15")
+    return paths
+
+
+def _daily(series):
+    return [(series[i][0], (series[i][1] - series[i - 1][1]) / series[i - 1][1])
+            for i in range(1, len(series))]
+
+
+def test_a_dated_portfolio_regression_uses_what_was_held_then(monkeypatch):
+    """Today's book is AAA; on the date it was BBB. The regression is about the
+    portfolio of the time, so its returns are BBB's."""
+    from datetime import date
+
     from financial_research_assistant import factors
 
-    _fake_factor_prices(monkeypatch)
-    _fake_factors(monkeypatch)
-    # The portfolio branch reads the statement store; stub it to the same series
-    # shape so this test is about the caveat, not about holdings plumbing. It
-    # still honours as_of, so a regression really does run over the cut window.
-    def portfolio_returns(days, account=None, as_of=None):
-        rows = pit.as_of_series([(d, 0.0) for d in _ff_dates()], as_of)
-        return [(d, 0.001 * ((i % 5) - 2)) for i, (d, _) in enumerate(rows)]
-
-    monkeypatch.setattr(factors, "_portfolio_returns", portfolio_returns)
+    paths = _two_holdings(monkeypatch, {"since": "2024-01-01", "positions": {
+        "BBB": {"quantity": 20.0, "currency": "USD"}}})
+    cut = date.fromisoformat(_FF_CUT)
+    returns, note = factors._portfolio_returns(_FF_DAYS, as_of=cut)
+    assert returns == pytest.approx(_daily(pit.as_of_series(paths["BBB"], cut)))
+    assert "what you held on" in note
     out = factors.factor_exposure("", days=_FF_DAYS, as_of=_FF_CUT)
-    assert "CURRENT holdings" in out
-    # A ticker regression has no weights, so it must not carry the caveat.
-    dated_ticker = factors.factor_exposure("AAPL", days=_FF_DAYS, as_of=_FF_CUT)
-    assert "CURRENT holdings" not in dated_ticker
+    assert "what you held on" in out and "CURRENT holdings" not in out
+
+
+def test_before_the_history_reaches_todays_book_stands_in_and_says_so(monkeypatch):
+    from datetime import date
+
+    from financial_research_assistant import factors
+
+    paths = _two_holdings(monkeypatch, None)
+    cut = date.fromisoformat(_FF_CUT)
+    returns, _note = factors._portfolio_returns(_FF_DAYS, as_of=cut)
+    assert returns == pytest.approx(_daily(pit.as_of_series(paths["AAA"], cut)))
+    out = factors.factor_exposure("", days=_FF_DAYS, as_of=_FF_CUT)
+    assert "CURRENT holdings" in out and "only reach back to 2025-02-15" in out
+    # A ticker regression has no weights, so it carries no weights note.
+    assert "CURRENT holdings" not in factors.factor_exposure("AAA", days=_FF_DAYS, as_of=_FF_CUT)
     # Nor does an undated portfolio one — the caveat is about MIXING eras.
     assert "CURRENT holdings" not in factors.factor_exposure("", days=_FF_DAYS)
 

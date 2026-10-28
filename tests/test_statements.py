@@ -801,3 +801,63 @@ def test_the_portfolio_total_is_summed_before_it_is_rounded(monkeypatch, tmp_pat
     assert sum(p["unrealized_pl"] for p in res["positions"]) == 3.00, (
         "the displayed rows sum to something else — which is the trap"
     )
+
+
+# --- holdings on a past day ----------------------------------------------------------------
+
+
+def test_holdings_on_a_past_day_undo_the_trades_since(monkeypatch, tmp_path):
+    """Held at the end: AMZN 4, VOO 10. AMZN was 10 before its February sale, and
+    MSFT was bought and sold inside March, so it is held mid-March and not before
+    or after. VOO has no trades in the period, so it was held throughout."""
+    from datetime import date
+
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_BUYSELL_STATEMENT)
+
+    def qty(day):
+        held = s.holdings_on(day)
+        return {sym: r["quantity"] for sym, r in held["positions"].items()}
+
+    assert qty(date(2025, 12, 31)) == {"AMZN": 4, "VOO": 10}
+    assert qty(date(2025, 3, 15)) == {"AMZN": 4, "VOO": 10, "MSFT": 4}
+    assert qty(date(2025, 1, 15)) == {"AMZN": 10, "VOO": 10}
+    assert s.holdings_on(date(2025, 3, 15))["positions"]["MSFT"]["currency"] == "USD"
+    # Before the statement starts, a trade that should be undone may be missing.
+    assert s.holdings_on(date(2023, 12, 1)) is None
+
+
+def test_a_split_since_is_undone_too(monkeypatch, tmp_path):
+    from datetime import date
+
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(
+        'Statement,Data,Period,"January 1, 2024 - December 31, 2024"\n'
+        "Corporate Actions,Header,Asset Category,Currency,Account,Report Date,Date/Time,"
+        "Description,Quantity,Proceeds,Value,Realized P/L,Code\n"
+        'Corporate Actions,Data,Stocks,USD,U1,2024-10-11,"2024-10-10, 20:25:00",'
+        '"SCHD(US8) Split 3 for 1 (SCHD, ETF, US8)",20,0,0,0,\n'
+        "Open Positions,Header,DataDiscriminator,Asset Category,Currency,Symbol,Quantity,"
+        "Mult,Cost Price,Cost Basis,Close Price,Value,Unrealized P/L,Code\n"
+        "Open Positions,Data,Summary,ETFs,USD,SCHD,30,1,25,750,27,810,60,\n"
+    )
+    assert s.holdings_on(date(2024, 12, 1))["positions"]["SCHD"]["quantity"] == 30
+    assert s.holdings_on(date(2024, 9, 1))["positions"]["SCHD"]["quantity"] == 10
+
+
+def test_history_is_covered_only_back_to_a_gap(monkeypatch, tmp_path):
+    """A month nobody imported may hold trades, so the walk back stops at it."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.import_statement(_trades_statement("January 1, 2025 - January 31, 2025", _MARCH_BUY))
+    s.import_statement(_trades_statement("March 1, 2025 - March 31, 2025", _MARCH_SELL))
+    assert s.covered_since() == "2025-03-01"
+    s.import_statement(_trades_statement(
+        "February 1, 2025 - February 28, 2025",
+        'Trades,Data,Order,Stocks,USD,U1,VOO,"2025-02-10, 10:00:00",1,500,500,-500,0,500,0,0,\n'))
+    assert s.covered_since() == "2025-01-01"
