@@ -331,13 +331,19 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     _log(f"▶ task {tid}: {prompt[:80]}" + ("" if is_job else f" [{session}]"))
     files: list[str] = []
     notify = True
+    from . import replay
+
     try:
-        if is_job:
-            ok, answer, files, notify = await _run_job(task, fake)
-        else:
-            # The stored prompt stays clean (it's what `--tasks` shows and what the
-            # user wrote); the framing is added only on the way into the model.
-            ok, answer = await _answer(f"{_TASK_PREAMBLE}\n\n{prompt}", session, fake=fake)
+        # One request per occurrence: `due` moves only on success, so every retry
+        # and every reclaim after a crash shares the key, and a tool that acts
+        # does not act again (see replay.py).
+        with replay.request(f"task:{tid}:{task.get('due')}"):
+            if is_job:
+                ok, answer, files, notify = await _run_job(task, fake)
+            else:
+                # The stored prompt stays clean (it's what `--tasks` shows and what
+                # the user wrote); the framing is added only on the way into the model.
+                ok, answer = await _answer(f"{_TASK_PREAMBLE}\n\n{prompt}", session, fake=fake)
     except asyncio.CancelledError:
         # Ctrl-C or a killed watcher: hand the task back rather than leaving it
         # stuck in "running", which nothing would ever claim again.
@@ -614,13 +620,20 @@ async def poll_inbox(fake: bool = False, timeout: int = 0) -> list[dict[str, Any
 
             ok, reply = False, f"That command failed: {describe_error(exc)}"
         if reply is None:
+            from . import replay
+
             token = _CURRENT_LANE.set("chat")
             started = time.monotonic()
             _LAST_TURN.set({})
             try:
-                ok, reply = await _answer(
-                    text, _CHAT_SESSION.format(chat_id=chat_id), fake=fake
-                )
+                # A restart mid-answer answers the same update again (at-least-once,
+                # above); the key keeps that second answer from acting twice.
+                update_id = msg.get("update_id")
+                with (replay.request(f"telegram:{update_id}") if update_id is not None
+                      else contextlib.nullcontext()):
+                    ok, reply = await _answer(
+                        text, _CHAT_SESSION.format(chat_id=chat_id), fake=fake
+                    )
             finally:
                 _CURRENT_LANE.reset(token)
             log_run("chat", str(msg.get("update_id") or ""), ok, started,

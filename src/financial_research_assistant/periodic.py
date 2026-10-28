@@ -976,7 +976,15 @@ async def periodic_report(kind: str = "daily", deliver: bool = True) -> str:
     weekly (the week of the latest session) or monthly (last calendar month).
     Returns the report's summary; the PDF goes to the delivery channels when
     ``deliver`` is true."""
-    return await report_now(kind, deliver=deliver)
+    if not deliver:
+        return await report_now(kind, deliver=False)
+    from . import replay
+
+    async def act() -> tuple[bool, str]:
+        return True, await report_now(kind, deliver=True)
+
+    # Sent once per request: a rerun would push the same files to the phone again.
+    return await replay.once_async("periodic_report", (kind or "daily").strip().lower(), act)
 
 
 def _make_tools() -> list[Any]:
