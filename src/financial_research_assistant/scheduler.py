@@ -172,7 +172,8 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-async def _answer(prompt: str, session_id: str, fake: bool = False) -> tuple[bool, str]:
+async def _answer(prompt: str, session_id: str, fake: bool = False,
+                  resume: bool = False) -> tuple[bool, str]:
     """Run one turn and return ``(ok, answer_or_error)``.
 
     Consumes the whole event stream rather than the final event alone: ``run_turn``
@@ -189,7 +190,9 @@ async def _answer(prompt: str, session_id: str, fake: bool = False) -> tuple[boo
     lane = _CURRENT_LANE.get()
     async with _lane(lane):
         with catalog.unattended():
-            ok, text = await _answer_unlocked(prompt, session_id, fake)
+            # `resume` only when set, as in run_task: stand-ins model the fresh call.
+            ok, text = await (_answer_unlocked(prompt, session_id, fake, resume=True)
+                              if resume else _answer_unlocked(prompt, session_id, fake))
     if lane != "chat":
         # A background turn is autonomous spend — a scheduled task nobody is
         # waiting on — so it counts toward the budget line like the reports'
@@ -215,7 +218,8 @@ _LAST_TURN: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
 )
 
 
-async def _answer_unlocked(prompt: str, session_id: str, fake: bool) -> tuple[bool, str]:
+async def _answer_unlocked(prompt: str, session_id: str, fake: bool,
+                           resume: bool = False) -> tuple[bool, str]:
     from . import sessions
     from .adapter import run_turn
     from .tracing import traced
@@ -228,7 +232,8 @@ async def _answer_unlocked(prompt: str, session_id: str, fake: bool) -> tuple[bo
     stats: dict[str, Any] = {"tokens_in": 0, "tokens_out": 0, "tools": [], "model": model}
     _LAST_TURN.set(stats)
     async for ev in traced(
-        run_turn(prompt, session_id, fake=fake),
+        (run_turn(prompt, session_id, fake=fake, resume=True) if resume
+         else run_turn(prompt, session_id, fake=fake)),
         user_msg=prompt, session_id=session_id, model=model, fake=fake,
     ):
         if ev.kind == "final":
@@ -325,10 +330,21 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     tid = str(task.get("id"))
     prompt = str(task.get("prompt", ""))
     is_job = task.get("kind") == "job"
-    session = run_session(task)
+    from .adapter import interrupted
+
+    # A retry of an occurrence whose turn stopped partway — a crash, a provider
+    # error after several tools — continues that conversation from its last
+    # checkpoint rather than paying for the same tools again. One that finished,
+    # even with a poor answer, starts afresh as before.
+    earlier = "" if is_job else tasks.unfinished_run(task)
+    resume = bool(earlier) and await interrupted(earlier)
+    session = earlier if resume else run_session(task)
+    if not is_job and not resume:
+        tasks.note_run(tid, task.get("due"), session)
     started = time.monotonic()
     _LAST_TURN.set({})
-    _log(f"▶ task {tid}: {prompt[:80]}" + ("" if is_job else f" [{session}]"))
+    _log(f"▶ task {tid}: {prompt[:80]}"
+         + ("" if is_job else f" [{session}{', resuming' if resume else ''}]"))
     files: list[str] = []
     notify = True
     from . import replay
@@ -343,7 +359,11 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
             else:
                 # The stored prompt stays clean (it's what `--tasks` shows and what
                 # the user wrote); the framing is added only on the way into the model.
-                ok, answer = await _answer(f"{_TASK_PREAMBLE}\n\n{prompt}", session, fake=fake)
+                framed = f"{_TASK_PREAMBLE}\n\n{prompt}"
+                # `resume` only when set: the turn's test stand-ins take (prompt,
+                # session, fake), and a fresh run is exactly the call they model.
+                ok, answer = await (_answer(framed, session, fake=fake, resume=True)
+                                    if resume else _answer(framed, session, fake=fake))
     except asyncio.CancelledError:
         # Ctrl-C or a killed watcher: hand the task back rather than leaving it
         # stuck in "running", which nothing would ever claim again.

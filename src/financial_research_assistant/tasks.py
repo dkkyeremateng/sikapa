@@ -815,6 +815,30 @@ def claim_due(now: datetime | None = None, limit: int | None = None) -> list[dic
     return claimed
 
 
+def note_run(task_id: str, due: Any, session: str) -> None:
+    """Remember the conversation an occurrence started, so a retry of that same
+    occurrence can resume it (``unfinished_run``) instead of starting over."""
+    with _locked():
+        items = load_tasks()
+        for t in items:
+            if str(t.get("id")) == str(task_id):
+                t["run"] = {"due": due, "session": session}
+                save_tasks(items)
+                return
+
+
+def unfinished_run(task: dict[str, Any]) -> str:
+    """The conversation an earlier attempt at this occurrence started, or "".
+
+    Matched on ``due``, which moves only on success or when the occurrence is
+    given up — either way a new occurrence, which must not inherit the old one.
+    """
+    run = task.get("run")
+    if isinstance(run, dict) and run.get("due") == task.get("due") and run.get("session"):
+        return str(run["session"])
+    return ""
+
+
 def release(task_id: str) -> None:
     """Put a claimed task back to pending, unchanged.
 
@@ -854,6 +878,7 @@ def record_result(task_id: str, ok: bool, result: str, now: datetime | None = No
             exhausted = False
             if ok:
                 t["attempts"] = 0
+                t.pop("run", None)  # finished: nothing left to resume
                 due = _parse_due(t.get("due")) or now
                 nxt = _next_for(t, due)
                 if nxt is None:
