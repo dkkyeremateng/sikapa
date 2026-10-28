@@ -604,3 +604,73 @@ def test_a_slow_delivery_leaves_the_rest_of_the_loop_running(monkeypatch, answer
     ticks = asyncio.run(_ticks_while(scheduler.run_due()))
     assert ticks > 2, "the loop was blocked behind the delivery"
     assert sent, "and the answer was still delivered"
+
+
+# --- the task framing is not the user's request -----------------------------------
+
+
+def _real_turns_on(monkeypatch, replies):
+    """Real ``_answer`` and ``run_turn``, on a one-node graph that replies with
+    ``replies`` in order — so the claim checks run on what the runner sends."""
+    import contextlib
+
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    from financial_research_assistant import adapter
+
+    it = iter(replies)
+
+    def model(state: MessagesState):
+        return {"messages": [AIMessage(content=next(it))]}
+
+    g = StateGraph(MessagesState)
+    g.add_node("model", model)
+    g.add_edge(START, "model")
+    g.add_edge("model", END)
+    graph = g.compile(checkpointer=MemorySaver())
+
+    @contextlib.asynccontextmanager
+    async def ctx(session_id, fake, model, think):
+        yield graph
+
+    monkeypatch.setattr(adapter, "_graph_ctx", ctx)
+    monkeypatch.setattr(adapter, "get_memory", lambda: None)
+
+
+def test_the_preamble_is_framing_the_claim_checks_read_past():
+    from financial_research_assistant import adapter
+
+    assert scheduler._TASK_PREAMBLE.startswith(adapter.FRAMING_MARK)
+    assert "\n\n" not in scheduler._TASK_PREAMBLE, "framing is one paragraph"
+    assert adapter.instruction(f"{scheduler._TASK_PREAMBLE}\n\ncheck NVDA") == "check NVDA"
+    assert adapter.instruction("make me a report") == "make me a report"
+
+
+def test_a_scheduled_answer_is_not_told_it_skipped_a_report_nobody_asked_for(
+        monkeypatch, delivered):
+    """The preamble says "if it refers to a report… produce that work", which the
+    report check read as a request: every scheduled answer that drew no file was
+    delivered with "no report was produced" appended."""
+    answer = "NVDA closed at 182.10, up 2.3% on the week; volume ran 18% above average."
+    _real_turns_on(monkeypatch, [answer])
+    tasks.add_task("check NVDA", "+0m")
+    asyncio.run(scheduler.run_due())
+    assert answer in delivered[0][1]
+    assert "no report was produced" not in delivered[0][1]
+
+
+def test_a_too_short_scheduled_reply_is_still_retried(monkeypatch, delivered):
+    """The note's length used to carry a two-character reply past the gate."""
+    _real_turns_on(monkeypatch, ["ok"])
+    tasks.add_task("check NVDA", "+0m")
+    results = asyncio.run(scheduler.run_due())
+    assert [r["ok"] for r in results] == [False] and delivered == []
+
+
+def test_a_task_that_asks_for_a_report_is_still_held_to_it(monkeypatch, delivered):
+    _real_turns_on(monkeypatch, ["NVDA up 2.3% on the week, volume 18% above its average."])
+    tasks.add_task("send me a report on NVDA", "+0m")
+    asyncio.run(scheduler.run_due())
+    assert "no report was produced" in delivered[0][1]

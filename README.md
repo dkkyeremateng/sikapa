@@ -798,6 +798,12 @@ minutes (`FINANCIAL_RESEARCH_TASK_CLAIM_TIMEOUT`) is therefore treated as
 abandoned and picked up again, counting as one of the three attempts so a prompt
 that reliably kills its runner still parks instead of looping.
 
+With durable checkpoints on (`FINANCIAL_RESEARCH_CHECKPOINT_DB`), a retry of a run
+that stopped partway — killed, or a provider error after several tools — resumes
+that conversation from its last checkpoint instead of starting over: the tool
+results it already paid for are kept, and only the unfinished step runs again. A
+run that finished, even with an answer the gate rejected, is retried afresh.
+
 Recurrence follows the **wall clock**, not a fixed number of hours: a daily 09:00
 brief stays at 09:00 through a daylight-saving change rather than drifting to
 08:00 or 10:00. (`hourly` is the exception, and stays a real hour — there is no

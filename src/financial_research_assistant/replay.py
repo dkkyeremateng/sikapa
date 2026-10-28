@@ -84,6 +84,18 @@ def nth(tool: str) -> str:
         return str(counts[tool])
 
 
+def already_called(tools: list[str]) -> None:
+    """Count calls this attempt inherits rather than makes: a resumed turn keeps
+    the earlier attempt's finished tool calls, so its next ``schedule_task`` is
+    the one after them, not the first."""
+    counts = _COUNTS.get()
+    if counts is None:
+        return
+    with _COUNT_LOCK:
+        for tool in tools:
+            counts[tool] = counts.get(tool, 0) + 1
+
+
 def _entry_key(tool: str, identity: str) -> str:
     return f"{_REQUEST.get()}|{tool}|{identity}"
 

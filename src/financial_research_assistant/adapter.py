@@ -30,7 +30,7 @@ import os
 import re
 import time
 
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -400,6 +400,53 @@ async def heal_thread(graph: Any, config: RunnableConfig, as_node: str) -> int:
     return synthesized
 
 
+def _stopped_mid_run(messages: list[BaseMessage]) -> bool:
+    """True when a thread's last message is one the graph still owes a step for:
+    the question or a tool result with no reply yet, or tool calls with no
+    results. A thread ending in a plain answer finished, however good it was."""
+    if not messages:
+        return False
+    last = messages[-1]
+    if isinstance(last, AIMessage):
+        return bool(_tool_call_ids(last))
+    return isinstance(last, (HumanMessage, ToolMessage))
+
+
+async def interrupted(session_id: str) -> bool:
+    """Whether ``session_id`` stopped partway through a turn and can be resumed.
+
+    Reads the last durable checkpoint directly rather than building the graph,
+    so asking costs no broker session. Always False without durable checkpoints:
+    an in-memory thread does not outlive the process, or even ``release_session``.
+    """
+    db = _checkpoint_db_path()
+    if db is None or not db.exists():
+        return False
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    try:
+        async with AsyncSqliteSaver.from_conn_string(str(db)) as saver:
+            found = await saver.aget_tuple({"configurable": {"thread_id": session_id}})
+    except Exception:  # noqa: BLE001 - an unreadable store means "start afresh"
+        return False
+    if found is None:
+        return False
+    values = found.checkpoint.get("channel_values") or {}
+    return _stopped_mid_run(list(values.get("messages") or []))
+
+
+def _tools_since_question(messages: list[BaseMessage]) -> list[str]:
+    """The tools that already answered in the current turn: every tool result
+    after the last question."""
+    names: list[str] = []
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            break
+        if isinstance(msg, ToolMessage):
+            names.append(msg.name or "tool")
+    return names[::-1]
+
+
 COMPACT_KEEP_LAST = 4  # recent messages left verbatim after the summary seed
 
 
@@ -661,7 +708,7 @@ def _from_own_node(meta: dict[str, Any] | None) -> bool:
 
 async def _stream_events(
     graph: Any,
-    inputs: dict[str, Any],
+    inputs: dict[str, Any] | None,
     config: RunnableConfig,
     stats: dict[str, Any] | None = None,
 ):
@@ -1124,12 +1171,34 @@ def _recall_and_frame(user_msg: str) -> tuple[str, str | None]:
     return content, detail
 
 
+#: How a runner marks framing it puts in front of the user's own words: one
+#: paragraph starting with this, then a blank line, then the instruction. The
+#: scheduler's task preamble is the one that exists.
+FRAMING_MARK = "[SCHEDULED TASK]"
+
+
+def instruction(user_msg: str) -> str:
+    """The user's own words in ``user_msg``, without a runner's framing.
+
+    The claim checks match the REQUEST, and framing is not one: the task preamble
+    says "if it refers to a report… PRODUCE that work", which reads as asking for
+    a report. Checked against it, every scheduled answer that rendered no file
+    was told "no report was produced", and the note's length carried a too-short
+    non-answer past the scheduler's gate.
+    """
+    if not user_msg.startswith(FRAMING_MARK):
+        return user_msg
+    _framing, _sep, rest = user_msg.partition("\n\n")
+    return rest
+
+
 async def run_turn(
     user_msg: str,
     session_id: str,
     fake: bool = False,
     model: str | None = None,
     think: bool = True,
+    resume: bool = False,
 ):
     """Run one conversational turn.
 
@@ -1139,6 +1208,13 @@ async def run_turn(
     ``session_id`` via the graph's thread_id config; ``model`` overrides the
     model factory for this session. ``think=False`` suppresses reasoning
     events (and the fake graph's reasoning), so no 💭 trace is produced.
+
+    ``resume=True`` continues a turn that stopped partway (see ``interrupted``)
+    from its last checkpoint: ``user_msg`` was already asked, so it is not sent
+    again, and the tool results already in the thread are kept rather than
+    healed into "interrupted". A pending tool call runs again, which is safe
+    because a tool that acts does so once per request (``replay``). If the
+    thread turns out to have nothing pending, this is an ordinary turn.
     """
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     try:
@@ -1150,7 +1226,11 @@ async def run_turn(
         # the recalled context degrades the answer, losing the turn cancels it.
         try:
             mem = get_memory()
-            content, recall_status = _recall_and_frame(user_msg)
+            # A resumed turn's question is already in the thread, framed with
+            # whatever was recalled the first time.
+            content, recall_status = (
+                (user_msg, None) if resume else _recall_and_frame(user_msg)
+            )
         except Exception as e:  # noqa: BLE001 - any backend, any failure
             mem, content, recall_status = None, user_msg, None
             yield AgentEvent(
@@ -1166,7 +1246,8 @@ async def run_turn(
         # context stays bounded. Works for any interface (headless, eval, service),
         # not just the TUI's /compact command.
         frac = _autocompact_fraction()
-        if frac is not None:
+        # Not mid-turn: compacting would rewrite the history the resume continues.
+        if frac is not None and not resume:
             prev = _last_input.get(session_id, 0)
             cap = context_cap(_resolved_model(model))
             if prev and prev >= cap * frac:
@@ -1207,29 +1288,49 @@ async def run_turn(
         # all within this task. It also raises here when no model is configured,
         # which must surface as an "error" event too.
         async with _graph_ctx(session_id, fake, model, think) as graph:
-            # A turn that died between the model node and the tool node leaves a
-            # tool call with no result in the checkpoint, and every provider
-            # rejects that history — so the session would answer nothing until
-            # it was cleared. Heal it here instead, and say so rather than
-            # editing the conversation behind the user's back.
-            try:
-                healed = await heal_thread(
-                    graph, config, "respond" if fake else "model"
-                )
-            except Exception:  # noqa: BLE001 - a failed repair must not block the turn
-                healed = 0
-            if healed:
+            called_tools: set[str] = set()  # for the unbacked-claim check below
+            state = await graph.aget_state(config) if resume else None
+            pending = bool(state is not None and state.next)
+            stream_inputs: dict[str, Any] | None = inputs
+            if pending:
+                from . import replay
+
+                # Continue the graph where it stopped. The tools that already
+                # answered count as called, both for the claim check below and
+                # for the position `schedule_task` is matched by (replay.nth).
+                assert state is not None
+                done = _tools_since_question(list(state.values.get("messages") or []))
+                called_tools.update(done)
+                replay.already_called(done)
+                stream_inputs = None
                 yield AgentEvent(
                     "status",
-                    f"recovered {healed} unfinished tool call(s) from an "
-                    "interrupted turn — their results are gone, so ask again if "
-                    "an answer below looks thin",
+                    "resumed an interrupted run from its last checkpoint"
+                    + (f" — kept {len(done)} tool result(s)" if done else ""),
                 )
+            else:
+                # A turn that died between the model node and the tool node leaves
+                # a tool call with no result in the checkpoint, and every provider
+                # rejects that history — so the session would answer nothing until
+                # it was cleared. Heal it here instead, and say so rather than
+                # editing the conversation behind the user's back.
+                try:
+                    healed = await heal_thread(
+                        graph, config, "respond" if fake else "model"
+                    )
+                except Exception:  # noqa: BLE001 - a failed repair must not block the turn
+                    healed = 0
+                if healed:
+                    yield AgentEvent(
+                        "status",
+                        f"recovered {healed} unfinished tool call(s) from an "
+                        "interrupted turn — their results are gone, so ask again if "
+                        "an answer below looks thin",
+                    )
             # One code path for both modes: the fake graph streams its answer as a
             # complete AIMessage (no token chunks) carrying reasoning_content, so
             # the reasoning panel is exercised and the answer is read back below.
             parts: list[str] = []
-            called_tools: set[str] = set()  # for the unbacked-claim check below
             emitted_in = emitted_out = emitted_cache = emitted_write = 0  # live usage already yielded
             stats: dict[str, Any] = {}  # out-of-band figures from the stream
             cb_ctx = (
@@ -1238,7 +1339,7 @@ async def run_turn(
                 else contextlib.nullcontext()
             )
             with cb_ctx as cb:
-                async for ev in _stream_events(graph, inputs, config, stats):
+                async for ev in _stream_events(graph, stream_inputs, config, stats):
                     if ev.kind == "reasoning" and not think:
                         continue  # thinking disabled: drop the reasoning trace
                     if ev.kind == "tool_end":
@@ -1298,12 +1399,15 @@ async def run_turn(
                 # how full the window is now — not the cumulative session input.
                 context_tokens=context_in,
             )
+            # The checks ask what the USER asked for, so they read past any framing
+            # a runner put in front of it (see ``instruction``).
+            asked = instruction(user_msg)
             settled = await settle_schedule_claim(
-                user_msg, answer, called_tools, fake
+                asked, answer, called_tools, fake
             )
             yield AgentEvent(
                 "final",
-                await settle_delivery_claim(settled, called_tools, fake, user_msg),
+                await settle_delivery_claim(settled, called_tools, fake, asked),
             )
     except Exception as e:  # surface as an event, never raise into the UI
         yield AgentEvent("error", describe_error(e))
