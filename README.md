@@ -886,14 +886,19 @@ tokens:
 |---|---|
 | `price_move` | a holding or watchlist symbol moves more than max(3%, 2σ of its own daily moves) today. It only fires on a bar dated today, so yesterday's move is never re-announced before the open |
 | `alert_level` | one of your alert rules fires. They're now checked on every pass, not only when a digest is built |
-| `sec_filing` | a company you hold files an 8-K, 10-Q, 10-K or 13D. A company's existing filings are recorded the first time it's seen, so starting up doesn't announce history |
+| `sec_filing` | a company you hold files an 8-K, 10-Q, 10-K or 13D. A company's existing filings are recorded the first time it's seen, so starting up doesn't announce history. A 10-Q or 10-K goes to the daily report, since the earnings 8-K before it carried the news |
 | `earnings_out` | an 8-K with item 2.02: the results are out |
 | `thesis_break` | an open call crosses the invalidation level it named, or moves ±15% since entry |
 | `data_stale` | the positions on file are older than the staleness limit (said once per statement) |
 
 **Routing** decides what an event is worth. Severity comes from what happened
 and how much of the book it touches: a 6% move in a 1% position is background,
-while the same move in a 20% position is news. `high` is pushed at once with a
+while the same move in a 20% position is news. A held stock's move is `high`
+when it is worth `FRA_EVENT_PUSH_IMPACT_PCT` (0.5) of the book or twice the
+stock's own threshold, and `low` otherwise: the first month live pushed fifteen
+routine moves, and the daily close report lists them hours later anyway. A pass
+routes its most severe events first, so an earnings push starts the cooldown
+that holds back a routine 8-K filed the same minute. `high` is pushed at once with a
 two-sentence note from the cheap model (dropped if it cites a figure it wasn't
 given, and skipped when the budget or `FRA_AUTONOMY_EVENT_TOKENS` is spent).
 `medium` is pushed as facts. `low` waits for the daily report's "Also noticed
@@ -905,6 +910,17 @@ week's alerts and what each stock did afterwards, the first read on whether
 the thresholds are right. `FRA_EVENTS_SHADOW=1` records everything and pushes
 nothing, which the server template turns on for the first week.
 `FRA_EVENTS=off` removes the watcher loop.
+
+### The weekly check-in
+
+Every Monday at 08:00 the `checkin` job measures the book against your profile
+and the journal, and messages you only when something needs a decision: a
+single stock over `max_position_pct`, a sector over `max_sector_pct`, an asset
+class 5 points or more from its target, or an open call 10 points or more
+behind its benchmark (the earliest call per symbol and direction, so repeats
+count once). Each finding is raised once, then again only when it gets worse
+or after four weeks. A week with nothing new sends nothing. `/checkin` shows
+everything that currently applies. It is model-free.
 
 ### Research ideas (stocks, ETFs, other asset classes)
 
@@ -925,8 +941,9 @@ The pipeline is fixed steps with one model judgement in the middle:
    commodities, and optionally bitcoin/ether; or "add to the fund you already
    hold for it"). Three stock screens: momentum over the S&P 500, and quality
    and dividend over the large caps. Your holdings for add/hold/trim. Names the
-   watchers flagged, and your watchlist. Then exclusions, a 30-day cooldown and
-   a transparent score.
+   watchers flagged, and your watchlist. Then exclusions, a 30-day cooldown
+   (holdings included) and a transparent score. The same verdict on a symbol
+   with an open call points at that call rather than opening a second one.
 2. **Evidence, per candidate.** Fundamentals, analysts, risk, the latest SEC
    quarter, news; for a fund, its cost, size, trailing returns vs benchmark,
    overlap with what you own, and correlation with your book, each with its window.

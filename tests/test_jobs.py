@@ -309,3 +309,48 @@ def test_market_hours_are_new_york_hours():
     assert market.regular_hours(datetime(2026, 9, 29, 16, 0, tzinfo=NY)) is False
     assert market.regular_hours(datetime(2026, 10, 3, 11, 0, tzinfo=NY)) is False  # Sat
     assert market.regular_hours(datetime(2026, 9, 29, 13, 0, tzinfo=UTC)) is False  # 9:00 NY
+
+
+_EXPIRED = """<FlexStatementResponse timestamp='28 October, 2026 04:46 PM EDT'>
+<Status>Fail</Status>
+<ErrorCode>1012</ErrorCode>
+<ErrorMessage>Token has expired.</ErrorMessage>
+</FlexStatementResponse>"""
+
+
+def test_an_expired_flex_token_says_how_to_renew_it(monkeypatch, job_runs):
+    """IBKR's own failure response, through the real sync, job and scheduler: the
+    message that reaches the phone names the fix, not just the error."""
+    from financial_research_assistant import flex
+
+    _runs, sent = job_runs
+    monkeypatch.setenv("IBKR_FLEX_TOKEN", "t")
+    monkeypatch.setenv("IBKR_FLEX_QUERY_ID", "q")
+    monkeypatch.setattr(flex, "_flex_get", lambda url, params, timeout: _EXPIRED)
+    t = tasks.add_task("[job] Sync the IBKR Flex statement", "+0m", repeat="weekdays",
+                       kind="job", job="flex-sync")
+    for _ in range(tasks.MAX_ATTEMPTS):
+        tasks.claim_due()
+        asyncio.run(scheduler.run_task(tasks.get_task(t["id"])))
+    [(_kind, text)] = sent
+    assert "Token has expired" in text
+    assert "What to do: The IBKR Flex token has expired" in text
+    assert "Generate New Token" in text and "IBKR_FLEX_TOKEN" in text
+
+
+def test_a_failure_the_user_cannot_fix_gets_no_advice(monkeypatch, job_runs):
+    from financial_research_assistant import remedies
+
+    _runs, sent = job_runs
+
+    async def handler(task, fake):
+        return jobs.JobResult(False, "Flex sync error: URLError: Name or service not known")
+
+    monkeypatch.setitem(jobs._JOBS, "flaky", handler)
+    t = tasks.add_task("[job] flaky", "+0m", kind="job", job="flaky")
+    for _ in range(tasks.MAX_ATTEMPTS):
+        tasks.claim_due()
+        asyncio.run(scheduler.run_task(tasks.get_task(t["id"])))
+    assert "What to do" not in sent[0][1]
+    assert remedies.advice("AuthenticationError: Error code: 401 - invalid x-api-key")
+    assert remedies.advice("Flex sync failed: SendRequest failed: Token is invalid.")
