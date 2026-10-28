@@ -115,6 +115,7 @@ from .transcripts import TRANSCRIPT_TOOLS  # noqa: E402
 from .periodic import PERIODIC_TOOLS  # noqa: E402
 from .recommend import RECOMMEND_TOOLS  # noqa: E402
 from .profile import PROFILE_TOOLS  # noqa: E402
+from .history import HISTORY_TOOLS  # noqa: E402
 
 # `.extend` rather than `+=`: both mutate in place, but `+=` reads as a rebind of
 # an upper-case (i.e. constant) name to a type checker, which flags every line.
@@ -138,6 +139,7 @@ TOOLS.extend(TRANSCRIPT_TOOLS)
 TOOLS.extend(PERIODIC_TOOLS)
 TOOLS.extend(RECOMMEND_TOOLS)
 TOOLS.extend(PROFILE_TOOLS)
+TOOLS.extend(HISTORY_TOOLS)
 
 
 # --- Capability gating -----------------------------------------------------
