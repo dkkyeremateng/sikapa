@@ -1185,7 +1185,11 @@ does not. Slash commands are handled without a model call: `/status`, `/tasks`,
 below. An unknown one gets the help text rather than a model turn. Anything else
 is a prompt, so you can schedule from the phone too. A message is marked read
 only once it has been answered, so a restart mid-answer answers it again rather
-than dropping it.
+than dropping it. The second answer does not act twice: scheduling a task,
+logging a call, sending a report or running the ideas are done once per message,
+and the rerun is told what the first attempt already did. A scheduled task that
+is retried, or reclaimed after a crash, gets the same protection for that run
+(`replay.py`).
 
 This is **off unless you list chat ids** — it is not implied by having configured
 outbound. Anyone can message a bot whose username they guess, and an inbound

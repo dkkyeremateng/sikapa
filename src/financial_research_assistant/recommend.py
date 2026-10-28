@@ -858,9 +858,17 @@ async def recommend_ideas(focus: str = "", sleeve: str = "") -> str:
     'dividends'); ``sleeve`` to an asset class ('bonds', 'reits', 'intl_equity').
     Figures in the result are computed; present the ideas as research with their
     risks and invalidation, never as orders or personal advice."""
-    run_ = await run("light", focus=(sleeve or focus or "").strip())
-    s = sheet(run_)
-    return s["message"].replace("Full sheet attached. ", "") + "\n\n" + s["markdown"][:6000]
+    from . import replay
+
+    async def act() -> tuple[bool, str]:
+        run_ = await run("light", focus=(sleeve or focus or "").strip())
+        s = sheet(run_)
+        return True, s["message"].replace("Full sheet attached. ", "") + "\n\n" + s["markdown"][:6000]
+
+    # One run per sleeve per request. A rerun is worse than a duplicate here: the
+    # cooldown skips the first attempt's picks, so it would log a different set.
+    # The free-text focus is left out of the identity, since a rerun rewords it.
+    return await replay.once_async("recommend_ideas", (sleeve or "").strip().lower(), act)
 
 
 def _make_tools() -> list[Any]:

@@ -192,11 +192,22 @@ def record_thesis(
     ``benchmark``, and the result becomes a lesson you see next time this ticker
     comes up. Review with `review_theses`.
     """
+    from . import replay
+
+    # One call per ticker and direction per request: the thesis is reworded on a
+    # rerun, the call it records is not.
+    identity = f"{(symbol or '').strip().upper()}|{(verdict or '').strip().lower()}"
+    return replay.once("record_thesis", identity, lambda: _record_thesis(
+        symbol, verdict, thesis, horizon_days, benchmark))
+
+
+def _record_thesis(symbol: str, verdict: str, thesis: str, horizon_days: int,
+                   benchmark: str) -> tuple[bool, str]:
     try:
         entry = record_call(symbol, verdict, thesis, horizon_days, benchmark)
     except ValueError as exc:
-        return str(exc)
-    return (
+        return False, str(exc)
+    return True, (
         f"Recorded [{entry['id']}] {entry['verdict'].upper()} {entry['symbol']} at "
         f"{entry['entry_price']:,.2f} (close {entry['entry_date']}), to be scored on "
         f"{entry['due']} ({entry['horizon_days']}d) against {entry['benchmark']}. Say "

@@ -46,8 +46,10 @@ _DISPATCH_NAMES = {"dispatch_subagent", "dispatch_subagents"}
 # recurring model spend, `render_report` pushes a file to the user's phone,
 # `add_alert` starts sending notifications, `record_thesis` writes to a journal the
 # user curates, `import_ibkr_statement` and `ingest_document` read a path off the
-# filesystem into a permanent store. The removals are their mirrors (a subagent
-# that cannot add an alert has no business deleting one).
+# filesystem into a permanent store. `periodic_report` sends a report to the
+# phone, `recommend_ideas` logs its picks in that same journal, and the profile
+# tools rewrite what every later recommendation is fitted to. The removals are
+# their mirrors (a subagent that cannot add an alert has no business deleting one).
 #
 # Withheld from the POOL, before keyword routing and before the all-tools escape
 # hatch — so the no-match fallback ("give it everything rather than strand it")
@@ -59,7 +61,9 @@ _SIDE_EFFECT_NAMES = {
     "schedule_task", "cancel_scheduled_task",
     "add_alert", "remove_alert",
     "record_thesis",
-    "render_report",
+    "render_report", "periodic_report",
+    "recommend_ideas",
+    "add_to_watchlist", "update_investor_profile",
     "import_ibkr_statement",
     "ingest_document", "forget_document",
     "remember", "forget",

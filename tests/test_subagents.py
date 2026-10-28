@@ -74,13 +74,19 @@ def test_a_subagent_is_never_given_a_tool_that_acts_on_the_user(monkeypatch):
         "schedule_task", "cancel_scheduled_task", "add_alert", "remove_alert",
         "record_thesis", "render_report", "import_ibkr_statement",
         "ingest_document", "forget_document",
+        # Missed when the list was first written: one sends a report to the
+        # phone, one logs picks in the journal, two rewrite the investor profile.
+        "periodic_report", "recommend_ideas", "add_to_watchlist",
+        "update_investor_profile",
     }
     # The bootstrap tools among these are bound unconditionally (that is how their
     # store gets its first row), so they really are in the pool to be withheld —
     # without this the assertions below could pass on tools that aren't there.
     catalog_names = {catalog.tool_name(t) for t in catalog.TOOLS}
     assert {"schedule_task", "add_alert", "record_thesis", "render_report",
-            "import_ibkr_statement", "ingest_document"} <= catalog_names
+            "import_ibkr_statement", "ingest_document", "periodic_report",
+            "recommend_ideas", "add_to_watchlist",
+            "update_investor_profile"} <= catalog_names
     # The no-match fallback ("give it everything") — the case that put them there.
     fallback = names("xyzzy plugh")
     assert not (fallback & forbidden)

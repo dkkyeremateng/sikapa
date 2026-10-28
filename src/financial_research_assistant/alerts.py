@@ -366,6 +366,12 @@ def add_alert(symbol: str, kind: str, value: float = 0.0) -> str:
                 "price for below/above.")
     with _locked():
         rules = load_alerts()
+        # An identical rule would fire twice for one move. Refusing it at any time,
+        # not only on a rerun (see replay.py), also covers a request that ran twice.
+        for old in rules:
+            if (old.get("symbol"), old.get("kind"), old.get("value")) == (sym, k, v):
+                return (f"Alert {old.get('id')} already does that: {_describe(old)}. "
+                        "Nothing added.")
         rule = {"id": _next_id(rules), "symbol": sym, "kind": k, "value": v}
         rules.append(rule)
         save_alerts(rules)

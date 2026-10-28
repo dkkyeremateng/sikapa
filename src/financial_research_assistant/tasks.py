@@ -966,15 +966,23 @@ def schedule_task(
     ``channel`` is a delivery channel name (e.g. 'telegram'); blank sends to every
     configured one. Manage with `list_scheduled_tasks` / `cancel_scheduled_task`.
     """
+    from . import replay
+
+    # Matched by position, not wording: a rerun rewords the prompt (see replay.nth).
+    return replay.once("schedule_task", replay.nth("schedule_task"),
+                       lambda: _schedule(prompt, when, repeat, channel, time_zone))
+
+
+def _schedule(prompt: str, when: str, repeat: str, channel: str, time_zone: str) -> tuple[bool, str]:
     try:
         task = add_task(prompt, when, repeat, channel, tz=time_zone)
     except ValueError as exc:
-        return f"Could not schedule that: {exc}"
+        return False, f"Could not schedule that: {exc}"
     due_local = _as_local(_parse_due(task["due"]) or now_utc(), zone(time_zone or None))
     from . import channels
 
     where = channels.describe_targets(task["channel"])
-    return (
+    return True, (
         f"Scheduled [{task['id']}] for {due_local:%Y-%m-%d %H:%M} "
         f"{time_zone or 'local'}"
         f"{'' if task['repeat'] == 'once' else ', repeating ' + task['repeat']}. "
