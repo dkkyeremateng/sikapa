@@ -298,7 +298,10 @@ offline deterministic fake mode, and a generic eval harness.
 >   (RMW) and investment (CMA) in 5-factor mode — with annualized **alpha** and
 >   **R²**. Reveals style tilts (small/large-cap, value/growth) and how much of your
 >   return is unexplained factor-wise, a lens beyond single-factor beta. Factors
->   from the Ken French Data Library (keyless).
+>   from the Ken French Data Library (keyless). With `as_of`, the portfolio is
+>   weighted by what you held on that date — today's positions with the imported
+>   trades and splits since undone — valued at that day's closes. Before your
+>   imported history reaches, it falls back to today's holdings and says so.
 > - **`tax_loss_harvest`** — open FIFO lots now trading below cost, split
 >   short-/long-term, with an estimated tax benefit and a **wash-sale** flag when
 >   you bought the same symbol within the last 30 days. Read-only analysis; a loss
