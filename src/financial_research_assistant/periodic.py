@@ -1032,7 +1032,8 @@ async def report_now(kind: str, deliver: bool = True, fake: bool = False) -> str
         return f"Which report? One of: {', '.join(KINDS)}."
     arg, period = await asyncio.to_thread(_latest_complete_period, kind)
     brief, files, _note = await produce(kind, arg, period, fake=fake)
-    jobs.record_sent(kind, period, {"files": files, "title": brief.title, "on_demand": True})
+    jobs.record_sent(kind, period, {"files": files, "title": brief.title, "on_demand": True},
+                     on_demand=True)
     sent = []
     if deliver:
         for path in files:

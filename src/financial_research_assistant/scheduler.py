@@ -621,17 +621,18 @@ async def poll_inbox(fake: bool = False, timeout: int = 0) -> list[dict[str, Any
 
     if not telegram.inbound_enabled():
         return []
-    try:
-        # A long poll parks on a socket for up to POLL_TIMEOUT seconds. Run on the
-        # loop thread it would block every other coroutine on it — including the
-        # `--watch` tick and any in-flight turn — for the whole window, which is
-        # the entire point of long-polling in the first place.
-        messages = await asyncio.to_thread(
-            telegram.get_updates, timeout=timeout, commit=False
-        )
-    except RuntimeError as exc:
-        _log(f"telegram poll failed: {exc}")
-        return []
+    # A long poll parks on a socket for up to POLL_TIMEOUT seconds. Run on the
+    # loop thread it would block every other coroutine on it — including the
+    # `--watch` tick and any in-flight turn — for the whole window, which is the
+    # entire point of long-polling in the first place.
+    #
+    # A failed poll RAISES. It used to be logged and returned as "no messages",
+    # which the service loop read as a healthy poll and repeated at once: a 409
+    # from a second copy of the bot, a revoked token or a DNS outage became
+    # thousands of requests a second while /status showed the inbox as fine.
+    messages = await asyncio.to_thread(
+        telegram.get_updates, timeout=timeout, commit=False
+    )
 
     out: list[dict[str, Any]] = []
     for msg in messages:
@@ -856,26 +857,44 @@ async def _jobs_loop(stop: asyncio.Event, fake: bool, interval: float) -> None:
         await _sleep_or_stop(stop, interval)
 
 
+#: Inbox retry: 10s, doubling to five minutes while polls keep failing.
+_INBOX_BACKOFF = 10.0
+_INBOX_BACKOFF_MAX = 300.0
+#: A poll that comes back faster than this is waited out before the next one.
+_MIN_POLL_SECONDS = 1.0
+
+
 async def _inbox_loop(stop: asyncio.Event, fake: bool) -> None:
     from . import telegram
 
+    failures = 0
     while not stop.is_set():
         if not telegram.inbound_enabled():
             # Checked each round rather than once: nothing to poll is a state, not
             # an error, and it costs one env read a minute.
             await _sleep_or_stop(stop, 60.0)
             continue
+        started = time.monotonic()
         try:
             await poll_inbox(fake=fake, timeout=telegram.POLL_TIMEOUT)
+            failures = 0
             _mark("inbox", last_ok=datetime.now().isoformat(timespec="seconds"))
+            if time.monotonic() - started < _MIN_POLL_SECONDS:
+                # An empty answer without waiting: another process holds the poll,
+                # or the server ignored the timeout. Not an error, but not a reason
+                # to ask again this instant either.
+                await _sleep_or_stop(stop, _MIN_POLL_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             from .adapter import describe_error
 
-            _log(f"inbox poll failed: {describe_error(exc)}")
-            _mark("inbox", last_error=describe_error(exc))
-            await _sleep_or_stop(stop, 10.0)
+            failures += 1
+            wait = min(_INBOX_BACKOFF_MAX, _INBOX_BACKOFF * 2 ** (failures - 1))
+            _log(f"inbox poll failed ({failures} in a row; next try in {wait:.0f}s): "
+                 f"{describe_error(exc)}")
+            _mark("inbox", last_error=describe_error(exc), failing_since_attempt=failures)
+            await _sleep_or_stop(stop, wait)
 
 
 def _ping_healthcheck() -> None:

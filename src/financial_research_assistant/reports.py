@@ -300,7 +300,11 @@ def _markdown_html(text: str) -> str:
     try:
         from markdown_it import MarkdownIt
 
-        return MarkdownIt("commonmark", {"html": False}).enable("table").render(text or "")
+        # No images: the text is model-written, often from fetched pages, and
+        # ![](https://host/p.png?nav=…) would have the renderer fetch a URL that
+        # carries the figures out. The CSP in each page blocks it a second way.
+        return (MarkdownIt("commonmark", {"html": False}).enable("table")
+                .disable("image").render(text or ""))
     except Exception:  # pragma: no cover - fallback if the dep ever goes away
         return "".join(
             f"<p>{_html.escape(p)}</p>" for p in (text or "").split("\n\n") if p.strip()
@@ -382,7 +386,11 @@ _STANCE_CSS = """.stance{display:flex;align-items:center;gap:14px;margin-top:18p
 .stance .pill.hold{color:var(--ink2);border-color:var(--rule)}
 .stance .why{font-size:16px;color:var(--ink2)}"""
 
+#: Each page carries a CSP: nothing in a report loads from the network (inline
+#: styles, the one height script, charts drawn inline), so an image URL that
+#: reaches the HTML some other way is still never fetched.
 _DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:">
 <title>{title}</title><style>{css}</style></head><body>
 <div class="sheet">
   <div class="eyebrow">{eyebrow}</div>
@@ -1902,6 +1910,7 @@ footer .disc{{margin-top:10px;border-top:1px solid var(--grid);padding-top:10px}
 """
 
 _INFO_DOC = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:">
 <title>{title}</title><style>{css}</style></head><body>
 <div class="sheet">
   <div class="eyebrow">{eyebrow}</div>

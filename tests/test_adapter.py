@@ -880,6 +880,35 @@ def test_ordinary_answers_are_not_claims():
         assert not _claims_a_schedule(text), text
 
 
+def test_setting_up_something_else_is_not_a_claim():
+    """"I've set up an alert" answered a request for an alert; read as a scheduling
+    claim it sent the turn to the repair pass, which created a daily task."""
+    for text in (
+        "I've set up an alert for NVDA if it drops 5% from today's close.",
+        "I have set up a watchlist entry for AMD.",
+        "I've set up your investor profile with a moderate risk level.",
+    ):
+        assert not _claims_a_schedule(text), text
+    for claim in (
+        "I've set up a daily task to check NVDA at the close.",
+        "I've set up a reminder for Friday morning.",
+    ):
+        assert _claims_a_schedule(claim), claim
+
+
+async def test_an_alert_set_up_daily_does_not_create_a_task(monkeypatch):
+    from financial_research_assistant import llm, tasks
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    def explode(*_a, **_k):
+        raise AssertionError("the repair pass ran after a real add_alert")
+
+    monkeypatch.setattr(llm, "quick_llm", explode)
+    answer = "I've set up a daily alert: you'll hear if NVDA closes 5% lower."
+    assert await settle_schedule_claim("alert me if NVDA drops 5%", answer, {"add_alert"}) == answer
+    assert tasks.pending_tasks() == []
+
+
 async def test_a_real_schedule_is_left_alone(monkeypatch):
     """A turn that genuinely called the tool is never second-guessed, and must not
     reach the repair pass — which would create a second, duplicate task."""

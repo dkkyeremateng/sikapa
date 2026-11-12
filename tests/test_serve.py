@@ -287,3 +287,44 @@ def test_the_dead_man_ping_is_sent_only_while_the_jobs_are_healthy(monkeypatch):
     assert pings == ["ping"]
     _run(one_beat(time.time() - 3600))  # the job loop is stuck: stay silent
     assert pings == ["ping"], "the outside check must see the silence and alert"
+
+
+def _count_polls(monkeypatch, get_updates, seconds=0.3):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:abc")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "999")
+    calls = []
+
+    def counted(timeout=0, commit=True):
+        calls.append(time.monotonic())
+        return get_updates()
+
+    monkeypatch.setattr(telegram, "get_updates", counted)
+
+    async def go():
+        stop = asyncio.Event()
+        loop = asyncio.create_task(scheduler._inbox_loop(stop, True))
+        await asyncio.sleep(seconds)
+        stop.set()
+        await asyncio.wait_for(loop, 2)
+
+    _run(go())
+    return calls
+
+
+def test_a_failing_poll_backs_off_instead_of_spinning(monkeypatch):
+    """A 409 from a second copy of the bot was logged and returned as "no
+    messages", and the loop asked again at once: 10,000 requests a second, with
+    /status showing the inbox as healthy."""
+    def conflict():
+        raise RuntimeError("Telegram getUpdates failed: HTTP 409 Conflict")
+
+    calls = _count_polls(monkeypatch, conflict)
+    assert len(calls) == 1, f"{len(calls)} polls in 0.3s"
+    inbox = scheduler._service["loops"]["inbox"]
+    assert "409" in inbox["last_error"] and inbox["failing_since_attempt"] == 1
+
+
+def test_an_instant_empty_poll_is_waited_out(monkeypatch):
+    """Another process holding the poll lock answers [] without waiting."""
+    calls = _count_polls(monkeypatch, lambda: [])
+    assert len(calls) == 1, f"{len(calls)} polls in 0.3s"

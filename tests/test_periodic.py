@@ -276,6 +276,20 @@ def test_a_report_goes_out_once_per_period(market_data, book, quiet_render):
     assert again.ok and not again.notify and "already sent" in again.text
 
 
+def test_an_on_demand_report_does_not_cancel_the_scheduled_one(market_data, book, quiet_render,
+                                                                monkeypatch):
+    """/report weekly on a Wednesday covered the same week the Saturday job was for,
+    filled its ledger slot, and the scheduled report was skipped as sent."""
+    task = {"id": "s1", "due": datetime(2026, 10, 3, 13, 0, tzinfo=timezone.utc).isoformat(),
+            "tz": "America/New_York", "kind": "job", "job": "report-weekly"}
+    same = periodic._period_for("weekly", jobs.scheduled_for(task), "America/New_York")
+    monkeypatch.setattr(periodic, "_latest_complete_period", lambda kind: same)
+    asyncio.run(periodic.report_now("weekly", deliver=False, fake=True))
+    assert any(e.get("on_demand") for e in jobs.sent_reports()), "still listed"
+    res = asyncio.run(jobs.handler_for("report-weekly")(task, True))
+    assert res.ok and res.notify, res.text
+
+
 def test_a_daily_report_on_a_holiday_sends_nothing_and_enters_nothing(market_data, book, monkeypatch):
     monkeypatch.setattr(market, "latest_session", lambda symbol="SPY": date(2026, 9, 25))
     task = {"id": "s1", "due": datetime(2026, 9, 28, 21, 15, tzinfo=timezone.utc).isoformat(),

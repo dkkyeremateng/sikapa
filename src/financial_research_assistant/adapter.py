@@ -881,7 +881,13 @@ _SCHEDULE_CLAIM = re.compile(
     # No object required after the verb. The first version demanded one of
     # "a/the/this/it" and a live run slipped straight past it with "I've scheduled
     # AN earnings analysis" — the determiner is exactly the wrong thing to hinge on.
-    r"(?:\bi(?:'ve| have| ’ve)?\s+(?:now\s+|just\s+)?(?:scheduled|queued|set\s+up)\b"
+    # "Set up" is different: "I've set up an alert / your watchlist / your profile"
+    # is the normal answer to a request that has nothing to do with the task
+    # queue, and matching it created a daily task after an ordinary alert. So it
+    # counts only with a scheduling word close behind it.
+    r"(?:\bi(?:'ve| have| ’ve)?\s+(?:now\s+|just\s+)?(?:scheduled|queued"
+    r"|set\s+up\b(?=[^.\n]{0,40}\b(?:task|reminder|schedule|recurring|daily|weekly"
+    r"|monthly|every)\b))\b"
     r"|\b(?:task|analysis|it)\s+(?:is|has been)\s+(?:now\s+)?(?:scheduled|queued)\b"
     r"|^\s*(?:✓|✅)?\s*\**scheduled\b(?!\s*\**\s*tasks?\b))",
     re.IGNORECASE | re.MULTILINE,
@@ -890,6 +896,11 @@ _SCHEDULE_CLAIM = re.compile(
 #: Any of these having run means the answer's scheduling talk is grounded in a real
 #: call, so it is left alone.
 _TASK_TOOLS = frozenset({"schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"})
+
+#: Tools that set up a standing rule of their own. When one ran, "I've set up a
+#: daily alert" describes that rule, not a task that failed to be queued.
+_STANDING_TOOLS = frozenset({"add_alert", "add_to_watchlist", "update_investor_profile"})
+_SET_UP = re.compile(r"\bset\s+up\b", re.IGNORECASE)
 
 _UNBACKED_SCHEDULE_NOTE = (
     "\n\n---\n"
@@ -973,7 +984,10 @@ async def settle_schedule_claim(
     """
     if fake or not answer or _TASK_TOOLS & called_tools:
         return answer
-    if not _SCHEDULE_CLAIM.search(answer):
+    claims = [m.group(0) for m in _SCHEDULE_CLAIM.finditer(answer)]
+    if _STANDING_TOOLS & called_tools:
+        claims = [c for c in claims if not _SET_UP.search(c)]
+    if not claims:
         return answer
     repaired = await _repair_schedule_claim(user_msg, answer)
     return answer + (repaired if repaired is not None else _UNBACKED_SCHEDULE_NOTE)
@@ -1163,8 +1177,11 @@ def _recall_and_frame(user_msg: str) -> tuple[str, str | None]:
         return user_msg, None
     from .feedback import format_fewshot, recall_feedback
 
-    facts = recall_facts(user_msg)
-    exemplars, avoids = recall_feedback(user_msg)
+    # Recalled by the user's own words: a scheduled run's preamble would otherwise
+    # rank memories by "report", "analysis" and "scratch" on every task.
+    asked = instruction(user_msg)
+    facts = recall_facts(asked)
+    exemplars, avoids = recall_feedback(asked)
     content = format_fewshot(exemplars, avoids) + inject(facts, user_msg)
     n = len(facts) + len(exemplars) + len(avoids)
     if not n:
@@ -1369,7 +1386,10 @@ async def run_turn(
                 )
             if mem:
                 try:
-                    mem.remember(user_msg, answer)  # persist for future turns
+                    # The user's words only. The task preamble says "never …", which
+                    # reads as a durable preference, and was stored as one and then
+                    # recalled into ordinary chats.
+                    mem.remember(instruction(user_msg), answer)
                 except Exception as e:  # noqa: BLE001 - the answer is already paid for
                     # The turn is DONE and billed; the answer is in hand. Turning
                     # that into an error event would throw it away over a failed

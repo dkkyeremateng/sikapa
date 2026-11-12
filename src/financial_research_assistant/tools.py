@@ -667,10 +667,18 @@ def portfolio_performance_chart(account: str = "") -> str:
     # Overlapping statements are reconciled to a non-overlapping set, and gaps in
     # coverage are surfaced (they can't be filled without the missing statement).
     notes = []
-    if hist["dropped"]:
+    daily = hist.get("daily")
+    if daily:
         notes.append(
-            f"note: dropped {len(hist['dropped'])} overlapping statement(s) to "
-            f"avoid double-counting ({', '.join(hist['dropped'])})."
+            f"note: {daily['from']} → {daily['to']} is chained from the latest Flex "
+            f"statement's {daily['sessions']} daily returns."
+        )
+    if hist["dropped"]:
+        shown = ", ".join(hist["dropped"][:3]) + (", …" if len(hist["dropped"]) > 3 else "")
+        notes.append(
+            f"note: {len(hist['dropped'])} overlapping statement(s) not chained, to "
+            f"avoid double-counting ({shown})"
+            + ("; their days are in the daily returns." if daily else ".")
         )
     for g in hist["gaps"]:
         notes.append(

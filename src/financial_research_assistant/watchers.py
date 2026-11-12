@@ -120,10 +120,11 @@ def _load_state() -> dict[str, Any]:
     return data
 
 
-def _save_state(state: dict[str, Any]) -> None:
+def _save_state(state: dict[str, Any], now: datetime | None = None) -> None:
     # Forget keys after 30 days: long enough that a filing is never re-announced,
-    # short enough that the file doesn't grow for the life of the server.
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    # short enough that the file doesn't grow for the life of the server. Measured
+    # from the pass's own clock, which is what stamped the keys.
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=30)).isoformat()
     state["seen"] = {k: v for k, v in state["seen"].items() if str(v) >= cutoff}
     write_private(_state_path(), json.dumps(state, indent=1), prefix=".events-")
 
@@ -500,7 +501,7 @@ async def run_pass(fake: bool = False, now: datetime | None = None) -> list[tupl
         decided = await route(events, state, now, fake)
         await _release_held(state)
         state["last_run"]["pass"] = now.isoformat()
-        _save_state(state)
+        _save_state(state, now)
     return decided
 
 
