@@ -25,7 +25,7 @@ than aborting the turn — and the helpers are trivially monkeypatched in tests.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 import html
 import json
@@ -380,6 +380,21 @@ def _is_annual_period(e: dict[str, Any]) -> bool:
         return True  # instantaneous (balance sheet)
     dur = _duration_days(start, str(e.get("end") or ""))
     return dur is not None and 320 <= dur <= 400
+
+
+def fiscal_year_end_month(facts: dict[str, Any]) -> int | None:
+    """The month a company's fiscal year ends in (12 for a calendar year, 1 for
+    NVDA), from its newest annual revenue period; None when there is none."""
+    tags = next(t for label, t, _u in _KEY_CONCEPTS if label == _REVENUE)
+    newest = next(iter(_annual_facts(facts, tags, "USD")), None)
+    if not newest or not newest.get("end"):
+        return None
+    try:
+        # A 52/53-week year ending 1-7 January closes the December fiscal year.
+        end = date.fromisoformat(str(newest["end"])[:10]) - timedelta(days=7)
+    except ValueError:
+        return None
+    return end.month
 
 
 def _annual_facts(facts: dict[str, Any], tags: list[str], unit: str) -> list[dict[str, Any]]:

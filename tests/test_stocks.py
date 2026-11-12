@@ -297,3 +297,15 @@ def test_a_filer_with_too_little_history_still_renders(monkeypatch):
     )
     assert not out.startswith("NOT RENDERED")
     assert "nothing in this body can be charted" not in out
+
+
+def test_quarters_are_named_in_the_companys_fiscal_calendar():
+    """By calendar quarter of the end date, NVDA's fiscal Q2 (ending 27 July) read
+    "Q3", and a 52/53-week quarter ending 3 January read "Q1" of the next year."""
+    from financial_research_assistant import stocks
+
+    assert stocks._quarter_label("2025-07-27", 1) == "Q2 FY2026"
+    assert stocks._quarter_label("2025-10-26", 1) == "Q3 FY2026"
+    assert stocks._quarter_label("2026-01-03", 12) == "Q4 2025"
+    assert stocks._quarter_label("2026-06-30", 12) == "Q2 2026"
+    assert stocks._quarter_label("2026-06-30") == "Q2 2026", "no fiscal year known: calendar"
