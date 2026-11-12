@@ -309,3 +309,58 @@ def test_a_split_is_not_announced_as_a_collapse(world, monkeypatch):
                            "invalidation_price": 350.0}])
     kinds = [e.kind for e, _d in _pass()]
     assert "thesis_break" not in kinds and "thesis_move" not in kinds, kinds
+
+
+# --- alerts that were lost, repeated or swallowed ---------------------------------
+
+
+def test_a_star_rule_alerts_every_symbol_it_matches(world):
+    """The key had no symbol, so on a day "*" matched AAPL and KO only one went out."""
+    world["prices"]["AAPL"] = _series(1.0, 0.1)
+    world["prices"]["KO"] = _series(0.5, 0.1)
+    assert alerts.add_alert("*", "move", 0.01).startswith("Added")
+    assert sorted(e.symbol for e, d in _pass() if e.kind == "alert_level") == ["AAPL", "KO"]
+
+
+def test_a_level_alert_fires_on_the_crossing_then_rearms(world):
+    """"KO above 1" pushed on every day it stayed above."""
+    world["prices"]["AAPL"] = _series(1.0, 0.1)
+    world["prices"]["KO"] = _series(0.5, 0.1)
+    alerts.add_alert("KO", "above", 1.0)
+    assert [e.kind for e, _d in _pass()] == ["alert_level"]
+    assert _pass(now=NOW + timedelta(days=1)) == [], "still above: not news"
+    state = watchers._load_state()
+    state["alerts_on"] = []  # the condition cleared on a pass in between
+    watchers._save_state(state, NOW)
+    assert [e.kind for e, _d in _pass(now=NOW + timedelta(days=2))] == ["alert_level"]
+
+
+def test_an_invalidated_call_gets_through_a_price_push_on_the_same_stock(world):
+    world["prices"]["AAPL"] = _series(1.0, -6.0)
+    _pass()  # a high price push on AAPL starts the cooldown
+    ev = watchers.Event("thesis:t1:invalidated", "AAPL", "thesis_break", "high", "AAPL: invalidated")
+    state = watchers._load_state()
+    assert watchers._decide(ev, state, NOW.astimezone(timezone.utc)) == "push"
+
+
+def test_a_push_that_failed_is_tried_again_and_reported(world, monkeypatch):
+    world["prices"]["AAPL"] = _series(1.0, -6.0)
+    world["prices"]["KO"] = _series(0.5, 0.1)
+    monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
+    assert [d for _e, d in _pass()] == ["undelivered"]
+    assert "AAPL -6.0% today" in watchers._daily_section({"session": TODAY})
+    monkeypatch.setattr(channels, "deliver",
+                        lambda text, prefer="": (world["pushed"].append(text), (["telegram"], []))[1])
+    assert [d for _e, d in _pass()] == ["push"], "the next pass delivered it"
+    assert "AAPL -6.0%" not in watchers._daily_section({"session": TODAY}), "went out after all"
+
+
+def test_an_event_after_the_close_report_is_in_the_next_one(world, monkeypatch):
+    """A 10-Q filed after Tuesday's report was dated Tuesday; Wednesday's report
+    looked only at Wednesday, so it was never listed."""
+    from financial_research_assistant import jobs
+
+    jobs.record_sent("daily", "2026-09-28", {"files": []})
+    watchers._log(watchers.Event("filing:x", "KO", "sec_filing", "low", "KO filed 10-Q",
+                                 detected_at="2099-09-28T23:00:00+00:00"), "digest")
+    assert "KO filed 10-Q" in watchers._daily_section({"session": TODAY})
