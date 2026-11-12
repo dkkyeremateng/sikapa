@@ -134,11 +134,16 @@ def _parse_yahoo_json(text: str, adjusted: bool = False) -> list[tuple[str, floa
         adj = ((indicators.get("adjclose") or [{}])[0]).get("adjclose") or []
         if len(adj) == len(timestamps):
             closes = adj
+    # Dated in the EXCHANGE's time. By UTC, Sydney's Monday session (stamped
+    # 10:00 local, Sunday night in UTC) was dated Sunday, and EUR/USD bars stamped
+    # 23:00 UTC in British summer time were dated a day early, so a dated FX lookup
+    # returned the next session's rate.
+    offset = int((res.get("meta") or {}).get("gmtoffset") or 0)
     rows: list[tuple[str, float]] = []
     for ts, close in zip(timestamps, closes):
         if close is None:
             continue
-        day = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+        day = datetime.fromtimestamp(ts + offset, tz=timezone.utc).date().isoformat()
         rows.append((day, float(close)))
     return rows
 
@@ -1489,7 +1494,8 @@ _FETCH_WORKERS = 8
 
 
 def _fetch_many(
-    symbols: list[str], days: int, *, strict: bool = False, as_of: date | None = None
+    symbols: list[str], days: int, *, strict: bool = False, as_of: date | None = None,
+    adjusted: bool = False,
 ) -> tuple[dict[str, list[tuple[str, float]]], bool]:
     """Fetch daily series for several symbols concurrently. Returns
     ``({symbol: series}, unreachable)`` — a failed symbol maps to ``[]``, and
@@ -1503,9 +1509,11 @@ def _fetch_many(
     results: dict[str, list[tuple[str, float]]] = {}
     unreachable = False
 
+    extra = {"adjusted": True} if adjusted else {}
+
     def _one(s: str):
         try:
-            return s, _fetch_daily(s, days, strict=strict, as_of=as_of), False
+            return s, _fetch_daily(s, days, strict=strict, as_of=as_of, **extra), False
         except PriceDataUnavailable:
             return s, [], True
 
@@ -1522,7 +1530,8 @@ def _fetch_many(
 
 
 def _aligned_closes(
-    symbols: list[str], days: int, *, strict: bool = False, as_of: date | None = None
+    symbols: list[str], days: int, *, strict: bool = False, as_of: date | None = None,
+    adjusted: bool = False,
 ) -> tuple[list[str], dict[str, list[float]]]:
     """Fetch daily closes for each symbol (concurrently) and align them on their
     common dates. Symbols with no data are dropped (absent from the returned dict)
@@ -1537,7 +1546,8 @@ def _aligned_closes(
     ``as_of`` cuts every series to that date before aligning, so the common-date
     intersection is computed over the point-in-time window rather than being
     trimmed after the fact."""
-    fetched_raw, unreachable = _fetch_many(symbols, days, strict=strict, as_of=as_of)
+    fetched_raw, unreachable = _fetch_many(symbols, days, strict=strict, as_of=as_of,
+                                           adjusted=adjusted)
     fetched = {s: dict(series) for s, series in fetched_raw.items()}
     have = {s: d for s, d in fetched.items() if d}
     common = set.intersection(*[set(d) for d in have.values()]) if have else set()
@@ -1565,7 +1575,9 @@ def compare_prices(symbols: str, days: int = 180, as_of: str = "") -> str:
     except AsOfError as exc:
         return str(exc)
     try:
-        dates, closes = _aligned_closes(syms, days, strict=True, as_of=stamp)
+        # Dividend-adjusted: this reports TOTAL return, and plain closes compared a
+        # 4%-yielder as if its dividends were never paid.
+        dates, closes = _aligned_closes(syms, days, strict=True, as_of=stamp, adjusted=True)
     except PriceDataUnavailable:
         return (
             f"The price data source (Yahoo Finance) is temporarily unreachable — "
@@ -1706,7 +1718,9 @@ def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY",
     except AsOfError as exc:
         return str(exc)
     try:
-        series = _fetch_daily(symbol, days, strict=True, as_of=stamp)
+        # Adjusted: on plain closes every ex-dividend day reads as a loss, which
+        # inflates volatility and drawdown and depresses Sharpe.
+        series = _fetch_daily(symbol, days, strict=True, as_of=stamp, adjusted=True)
     except PriceDataUnavailable:
         return (
             f"The price data source (Yahoo Finance) is temporarily unreachable — "
@@ -1731,7 +1745,7 @@ def risk_metrics(symbol: str, days: int = 365, benchmark: str = "SPY",
     # Beta vs benchmark over common dates.
     beta_txt = ""
     dates_b, aligned = _aligned_closes(
-        [symbol.upper(), benchmark.upper()], days, as_of=stamp
+        [symbol.upper(), benchmark.upper()], days, as_of=stamp, adjusted=True
     )
     # _aligned_closes drops a symbol with no data; beta needs both series.
     if dates_b and symbol.upper() in aligned and benchmark.upper() in aligned:

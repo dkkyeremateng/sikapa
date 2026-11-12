@@ -1163,3 +1163,32 @@ def test_the_benchmark_comparison_asks_for_total_return(monkeypatch):
     assert seen.get("adjusted") is True, "price return would flatter the benchmark"
     assert "+64.55%" in out and "17.54 percentage points" in out
     assert "dividend-adjusted" in out
+
+
+def test_a_bar_is_dated_in_the_exchanges_time():
+    """Sydney's Monday session is stamped Sunday night in UTC; by UTC it was dated
+    Sunday, and a dated FX lookup returned the next session's rate."""
+    import json as _json
+
+    from financial_research_assistant import tools
+
+    monday_open_sydney = 1762729200  # 2025-11-09T23:00:00Z = Mon 10:00 AEDT
+    payload = {"chart": {"result": [{
+        "meta": {"gmtoffset": 39600},
+        "timestamp": [monday_open_sydney],
+        "indicators": {"quote": [{"close": [41.2]}]}}]}}
+    assert tools._parse_yahoo_json(_json.dumps(payload)) == [("2025-11-10", 41.2)]
+
+
+def test_a_comparison_is_total_return(monkeypatch):
+    from financial_research_assistant import tools
+
+    asked = {}
+
+    def fetch(sym, days, **kw):
+        asked[sym] = kw.get("adjusted", False)
+        return [("2026-01-02", 100.0), ("2026-06-30", 104.0)]
+
+    monkeypatch.setattr(tools, "_fetch_daily", fetch)
+    tools.compare_prices("KO, PEP", days=180)
+    assert asked == {"KO": True, "PEP": True}
