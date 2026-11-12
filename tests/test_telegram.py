@@ -291,3 +291,21 @@ def test_a_late_commit_never_moves_the_cursor_backwards(monkeypatch):
     assert telegram._read_offset() == 205
     telegram.commit_update("not-a-number")
     assert telegram._read_offset() == 205
+
+
+def test_in_an_allowed_group_only_allowed_people_are_answered(monkeypatch):
+    """Allowing a group let every member, and anyone added later, drive the agent."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:abc")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "-1001")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "42")
+
+    def group(*senders):
+        return {"ok": True, "result": [
+            {"update_id": 200 + i, "message": {"chat": {"id": -1001, "type": "supergroup"},
+                                               "text": f"cancel all from {u}",
+                                               "from": {"id": u, "username": f"u{u}"}}}
+            for i, u in enumerate(senders)]}
+
+    monkeypatch.setattr(telegram, "_call", lambda *a, **k: group(42, 66))
+    got = telegram.get_updates()
+    assert [m["text"] for m in got] == ["cancel all from 42"]
