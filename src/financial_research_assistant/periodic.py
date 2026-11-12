@@ -182,7 +182,14 @@ def load_book(account: str = "") -> dict[str, Any]:
 
     ``units`` is value / close price rather than the stored quantity, so a
     multiplier (options, some futures) is already inside it. Stocks, ETFs and
-    crypto are priced; anything else is counted in ``unpriced_value``."""
+    crypto are priced; anything else is counted in ``unpriced_value``.
+
+    ``weight_pct`` is a share of the whole ACCOUNT: priced holdings, unpriced
+    positions and the statement's cash. It used to be a share of the priced
+    holdings alone, so with 6% of the account in cash every weight read about 6%
+    high, and position caps, the target mix and the push threshold all measured
+    against a book smaller than the one held. ``total`` stays the priced
+    holdings, the figure reports show."""
     from . import statements
 
     account = account or statements.default_account() or ""
@@ -204,14 +211,21 @@ def load_book(account: str = "") -> dict[str, Any]:
         entry["units"] += value / close
         entry["value"] += value
     total = sum(e["value"] for e in book.values())
+    cash = sum(float(r.get("current_total") or 0.0)
+               for r in statements.query_nav(account=account or None)["rows"]
+               if str(r.get("asset_class") or "").strip().lower() == "cash")
+    whole = total + other_value + cash
+    base = whole if whole > 0 else total  # a margin loan bigger than the rest
     for e in book.values():
-        e["weight_pct"] = e["value"] / total * 100 if total else 0.0
+        e["weight_pct"] = e["value"] / base * 100 if base else 0.0
     return {
         "account": account,
         "as_of": _positions_as_of(account),
         "holdings": sorted(book.values(), key=lambda e: e["value"], reverse=True),
         "total": total,
         "unpriced_value": other_value,
+        "cash": cash,
+        "account_value": base,
     }
 
 

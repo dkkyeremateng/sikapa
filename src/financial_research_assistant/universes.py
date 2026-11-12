@@ -61,12 +61,17 @@ def asset_class_of(symbol: str) -> str:
 
 
 def allocation(book: dict[str, Any]) -> dict[str, float]:
-    """Percent of the priced book in each asset class."""
-    total = sum(h["value"] for h in book["holdings"]) or 0.0
+    """Percent of the account in each asset class, the statement's cash as
+    ``cash``. Against the priced holdings alone, cash read as 0% of a target and
+    every other class read high."""
+    priced = sum(h["value"] for h in book["holdings"]) or 0.0
+    total = float(book.get("account_value") or priced)
     out: dict[str, float] = {}
     for h in book["holdings"]:
         cls = asset_class_of(h["symbol"])
         out[cls] = out.get(cls, 0.0) + (h["value"] / total * 100 if total else 0.0)
+    if total and book.get("cash"):
+        out["cash"] = out.get("cash", 0.0) + float(book["cash"]) / total * 100
     return out
 
 
