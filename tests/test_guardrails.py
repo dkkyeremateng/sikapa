@@ -192,3 +192,34 @@ def test_the_cli_switch(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         main.cli()
     assert guardrails.paused_reason() == ""
+
+
+def test_a_failing_model_is_visible_not_silent(monkeypatch, capsys):
+    """ask() used to return None without a trace: an expired key turned every
+    report into the commentary-free fallback with nothing in the log or /status."""
+    import financial_research_assistant.llm as llm
+
+    class Expired:
+        async def ainvoke(self, _msgs):
+            raise RuntimeError("AuthenticationError: Error code: 401 - invalid x-api-key")
+
+    class Works:
+        async def ainvoke(self, _msgs):
+            from langchain_core.messages import AIMessage
+            return AIMessage(content="fine")
+
+    sent: list[str] = []
+    monkeypatch.setattr(channels, "deliver",
+                        lambda text, prefer="": (sent.append(text), (["telegram"], []))[1])
+    monkeypatch.setattr(llm, "quick_llm", lambda *a, **k: Expired())
+    assert asyncio.run(autonomy.ask("s", "u", purpose="report:daily")) is None
+    assert asyncio.run(autonomy.ask("s", "u", purpose="event:price_move")) is None
+    assert "report:daily failed" in capsys.readouterr().err
+    assert len(sent) == 1, "one alert, not one per failed call"
+    assert "What to do: The model provider rejected" in sent[0]
+    assert "model calls failing since" in autonomy.budget_line()
+
+    monkeypatch.setattr(llm, "quick_llm", lambda *a, **k: Works())
+    assert asyncio.run(autonomy.ask("s", "u")) == "fine"
+    assert autonomy.last_failure() is None
+    assert "failing" not in autonomy.budget_line()

@@ -16,11 +16,13 @@ from __future__ import annotations
 
 from typing import Any
 import asyncio
+import json
 import os
-from datetime import datetime
+import sys
+from datetime import datetime, timedelta
 
 from . import guardrails, hooks
-from .storage import append_jsonl, read_jsonl, state_file
+from .storage import append_jsonl, read_json, read_jsonl, state_file, write_private
 
 #: Tiers: "quick" is the cheap model (QUICK_MODEL), "default" the primary one.
 TIERS = ("quick", "default")
@@ -28,6 +30,63 @@ TIERS = ("quick", "default")
 
 def usage_log():
     return state_file("autonomy-usage.jsonl", "FRA_AUTONOMY_USAGE_LOG")
+
+
+def failure_file():
+    return state_file("autonomy-failure.json", "FRA_AUTONOMY_FAILURE")
+
+
+#: While unattended calls keep failing, the user hears about it this often.
+_FAILURE_ALERT_EVERY = timedelta(hours=24)
+
+
+def last_failure() -> dict[str, Any] | None:
+    """The current run of failed autonomous calls, or None when the last call
+    worked."""
+    data = read_json(failure_file(), None)
+    return data if isinstance(data, dict) and data.get("error") else None
+
+
+async def _note_failure(exc: BaseException, purpose: str) -> None:
+    """Make a failed call visible. It used to return None without a trace, so an
+    expired key quietly turned every report into the commentary-free fallback and
+    every event note into bare facts, with nothing in the log or /status. Logged
+    each time, recorded for /status, and pushed once a day while it lasts."""
+    from .adapter import describe_error
+    from .remedies import advice
+
+    error = describe_error(exc)
+    print(f"autonomy: {purpose or 'call'} failed: {error}", file=sys.stderr)
+    now = datetime.now()
+    prev = last_failure() or {}
+    record = {"since": prev.get("since") or now.isoformat(timespec="seconds"),
+              "at": now.isoformat(timespec="seconds"), "error": error[:300],
+              "purpose": purpose, "alerted": prev.get("alerted") or ""}
+    try:
+        stale = (not record["alerted"]
+                 or now - datetime.fromisoformat(record["alerted"]) >= _FAILURE_ALERT_EVERY)
+    except ValueError:
+        stale = True
+    if stale:
+        from . import channels
+
+        fix = advice(error)
+        text = (f"⚠ Unattended model calls are failing (since {record['since'][:16]}), so "
+                f"reports go out without commentary and alerts without notes.\n{error[:300]}"
+                + (f"\n\nWhat to do: {fix}" if fix else ""))
+        try:
+            await asyncio.to_thread(channels.deliver, text)
+            record["alerted"] = now.isoformat(timespec="seconds")
+        except Exception:  # noqa: BLE001 - the alert is best-effort; the log has it
+            pass
+    write_private(failure_file(), json.dumps(record, indent=1), prefix=".autonomy-")
+
+
+def _note_success() -> None:
+    try:
+        failure_file().unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _int_env(name: str) -> int:
@@ -120,8 +179,11 @@ async def ask(
         resp = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
     except asyncio.CancelledError:
         raise
-    except Exception:  # noqa: BLE001 - the caller has a model-free fallback
+    except Exception as exc:  # noqa: BLE001 - the caller has a model-free fallback
+        await _note_failure(exc, purpose or tier)
         return None
+    if last_failure():
+        _note_success()
     tin, tout = _usage_of(resp)
     model = os.environ.get("QUICK_MODEL", "") if tier == "quick" else ""
     try:
@@ -139,8 +201,11 @@ def budget_line() -> str:
     month = f"{used['month']:,}" + (f"/{month_cap:,}" if month_cap else "")
     state = guardrails.paused_reason() or over_budget() or "on"
     quiet = guardrails.quiet_now()
+    failing = last_failure()
     return (f"autonomy: {state} · tokens today {day}, this month {month}"
-            + (f" · {quiet}" if quiet else ""))
+            + (f" · {quiet}" if quiet else "")
+            + (f" · ⚠ model calls failing since {failing['since'][:16]}: "
+               f"{failing['error'][:80]}" if failing else ""))
 
 
 hooks.register_status_line("autonomy", budget_line)
