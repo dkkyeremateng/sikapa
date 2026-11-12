@@ -485,6 +485,29 @@ def test_realized_gains_fifo_short_long_split(monkeypatch, tmp_path):
     assert r["unmatched_proceeds"] == 0.0
 
 
+def test_a_sale_pays_its_commission_too(monkeypatch, tmp_path):
+    """IBKR's Proceeds is gross; the buy's basis included its commission but the
+    sale's never came off, so every realized gain was overstated by it."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    s.store_statement({
+        "account": "U1", "period": "January 1, 2026 - March 31, 2026", "twrr": "",
+        "trades": [
+            {"asset_category": "Stocks", "currency": "USD", "account": "U1", "symbol": "AAA",
+             "datetime": "2026-01-05, 10:00:00", "quantity": 10, "trade_price": 90.0,
+             "close_price": 0, "proceeds": -900.0, "comm_fee": -1.0, "basis": 901.0,
+             "realized_pl": 0, "mtm_pl": 0, "code": "O"},
+            {"asset_category": "Stocks", "currency": "USD", "account": "U1", "symbol": "AAA",
+             "datetime": "2026-03-05, 10:00:00", "quantity": -10, "trade_price": 100.0,
+             "close_price": 0, "proceeds": 1000.0, "comm_fee": -1.0, "basis": -901.0,
+             "realized_pl": 98.0, "mtm_pl": 0, "code": "C"},
+        ],
+        "cash": [], "positions": [], "instruments": [], "nav": [], "corporate_actions": [],
+    })
+    assert s.realized_gains()["total_realized"] == pytest.approx(98.0), "IBKR's own figure"
+
+
 def test_the_long_term_boundary_is_more_than_a_year_not_exactly_one():
     """The holding period starts the DAY AFTER acquisition, so a position bought on
     1 Jan and sold the following 1 Jan is SHORT term. The boundary was `>= 365`

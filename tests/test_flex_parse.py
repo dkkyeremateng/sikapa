@@ -379,11 +379,11 @@ def test_importing_a_flex_file_populates_the_same_store_a_csv_would(monkeypatch,
 
     # End to end through the split the fixture also carries: the 10-share lot at
     # 180.105 becomes 30 at 60.035 on the 2nd, so the four shares sold at 190
-    # realize (190 - 60.035) x 4. Getting 38.58 here — the broker's own
-    # fifoPnlRealized, which predates the split — would mean the corporate action
-    # never reached the lot book.
+    # realize (190 - 60.035) x 4, less the sale's $1 commission. Getting 38.58
+    # here — the broker's own fifoPnlRealized, which predates the split — would
+    # mean the corporate action never reached the lot book.
     gains = statements.realized_gains()
-    assert gains["total_realized"] == pytest.approx(519.86, abs=0.01)
+    assert gains["total_realized"] == pytest.approx(518.86, abs=0.01)
     assert gains["unmatched_proceeds"] == 0.0
 
 

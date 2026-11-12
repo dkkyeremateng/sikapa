@@ -674,7 +674,10 @@ def parse_ofx(source: str | Path) -> dict[str, Any]:
                     "quantity": units if is_buy else -units,
                     "trade_price": _ofx_num(txn.unitprice),
                     "close_price": 0.0,
-                    "proceeds": -total if is_buy else total,
+                    # GROSS, as IBKR's CSV and Flex report it, so one rule turns
+                    # every importer's row into net proceeds: proceeds + comm_fee.
+                    # OFX's TOTAL is net of commission and fees.
+                    "proceeds": -(total - comm - fees) if is_buy else total + comm + fees,
                     "comm_fee": -(comm + fees),  # IBKR stores fees negative
                     "basis": total,
                     "realized_pl": 0.0,
@@ -1335,7 +1338,7 @@ def _trade_split_events(
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(
             f"SELECT import_id, account, symbol, currency, datetime, quantity, trade_price, "
-            f"proceeds, basis FROM trades{where} ORDER BY datetime ASC, id ASC",
+            f"proceeds, comm_fee, basis FROM trades{where} ORDER BY datetime ASC, id ASC",
             params,
         ).fetchall()
         ca_clauses, ca_params = [], []
@@ -1520,10 +1523,12 @@ def realized_gains(
 
     Walks every trade chronologically, opening a lot on each buy and matching
     sells against the oldest open lots. For each matched slice it records the
-    gain ``(sell_price − lot_cost) × qty`` and classifies it **short-term**
-    (held < 365 days) or **long-term** (≥ 365). Per-share amounts use the
-    commission-inclusive ``basis``/``proceeds`` fields, so gains are net of
-    commissions.
+    gain ``(sell_price − lot_cost) × qty`` and classifies it **short-term** or
+    **long-term** by calendar year (``is_long_term``). Both sides carry their
+    commission: a lot's cost is the commission-inclusive ``basis``, and a sale's
+    price is ``proceeds + comm_fee``. Every importer stores proceeds GROSS (IBKR's
+    CSV and Flex do; the OFX importer converts), and reading them as net left
+    each sale's commission out of the gain.
 
     ``year`` counts only realizations *sold* in that calendar year (lots may open
     earlier). ``symbol`` scopes the input; ``account`` defaults to the newest
@@ -1556,9 +1561,10 @@ def realized_gains(
         if qty > 0:  # buy → open a lot (basis is positive, commission-inclusive)
             cost_per_share = (r["basis"] / qty) if qty else r["trade_price"]
             lots[sym].append([qty, cost_per_share, dt])
-        elif qty < 0:  # sell → match FIFO (proceeds positive, net of commission)
+        elif qty < 0:  # sell → match FIFO (gross proceeds less the commission)
             sell_qty = -qty
-            price_per_share = (r["proceeds"] / sell_qty) if sell_qty else r["trade_price"]
+            net = r["proceeds"] + (r["comm_fee"] or 0.0)
+            price_per_share = (net / sell_qty) if sell_qty else r["trade_price"]
             counts = year is None or dt[:4] == str(year)
             while sell_qty > 1e-9 and lots[sym]:
                 lot = lots[sym][0]
