@@ -83,15 +83,20 @@ def already_sent(report: str, period: str) -> dict[str, Any] | None:
     return entry if isinstance(entry, dict) else None
 
 
-def record_sent(report: str, period: str, info: dict[str, Any] | None = None) -> None:
+def record_sent(report: str, period: str, info: dict[str, Any] | None = None,
+                on_demand: bool = False) -> None:
     """Enter a report in the ledger. Written under a lock and atomically, like
-    every other store here."""
+    every other store here.
+
+    An ``on_demand`` report is listed but kept under its own key: ``/report daily``
+    at 11:00 used to fill the slot ``already_sent`` checks, and the 17:15 close
+    report, the one with the day's actual close, was skipped as sent."""
     path = ledger_file()
     with locked(path):
         data = read_json(path, {})
         if not isinstance(data, dict):
             data = {}
-        data[_key(report, period)] = {
+        data[_key(report, period) + (":on-demand" if on_demand else "")] = {
             "report": report, "period": period,
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             **(info or {}),
