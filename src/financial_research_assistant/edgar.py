@@ -61,6 +61,11 @@ _JSON_CACHE: dict[str, dict[str, Any]] = {}
 #: until a restart, and a chat question weeks later got weeks-old financials.
 _JSON_FETCHED_AT: dict[str, float] = {}
 _TICKER_LOADED_AT: list[float] = []
+#: Documents kept in memory. Unbounded, an always-on process kept every company's
+#: facts (FISV's alone is ~17 MB parsed) and every search for its whole life.
+_JSON_CACHE_MAX = 32
+#: The last fetch that failed outright, for telling an outage from a bad ticker.
+_LAST_FAILURE: list[str] = []
 
 #: How long a cached SEC document stays fresh. The submissions feed is what shows
 #: a new filing, so it is short; company facts only change when something is filed.
@@ -93,6 +98,7 @@ def _fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
     cached = _JSON_CACHE.get(url)
     if isinstance(cached, dict) and _fresh(url):
         return cached
+    error = ""
     for _ in range(2):  # one retry — SEC occasionally 5xx / rate-limits
         try:
             with urllib.request.urlopen(_request(url), timeout=timeout) as resp:  # noqa: S310
@@ -106,12 +112,22 @@ def _fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
                 # appeared on the retry.
                 return {}
             if data:
+                _JSON_CACHE.pop(url, None)  # re-inserted last: newest at the end
                 _JSON_CACHE[url] = data
                 _JSON_FETCHED_AT[url] = time.time()
+                while len(_JSON_CACHE) > _JSON_CACHE_MAX:
+                    oldest = next(iter(_JSON_CACHE))
+                    _JSON_CACHE.pop(oldest, None)
+                    _JSON_FETCHED_AT.pop(oldest, None)
+            _LAST_FAILURE[:] = []
             return data
-        except Exception:  # noqa: BLE001 — degrade to no-data, never abort the turn
+        except Exception as exc:  # noqa: BLE001 — degrade to no-data, never abort the turn
+            error = f"{type(exc).__name__}: {exc}"
             continue
-    return {}
+    _LAST_FAILURE[:] = [error]
+    # A stale copy beats nothing: an outage used to turn a company SEC knew an
+    # hour ago into "no data".
+    return cached if isinstance(cached, dict) else {}
 
 
 def _fetch_text(url: str, max_bytes: int = 6_000_000, timeout: float = 30.0) -> str:
@@ -178,6 +194,13 @@ def _money(v: Any) -> str:
 
 
 def _no_cik(sym: str) -> str:
+    # With the ticker map unloaded, every lookup fails: that is an outage (or a
+    # rejected User-Agent), not a bad ticker, and saying "use the US ticker"
+    # sent the user hunting for a typo that wasn't there.
+    if not _TICKER_CIK and _LAST_FAILURE:
+        return (f"SEC EDGAR could not be reached ({_LAST_FAILURE[0][:120]}), so {sym!r} "
+                f"could not be looked up. This is the source being down, not the ticker; "
+                f"try again shortly.")
     return (
         f"No SEC CIK found for {sym!r} — SEC EDGAR covers US-listed filers "
         f"(use the US ticker, e.g. AAPL). Foreign/ADR names may differ."

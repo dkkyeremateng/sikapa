@@ -637,3 +637,51 @@ def test_a_late_january_year_end_keeps_its_own_label():
 
     assert edgar._fiscal_label("2025-01-26") == "2025"   # NVDA calls this fiscal 2025
     assert edgar._fiscal_label("2022-01-01") == "2021"
+
+
+def test_an_sec_outage_is_not_reported_as_a_bad_ticker(monkeypatch):
+    import urllib.error
+
+    from financial_research_assistant import edgar
+
+    def refused(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(edgar.urllib.request, "urlopen", refused)
+    monkeypatch.setattr(edgar, "_TICKER_CIK", {})
+    monkeypatch.setattr(edgar, "_TICKER_LOADED_AT", [])
+    monkeypatch.setattr(edgar, "_JSON_CACHE", {})
+    assert edgar._cik_for("AAPL") is None
+    msg = edgar._no_cik("AAPL")
+    assert "could not be reached" in msg and "403" in msg and "use the US ticker" not in msg
+
+
+def test_a_failed_refetch_serves_the_last_good_copy(monkeypatch):
+    from financial_research_assistant import edgar
+
+    url = "https://data.sec.gov/submissions/CIK0000000001.json"
+    monkeypatch.setattr(edgar, "_JSON_CACHE", {url: {"name": "Acme"}})
+    monkeypatch.setattr(edgar, "_JSON_FETCHED_AT", {url: 0.0})  # long stale
+    monkeypatch.setattr(edgar.urllib.request, "urlopen",
+                        lambda req, timeout=0: (_ for _ in ()).throw(OSError("down")))
+    assert edgar._fetch_json(url) == {"name": "Acme"}
+
+
+def test_the_document_cache_is_bounded(monkeypatch):
+    import io
+    import json as _json
+
+    from financial_research_assistant import edgar
+
+    class Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(edgar, "_JSON_CACHE", {})
+    monkeypatch.setattr(edgar, "_JSON_FETCHED_AT", {})
+    monkeypatch.setattr(edgar.urllib.request, "urlopen",
+                        lambda req, timeout=0: Resp(_json.dumps({"u": req.full_url}).encode()))
+    for i in range(edgar._JSON_CACHE_MAX + 10):
+        edgar._fetch_json(f"https://data.sec.gov/x/{i}.json")
+    assert len(edgar._JSON_CACHE) == edgar._JSON_CACHE_MAX
+    assert "https://data.sec.gov/x/0.json" not in edgar._JSON_CACHE, "oldest evicted"
