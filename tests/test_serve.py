@@ -328,3 +328,31 @@ def test_an_instant_empty_poll_is_waited_out(monkeypatch):
     """Another process holding the poll lock answers [] without waiting."""
     calls = _count_polls(monkeypatch, lambda: [])
     assert len(calls) == 1, f"{len(calls)} polls in 0.3s"
+
+
+def test_a_long_batch_is_not_mistaken_for_a_stuck_loop(monkeypatch):
+    """The allowance is one job timeout per stamp. Stamped once per pass, three
+    long tasks in a row tripped the watchdog in the middle of the third."""
+    stamps = []
+
+    async def one_task(task, fake=False):
+        stamps.append(scheduler._service.get("jobs_started"))
+        await asyncio.sleep(0.01)
+        return {"id": task["id"], "ok": True}
+
+    monkeypatch.setattr(scheduler, "run_task", one_task)
+    for i in range(3):
+        tasks.add_task(f"long job {i}", "+0m")
+    _run(scheduler.run_due())
+    assert len(stamps) == 3 and stamps[0] < stamps[1] < stamps[2]
+
+
+def test_a_queued_task_keeps_its_claim_until_it_starts():
+    from datetime import timedelta
+
+    t = tasks.add_task("queued", "+0m")
+    [claimed] = tasks.claim_due()
+    later = tasks.now_utc() + timedelta(minutes=tasks.DEFAULT_CLAIM_TIMEOUT_MINUTES - 1)
+    tasks.renew_claim(t["id"], claimed["claim"], now=later)
+    after_old_expiry = later + timedelta(minutes=5)
+    assert tasks.claim_due(now=after_old_expiry) == [], "renewed: not taken for abandoned"

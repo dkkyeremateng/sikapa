@@ -845,6 +845,20 @@ def claim_due(now: datetime | None = None, limit: int | None = None) -> list[dic
     return claimed
 
 
+def renew_claim(task_id: str, claim: str, now: datetime | None = None) -> None:
+    """Restart a claim's expiry clock when its run actually begins. ``claim_due``
+    stamps a whole batch at once, and the ones queued behind a long run would
+    otherwise expire while still waiting their turn."""
+    with _locked():
+        items = load_tasks()
+        for t in items:
+            if (str(t.get("id")) == str(task_id) and t.get("status") == "running"
+                    and (not claim or t.get("claim") == claim)):
+                t["claimed_at"] = (now or now_utc()).isoformat()
+                save_tasks(items)
+                return
+
+
 def note_run(task_id: str, due: Any, session: str) -> None:
     """Remember the conversation an occurrence started, so a retry of that same
     occurrence can resume it (``unfinished_run``) instead of starting over."""

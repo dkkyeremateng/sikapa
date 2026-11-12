@@ -556,6 +556,13 @@ async def run_due(
         if stop is not None and stop.is_set():
             tasks.release(str(task.get("id")), str(task.get("claim") or ""))
             continue
+        # Progress is per TASK. The watchdog allows one job timeout per stamp, and
+        # a pass is up to a batch of tasks run one after another: stamped once per
+        # pass, a Monday with three long reports was killed mid-run as "stuck".
+        # The claim is renewed for the same reason, so a task queued behind a long
+        # one is not taken for abandoned before it has started.
+        _service["jobs_started"] = time.time()
+        tasks.renew_claim(str(task.get("id")), str(task.get("claim") or ""))
         try:
             results.append(
                 await asyncio.wait_for(run_task(task, fake=fake), job_timeout_seconds())
