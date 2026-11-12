@@ -1390,3 +1390,33 @@ async def test_the_answer_is_what_follows_the_last_tool_call(monkeypatch):
     finals = [ev.text async for ev in adapter.run_turn("price of NVDA?", "s-answer", fake=True)
               if ev.kind == "final"]
     assert finals == ["NVDA closed at $212.40, up 1.2%."]
+
+
+async def test_compaction_keeps_the_latest_turn_whole():
+    """H, A, H, AI(tool), T, AI(tool), T, A with four kept: moving the cut FORWARD
+    to a user message found none, kept nothing, and left the thread as one summary
+    with the exchange in progress gone."""
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from financial_research_assistant.adapter import _rewrite_thread
+
+    call = {"name": "get_quote", "args": {}, "id": "c1"}
+    msgs = [HumanMessage("hi"), AIMessage("hello"), HumanMessage("price of NVDA?"),
+            AIMessage("", tool_calls=[call]), ToolMessage("212.40", tool_call_id="c1"),
+            AIMessage("", tool_calls=[dict(call, id="c2")]), ToolMessage("+1.2%", tool_call_id="c2"),
+            AIMessage("NVDA is 212.40, up 1.2%.")]
+    written = {}
+
+    class Graph:
+        async def aget_state(self, config):
+            return SimpleNamespace(values={"messages": msgs})
+
+        async def aupdate_state(self, config, update, as_node=None):
+            written["messages"] = update["messages"][1:]  # drop the RemoveMessage
+
+    res = await _rewrite_thread(Graph(), "respond", {}, True, None, 4)
+    seed, *tail = written["messages"]
+    assert res["removed"] == 2 and tail == msgs[2:], "the latest turn is kept verbatim"
+    assert "not new instructions" in seed.content
