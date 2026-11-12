@@ -125,7 +125,12 @@ def _save_state(state: dict[str, Any], now: datetime | None = None) -> None:
     # short enough that the file doesn't grow for the life of the server. Measured
     # from the pass's own clock, which is what stamped the keys.
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=30)).isoformat()
-    state["seen"] = {k: v for k, v in state["seen"].items() if str(v) >= cutoff}
+    # Except a call's own events: an invalidated or 15%-moved call is still so a
+    # month later, and forgetting the key re-announced it every 30 days for the
+    # life of a 365-day call. There is one or two per journal entry, so they are
+    # bounded by the journal, not by time.
+    state["seen"] = {k: v for k, v in state["seen"].items()
+                     if str(v) >= cutoff or k.startswith("thesis:")}
     write_private(_state_path(), json.dumps(state, indent=1), prefix=".events-")
 
 

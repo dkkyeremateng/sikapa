@@ -364,3 +364,18 @@ def test_an_event_after_the_close_report_is_in_the_next_one(world, monkeypatch):
     watchers._log(watchers.Event("filing:x", "KO", "sec_filing", "low", "KO filed 10-Q",
                                  detected_at="2099-09-28T23:00:00+00:00"), "digest")
     assert "KO filed 10-Q" in watchers._daily_section({"session": TODAY})
+
+
+def test_an_invalidated_call_is_announced_once_not_monthly(world):
+    """The key was forgotten after 30 days, so a call that stayed broken was
+    announced again every month for the rest of its horizon."""
+    world["prices"]["AAPL"] = _series(1.0, 0.1)
+    world["prices"]["NVDA"] = [("2026-09-28", 100.0), ("2026-09-29", 88.0)]
+    journal.save_entries([{"id": "t1", "symbol": "NVDA", "verdict": "bullish",
+                           "status": "open", "entry_price": 110.0, "entry_date": "2026-09-28",
+                           "invalidation_price": 90.0}])
+    assert "thesis_break" in [e.kind for e, _d in _pass()]
+    later = NOW + timedelta(days=45)
+    _pass(now=later)  # keys older than 30 days are pruned at the end of this pass
+    again = _pass(now=later + timedelta(minutes=5))
+    assert "thesis_break" not in [e.kind for e, _d in again]
