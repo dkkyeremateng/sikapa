@@ -544,7 +544,8 @@ def _add_wall_clock(moment: datetime, step: timedelta, tz: tzinfo | None = None)
 
 
 def next_due(
-    due: datetime, repeat: str, tz: str | None = None, anchor_day: int | None = None
+    due: datetime, repeat: str, tz: str | None = None, anchor_day: int | None = None,
+    clock: str | None = None,
 ) -> datetime | None:
     """The following occurrence after ``due``, or None when the task is done.
 
@@ -567,15 +568,21 @@ def next_due(
     every month that has one, and on the last day of any month that doesn't — so
     a task on the 31st runs Jan 31, Feb 28, Mar 31, rather than drifting to the
     28th for good after the first short month.
+
+    ``clock`` ("HH:MM") is the time of day the task was set for, kept for the same
+    reason. Each occurrence is built from it rather than from the last run's time:
+    a daily 02:30 fell into the spring-forward gap, ran at 03:30, and every later
+    run was computed from 03:30, so it stayed there for good.
     """
     repeat = (repeat or "once").strip().lower()
     if repeat not in REPEATS or repeat == "once":
         return None
     tzi = zone(tz)
     now = now_utc()
+    meant = _clock_of(clock)
     if repeat in ("monthly", "monthly-first-weekday"):
         local = _as_local(due, tzi)
-        clock = dtime(local.hour, local.minute)
+        clock_t = meant or dtime(local.hour, local.minute)
         anchor = int(anchor_day or local.day)
 
         def month_after(moment: datetime) -> datetime:
@@ -583,7 +590,7 @@ def next_due(
             y, mo = _add_months(cur.year, cur.month, 1)
             day = _first_weekday(y, mo) if repeat == "monthly-first-weekday" else (
                 _month_day(y, mo, anchor))
-            return _localize(datetime.combine(day, clock), tzi).astimezone(timezone.utc)
+            return _localize(datetime.combine(day, clock_t), tzi).astimezone(timezone.utc)
 
         nxt = month_after(due)
         while nxt <= now:
@@ -595,9 +602,14 @@ def next_due(
         "weekdays": timedelta(days=1),
         "weekly": timedelta(weeks=1),
     }[repeat]
-    advance = (lambda m: m + step) if repeat == "hourly" else (
-        lambda m: _add_wall_clock(m, step, tzi)
-    )
+    def advance(m: datetime) -> datetime:
+        if repeat == "hourly":
+            return m + step
+        if meant is not None:
+            day = _as_local(m, tzi).date() + step
+            return _localize(datetime.combine(day, meant), tzi).astimezone(timezone.utc)
+        return _add_wall_clock(m, step, tzi)
+
     nxt = advance(due)
     while nxt <= now:
         nxt = advance(nxt)
@@ -607,9 +619,17 @@ def next_due(
     return nxt
 
 
+def _clock_of(text: str | None) -> dtime | None:
+    try:
+        hour, minute = (int(x) for x in str(text or "").split(":"))
+        return dtime(hour, minute)
+    except ValueError:
+        return None
+
+
 def _next_for(task: dict[str, Any], due: datetime) -> datetime | None:
     return next_due(due, str(task.get("repeat") or "once"), task.get("tz") or None,
-                    task.get("anchor_day"))
+                    task.get("anchor_day"), task.get("clock"))
 
 
 def _give_up_on_this_run(t: dict[str, Any], now: datetime) -> bool:
@@ -699,6 +719,17 @@ def add_task(
         tzi = zone(tz or None)
         while _as_local(due, tzi).weekday() >= 5:
             due = _add_wall_clock(due, timedelta(days=1), tzi)
+    if rep == "monthly-first-weekday":
+        # "1st of the month 8am" set up in July gave Saturday 1 August: the first
+        # run is snapped the same way every later one is.
+        tzi = zone(tz or None)
+        local = _as_local(due, tzi)
+        first = _first_weekday(local.year, local.month)
+        if local.date() != first:
+            snapped = _localize(datetime.combine(first, local.time().replace(tzinfo=None)),
+                                tzi).astimezone(timezone.utc)
+            due = snapped if snapped > now_utc() else (
+                next_due(snapped, rep, tz or None) or due)
     knd = (kind or "prompt").strip().lower()
     if knd not in KINDS:
         raise ValueError(f"kind must be one of: {', '.join(KINDS)}")
@@ -725,6 +756,8 @@ def add_task(
             task["tz"] = tz
         if rep == "monthly":
             task["anchor_day"] = _as_local(due, zone(tz or None)).day
+        if rep not in ("once", "hourly"):
+            task["clock"] = _as_local(due, zone(tz or None)).strftime("%H:%M")
         if knd == "job":
             task["kind"] = "job"
             task["job"] = job.strip()
