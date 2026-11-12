@@ -613,3 +613,27 @@ def test_the_filings_feed_is_refetched_once_it_is_stale(monkeypatch):
     finally:
         edgar._JSON_CACHE.pop(url, None)
         edgar._JSON_FETCHED_AT.pop(url, None)
+
+
+def test_a_52_53_week_filers_years_do_not_collide():
+    """Fiscal 2021 ended 1 Jan 2022 and fiscal 2022 on 31 Dec 2022: by calendar
+    year both were "2022", fiscal 2021 vanished, and the FY2023 10-K's comparative
+    of 2021 (filed later) won the bucket."""
+    from financial_research_assistant import edgar
+
+    def fy(start, end, val, filed):
+        return {"start": start, "end": end, "val": val, "form": "10-K", "filed": filed}
+
+    raw = [fy("2021-01-03", "2022-01-01", 100, "2022-02-20"),
+           fy("2022-01-02", "2022-12-31", 110, "2023-02-20"),
+           fy("2023-01-01", "2023-12-30", 120, "2024-02-20"),
+           fy("2021-01-03", "2022-01-01", 100, "2024-02-20")]  # comparative, filed later
+    years = edgar._bucket_annual(raw)
+    assert {y: e["val"] for y, e in years.items()} == {"2021": 100, "2022": 110, "2023": 120}
+
+
+def test_a_late_january_year_end_keeps_its_own_label():
+    from financial_research_assistant import edgar
+
+    assert edgar._fiscal_label("2025-01-26") == "2025"   # NVDA calls this fiscal 2025
+    assert edgar._fiscal_label("2022-01-01") == "2021"

@@ -25,6 +25,7 @@ than aborting the turn — and the helpers are trivially monkeypatched in tests.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 import html
 import json
@@ -399,19 +400,39 @@ def _annual_facts(facts: dict[str, Any], tags: list[str], unit: str) -> list[dic
             for y in sorted(by_year, reverse=True)]
 
 
+def _fiscal_label(end: str) -> str:
+    """The fiscal year a period ending on ``end`` is called. A 52/53-week year
+    that ends in the first week of January is the previous year's: fiscal 2021
+    ending 1 January 2022 is "2021"."""
+    try:
+        d = date.fromisoformat(end[:10])
+    except ValueError:
+        return ""
+    return str(d.year - 1 if d.month == 1 and d.day <= 7 else d.year)
+
+
 def _bucket_annual(raw: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Bucket raw XBRL entries by period-end year, keeping the annual (10-K,
-    full-year) value most recently filed for each year."""
-    by_year: dict[str, dict[str, Any]] = {}
+    """Bucket raw XBRL entries into fiscal years, keeping the annual (10-K,
+    full-year) value most recently filed for each period.
+
+    Grouped by the period's END DATE first, then labelled. By the end date's
+    calendar year, a 52/53-week filer's fiscal 2021 (ending 1 January 2022) and
+    fiscal 2022 (ending 31 December 2022) shared the bucket "2022": the later
+    filing won, one year vanished, and growth was measured across two years."""
+    by_end: dict[str, dict[str, Any]] = {}
     for e in raw:
         if not _is_annual_period(e):
             continue
-        year = str(e.get("end") or "")[:4]
-        if not year.isdigit():
+        end = str(e.get("end") or "")[:10]
+        if not end[:4].isdigit():
             continue
-        cur = by_year.get(year)
+        cur = by_end.get(end)
         if cur is None or str(e.get("filed") or "") > str(cur.get("filed") or ""):
-            by_year[year] = e
+            by_end[end] = e
+    by_year: dict[str, dict[str, Any]] = {}
+    for end in sorted(by_end):  # later ends overwrite on a label clash
+        if label := _fiscal_label(end):
+            by_year[label] = by_end[end]
     return by_year
 
 
