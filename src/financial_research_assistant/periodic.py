@@ -739,7 +739,18 @@ _NAMED_NUMBERS = re.compile(
 _FIGURE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?")
 
 
+#: What turns a number into a measured figure: a percent, a currency sign, a unit.
+_UNIT_AFTER = re.compile(r"\s*(?:%|percent\b|pc\b|bps?\b|basis points?\b|points?\b|pts?\b|"
+                         r"[kmb]n?\b|x\b|times\b)", re.IGNORECASE)
+_UNIT_BEFORE = re.compile(r"[$€£¥]\s*$")
+
+
 def _numbers(text: str) -> list[tuple[str, float, int]]:
+    return [(t, v, d) for t, v, d, _unit in _numbers_with_units(text)]
+
+
+def _numbers_with_units(text: str) -> list[tuple[str, float, int, bool]]:
+    """``(text, value, decimals, has_unit)`` for every number in ``text``."""
     out = []
     for m in _FIGURE.finditer(text):
         raw = m.group(0).replace(",", "")
@@ -748,7 +759,9 @@ def _numbers(text: str) -> list[tuple[str, float, int]]:
         except ValueError:
             continue
         decimals = len(raw.split(".", 1)[1]) if "." in raw else 0
-        out.append((m.group(0), value, decimals))
+        unit = bool(_UNIT_AFTER.match(text, m.end())
+                    or _UNIT_BEFORE.search(text, max(0, m.start() - 3), m.start()))
+        out.append((m.group(0), value, decimals, unit))
     return out
 
 
@@ -757,15 +770,21 @@ def unsupported_figures(commentary: str, brief: Brief) -> list[str]:
 
     A figure is supported when some number on the sheet rounds to it at the
     precision it was written with — "0.8%" is the sheet's 0.84 — so the model may
-    round, but not compute. Small whole numbers (counts: "3 of 5 holdings") and
-    the digits of names and dates pass.
+    round, but not compute. Small whole numbers pass as counts ("3 of 5
+    holdings") only when bare: "fell 7%" or "$5" is a figure, and exempting it let
+    "your holdings fell 7%" through against a sheet showing +0.84%. The digits of
+    names and dates pass.
+
+    Direction is not checked: sheets write many moves as words ("down 1.2%"), so
+    a signed comparison would withhold good commentary more often than it caught
+    a bad one.
     """
     sheet = "\n".join([brief.highlights, brief.markdown, brief.message,
                        json.dumps(brief.facts, default=str)])
     allowed = [abs(v) for _s, v, _d in _numbers(_NAMED_NUMBERS.sub(" ", sheet))]
     bad = []
-    for text, value, decimals in _numbers(_NAMED_NUMBERS.sub(" ", commentary)):
-        if decimals == 0 and value <= 12:
+    for text, value, decimals, unit in _numbers_with_units(_NAMED_NUMBERS.sub(" ", commentary)):
+        if decimals == 0 and value <= 12 and not unit:
             continue
         if any(round(a, decimals) == round(value, decimals) for a in allowed):
             continue
