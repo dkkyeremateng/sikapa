@@ -453,20 +453,24 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     return {"id": tid, "ok": ok, "delivered": delivered, "failed": failed, "answer": answer}
 
 
-async def retry_deliveries() -> list[str]:
+async def retry_deliveries(now: datetime | None = None) -> list[str]:
     """Re-send answers that reached no channel. Returns the task ids that went out.
 
     Runs at the top of every tick, before any model call: an answer already paid
-    for should reach the user before new work is started.
+    for should reach the user before new work is started. Paced by each answer's
+    backoff, and given up after ``DELIVERY_GIVE_UP_HOURS`` into a file.
     """
     out: list[str] = []
     for task in tasks.undelivered():
         tid = str(task.get("id"))
         body = str(task.get("pending_delivery") or "")
-        if tasks.delivery_exhausted(task):
+        if tasks.delivery_exhausted(task, now):
+            path = tasks.save_undelivered(task, now)
             _log(f"  giving up on delivering task {tid} after "
-                 f"{tasks.MAX_DELIVERY_ATTEMPTS} attempts; the answer is in the log")
+                 f"{tasks.DELIVERY_GIVE_UP_HOURS:g}h; the full answer is in {path}")
             tasks.delivery_done(tid)
+            continue
+        if not tasks.delivery_due(task, now):
             continue
         delivered, _failed = await asyncio.to_thread(
             channels.deliver, body, str(task.get("channel") or "")
@@ -478,7 +482,7 @@ async def retry_deliveries() -> list[str]:
         else:
             # A banner is not the answer, so the parked text stays parked and waits
             # for a channel that carries the whole thing.
-            tasks.queue_delivery(tid, body)  # bumps the attempt counter
+            tasks.queue_delivery(tid, body, now)  # same answer: backs off
     return out
 
 

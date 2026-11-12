@@ -427,14 +427,41 @@ def test_redelivery_is_attempted_on_a_tick_with_no_due_work(monkeypatch, answers
     assert calls, "but the parked answer still went out"
 
 
-def test_redelivery_eventually_gives_up(monkeypatch, answers):
-    """Otherwise an answer for a permanently-dead channel is retried forever."""
+def test_redelivery_eventually_gives_up_into_a_file(monkeypatch, answers):
+    """Otherwise an answer for a permanently-dead channel is retried forever. Given
+    up, the answer is kept in a file: the store holds only a truncated snippet."""
     monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
     tasks.add_task("x", "+0m")
     asyncio.run(scheduler.run_due())
-    for _ in range(tasks.MAX_DELIVERY_ATTEMPTS + 1):
-        asyncio.run(scheduler.retry_deliveries())
+    later = tasks.now_utc() + timedelta(hours=tasks.DELIVERY_GIVE_UP_HOURS + 1)
+    asyncio.run(scheduler.retry_deliveries(later))
     assert tasks.undelivered() == []
+    [saved] = list(tasks.tasks_file().with_name("undelivered").glob("s1-*.txt"))
+    assert "answer to x" in saved.read_text()
+
+
+def test_an_outage_of_ten_minutes_does_not_lose_the_answer(monkeypatch, answers):
+    """Eight attempts on a one-minute tick gave up after about eight minutes."""
+    monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
+    tasks.add_task("x", "+0m")
+    asyncio.run(scheduler.run_due())
+    start = tasks.now_utc()
+    for minute in range(1, 31):
+        asyncio.run(scheduler.retry_deliveries(start + timedelta(minutes=minute)))
+    tries = int(tasks.get_task("s1")["delivery_attempts"])
+    assert tasks.undelivered() and tries < 10, f"{tries} attempts in 30 minutes: backing off"
+
+
+def test_a_new_answer_gets_its_own_retries():
+    """The count used to carry over, so answer B could be dropped before one retry."""
+    t = tasks.add_task("x", "+1h")
+    now = tasks.now_utc()
+    for i in range(7):
+        tasks.queue_delivery(t["id"], "answer A", now + timedelta(minutes=i))
+    tasks.queue_delivery(t["id"], "answer B", now + timedelta(minutes=8))
+    stored = tasks.get_task(t["id"])
+    assert stored["delivery_attempts"] == 1 and stored["pending_delivery"] == "answer B"
+    assert not tasks.delivery_exhausted(stored, now + timedelta(minutes=9))
 
 
 def test_a_parked_answer_is_visible_in_the_listing(monkeypatch, answers):
@@ -488,7 +515,9 @@ def test_a_toast_does_not_clear_a_parked_answer_either(outage, answers):
     channels.register_channel(channels.Channel(
         "telegram", lambda: True, lambda t: bool(sent.append(t) or True), "Telegram",
     ))
-    assert asyncio.run(scheduler.retry_deliveries()) == ["s1"]
+    # A failed retry backs off a minute before the next.
+    later = tasks.now_utc() + timedelta(minutes=2)
+    assert asyncio.run(scheduler.retry_deliveries(later)) == ["s1"]
     assert "answer to Analyse FISV" in sent[0]
     assert tasks.undelivered() == []
 

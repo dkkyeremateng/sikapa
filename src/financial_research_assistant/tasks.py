@@ -77,10 +77,13 @@ _RESULT_SNIPPET = 400
 #: every tick forever.
 MAX_ATTEMPTS = 3
 
-#: How many undeliverable answers to re-attempt before giving up on the channel.
-#: Higher than MAX_ATTEMPTS because a redelivery is FREE — the model call is
-#: already spent — so the only cost of trying again is one HTTP request.
-MAX_DELIVERY_ATTEMPTS = 8
+#: How long an undeliverable answer is retried before it is written to a file
+#: instead. Counted in TIME, not attempts: eight attempts on a one-minute tick was
+#: eight minutes, shorter than most Telegram or network outages. A redelivery is
+#: free (the model call is already spent), so patience costs one HTTP request a try.
+DELIVERY_GIVE_UP_HOURS = 24.0
+#: Retry spacing: a minute, doubling to an hour.
+_DELIVERY_BACKOFF_MIN = (1.0, 60.0)
 
 #: Tasks run per tick. Bounded so a backlog built up while the machine was off
 #: drains over consecutive ticks instead of firing twenty model runs at once.
@@ -972,16 +975,31 @@ def record_result(task_id: str, ok: bool, result: str, now: datetime | None = No
 # precisely because it still has to be delivered.
 
 
-def queue_delivery(task_id: str, text: str) -> None:
-    """Park an answer that reached no channel, for a later tick to re-send."""
+def queue_delivery(task_id: str, text: str, now: datetime | None = None) -> None:
+    """Park an answer that reached no channel, for a later tick to re-send.
+
+    A NEW answer starts its own clock (it used to inherit the previous answer's
+    attempt count and could be given up before a single retry); the same answer
+    parked again backs off."""
+    now = now or now_utc()
     with _locked():
         items = load_tasks()
         for t in items:
-            if str(t.get("id")) == str(task_id):
+            if str(t.get("id")) != str(task_id):
+                continue
+            if t.get("pending_delivery") != text:
                 t["pending_delivery"] = text
-                t["delivery_attempts"] = int(t.get("delivery_attempts") or 0) + 1
-                save_tasks(items)
-                return
+                t["delivery_attempts"] = 1
+                t["parked_at"] = now.isoformat()
+                t["next_delivery"] = now.isoformat()
+            else:
+                n = int(t.get("delivery_attempts") or 0) + 1
+                t["delivery_attempts"] = n
+                low, high = _DELIVERY_BACKOFF_MIN
+                wait = min(high, low * 2 ** (n - 2))
+                t["next_delivery"] = (now + timedelta(minutes=wait)).isoformat()
+            save_tasks(items)
+            return
 
 
 def undelivered() -> list[dict[str, Any]]:
@@ -995,14 +1013,33 @@ def delivery_done(task_id: str) -> None:
         items = load_tasks()
         for t in items:
             if str(t.get("id")) == str(task_id) and t.get("pending_delivery"):
-                t.pop("pending_delivery", None)
-                t.pop("delivery_attempts", None)
+                for k in ("pending_delivery", "delivery_attempts", "parked_at", "next_delivery"):
+                    t.pop(k, None)
                 save_tasks(items)
                 return
 
 
-def delivery_exhausted(task: dict[str, Any]) -> bool:
-    return int(task.get("delivery_attempts") or 0) >= MAX_DELIVERY_ATTEMPTS
+def delivery_exhausted(task: dict[str, Any], now: datetime | None = None) -> bool:
+    parked = _parse_due(task.get("parked_at"))
+    if parked is None:  # parked before the clock was kept: one more day from now
+        return False
+    return (now or now_utc()) - parked >= timedelta(hours=DELIVERY_GIVE_UP_HOURS)
+
+
+def delivery_due(task: dict[str, Any], now: datetime | None = None) -> bool:
+    nxt = _parse_due(task.get("next_delivery"))
+    return nxt is None or nxt <= (now or now_utc())
+
+
+def save_undelivered(task: dict[str, Any], now: datetime | None = None) -> Path:
+    """Write a given-up answer to a file, so giving up loses the channel, not the
+    answer (the store keeps only a truncated ``last_result``)."""
+    now = now or now_utc()
+    folder = tasks_file().with_name("undelivered")
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = folder / f"{task.get('id')}-{now:%Y%m%d-%H%M%S}.txt"
+    write_private(path, str(task.get("pending_delivery") or ""), prefix=".undelivered-")
+    return path
 
 
 def purge(keep_errors: bool = True) -> int:
