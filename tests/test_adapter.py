@@ -1429,3 +1429,37 @@ async def test_a_missing_export_does_not_hide_a_false_delivery_claim():
         "Done. The report was sent to Telegram.", set(),
         user_msg="export my trades to csv and send me the portfolio review on telegram")
     assert "no file was written" in out and "no report was produced or sent" in out
+
+
+async def test_a_tool_call_that_failed_does_not_back_a_claim(monkeypatch):
+    """A schedule_task that errored counted as called, so "I've scheduled it"
+    went out without the correction."""
+    from financial_research_assistant import adapter
+    from financial_research_assistant.events import AgentEvent
+
+    seen = {}
+
+    async def stream(graph, inputs, config, stats):
+        yield AgentEvent("tool_start", "", tool="schedule_task")
+        yield AgentEvent("tool_end", "", tool="schedule_task", ok=False)
+        yield AgentEvent("token", "I've scheduled the NVDA check for tomorrow 9am.")
+
+    async def settle(user_msg, answer, called_tools, fake=False):
+        seen["tools"] = set(called_tools)
+        return answer
+
+    monkeypatch.setattr(adapter, "_stream_events", stream)
+    monkeypatch.setattr(adapter, "settle_schedule_claim", settle)
+    async for _ in adapter.run_turn("check NVDA tomorrow", "s-failed-tool", fake=True):
+        pass
+    assert "schedule_task" not in seen.get("tools", {"schedule_task"})
+
+
+async def test_the_repair_reads_a_reply_in_content_blocks(monkeypatch):
+    from financial_research_assistant import tasks
+    from financial_research_assistant.adapter import settle_schedule_claim
+
+    _fake_quick(monkeypatch, [{"type": "text", "text": '{"prompt": "Check NVDA", '
+                                                       '"when": "tomorrow 9am", "repeat": "once"}'}])
+    out = await settle_schedule_claim("check NVDA tomorrow", "I've scheduled it.", set())
+    assert "Task created" in out and tasks.pending_tasks()[0]["prompt"] == "Check NVDA"

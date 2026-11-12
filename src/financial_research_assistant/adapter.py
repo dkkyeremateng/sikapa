@@ -939,9 +939,9 @@ async def _repair_schedule_claim(user_msg: str, answer: str) -> str | None:
         resp = await quick_llm().ainvoke(
             _REPAIR_PROMPT.format(user=user_msg[:2000], answer=answer[:2000])
         )
-        raw = getattr(resp, "content", "")
-        if not isinstance(raw, str):
-            return None
+        # message_text reads both a string and content blocks; a provider that
+        # replies in blocks always fell through to the retraction.
+        raw = message_text(resp)
         match = re.search(r"\{.*\}", raw, re.S)
         if not match:
             return None
@@ -1358,7 +1358,9 @@ async def run_turn(
                 async for ev in _stream_events(graph, stream_inputs, config, stats):
                     if ev.kind == "reasoning" and not think:
                         continue  # thinking disabled: drop the reasoning trace
-                    if ev.kind == "tool_end":
+                    if ev.kind == "tool_end" and ev.ok:
+                        # Only a call that worked grounds a claim: a schedule_task
+                        # that errored used to suppress "nothing was scheduled".
                         called_tools.add(ev.tool)
                     if ev.kind == "tool_start":
                         # Text before a tool call is the model narrating ("Let me
