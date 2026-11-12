@@ -1056,22 +1056,42 @@ def _select_non_overlapping(periods: list[dict[str, Any]]) -> tuple[list[dict[st
     returns can be chained without double-counting any span, and return
     ``(selected, dropped)``.
 
-    Uses classic activity-selection (greedy by earliest end date), which
-    maximizes the number of intervals kept — so if you've imported both a yearly
-    statement and the twelve monthly ones it covers, the monthlies win (finer
-    resolution) and the redundant annual is dropped. Two periods that merely abut
-    (one ends the day before the next begins) do not overlap."""
+    Chosen to cover the MOST DAYS, and among equal coverage the most periods, so
+    the twelve monthlies of a year still beat its annual (finer resolution, same
+    span). The earlier rule kept the most periods outright (greedy by earliest
+    end), so an annual statement overlapping a single March monthly lost to it,
+    and eleven months of returns went with it. Two periods that merely abut (one
+    ends the day before the next begins) do not overlap."""
     ordered = sorted(periods, key=lambda p: (p["end"], p["start"]))
-    selected: list[dict[str, Any]] = []
-    dropped: list[dict[str, Any]] = []
-    coverage_end: str | None = None  # ISO dates compare correctly as strings
-    for p in ordered:
-        if coverage_end is None or p["start"] >= coverage_end:
-            selected.append(p)
-            coverage_end = p["end"]
+    n = len(ordered)
+
+    def days(p: dict[str, Any]) -> int:
+        return (date.fromisoformat(p["end"]) - date.fromisoformat(p["start"])).days + 1
+
+    # Weighted interval scheduling: best[i] is the best (days, count) using the
+    # first i periods; prev[i] the last period ending before period i starts.
+    prev = []
+    for i, p in enumerate(ordered):
+        j = i - 1
+        while j >= 0 and ordered[j]["end"] >= p["start"]:
+            j -= 1
+        prev.append(j)
+    best: list[tuple[int, int]] = [(0, 0)] * (n + 1)
+    take: list[bool] = [False] * n
+    for i, p in enumerate(ordered):
+        with_it = (best[prev[i] + 1][0] + days(p), best[prev[i] + 1][1] + 1)
+        take[i] = with_it > best[i]
+        best[i + 1] = with_it if take[i] else best[i]
+    chosen: set[int] = set()
+    i = n - 1
+    while i >= 0:
+        if take[i]:
+            chosen.add(i)
+            i = prev[i]
         else:
-            dropped.append(p)
-    selected.sort(key=lambda p: p["start"])
+            i -= 1
+    selected = sorted((ordered[i] for i in chosen), key=lambda p: p["start"])
+    dropped = [ordered[i] for i in range(n) if i not in chosen]
     return selected, dropped
 
 

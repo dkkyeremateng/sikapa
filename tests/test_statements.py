@@ -267,13 +267,12 @@ def test_performance_history_drops_overlaps_and_flags_gaps(monkeypatch, tmp_path
 
     hist = statements.query_performance_history()
     kept_dates = [p["date"] for p in hist["points"]]
-    # The annual 2024 overlaps the March 2024 slice, so one of them is dropped.
-    assert len(hist["dropped"]) == 1
-    # Activity-selection keeps the finer (shorter) March slice over the full year.
-    assert "January 1, 2024 - December 31, 2024" in hist["dropped"]
+    # The annual 2024 overlaps the March 2024 slice, so one of them is dropped:
+    # the one covering less. Keeping March lost the other eleven months.
+    assert hist["dropped"] == ["March 1, 2024 - March 31, 2024"]
     # 2025 is missing entirely -> a multi-hundred-day gap is reported.
     assert hist["gaps"] and hist["gaps"][0]["days"] > 300
-    assert "2024-03-31" in kept_dates and "2026-06-30" in kept_dates
+    assert "2024-12-31" in kept_dates and "2026-06-30" in kept_dates
 
     # The gap is tagged with the point index the break falls after.
     assert "after_point" in hist["gaps"][0]
@@ -1063,3 +1062,18 @@ def test_a_consolidated_statement_has_lots_and_gains(monkeypatch, tmp_path):
                        "instruments": [], "nav": [], "corporate_actions": []})
     assert s.realized_gains()["total_realized"] == pytest.approx(20.0)
     assert set(s.open_lots()) == {"KO", "MSFT"}
+
+
+
+def test_monthlies_covering_a_year_still_beat_its_annual(monkeypatch, tmp_path):
+    """Equal coverage: the finer periods win, as they always did."""
+    import calendar
+
+    from financial_research_assistant import statements
+
+    periods = [{"start": f"2025-{m:02d}-01",
+                "end": f"2025-{m:02d}-{calendar.monthrange(2025, m)[1]:02d}",
+                "twrr": 1.0, "period": f"m{m}"} for m in range(1, 13)]
+    annual = {"start": "2025-01-01", "end": "2025-12-31", "twrr": 12.0, "period": "annual"}
+    selected, dropped = statements._select_non_overlapping(periods + [annual])
+    assert [p["period"] for p in dropped] == ["annual"] and len(selected) == 12
