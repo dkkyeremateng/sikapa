@@ -764,7 +764,7 @@ def open_ideas() -> list[dict[str, Any]]:
     for e in rows:
         s = series.get(str(e["symbol"])) or []
         if s and e.get("entry_price"):
-            e["since_entry_pct"] = (s[-1][1] / float(e["entry_price"]) - 1) * 100
+            e["since_entry_pct"] = (s[-1][1] / journal.comparable_entry_price(e) - 1) * 100
             e["priced_on"] = s[-1][0]
     return rows
 

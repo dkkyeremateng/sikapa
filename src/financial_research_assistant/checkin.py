@@ -103,7 +103,7 @@ def _calls_behind() -> list[Finding]:
         earliest[k] = e
     out = []
     for (sym, verdict), e in earliest.items():
-        entry = float(e.get("entry_price") or 0)
+        entry = journal.comparable_entry_price(e)
         try:
             opened = date.fromisoformat(str(e.get("entry_date"))[:10])
         except ValueError:

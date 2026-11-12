@@ -311,13 +311,16 @@ def theses(ctx: dict[str, Any]) -> list[Event]:
     out = []
     for e in open_entries:
         rows = series.get(str(e["symbol"])) or []
-        entry = float(e.get("entry_price") or 0)
-        if not rows or entry <= 0:
+        if not rows or not e.get("entry_price"):
             continue
+        # The entry and the level the call named are pre-split prices; today's
+        # are split-adjusted.
+        factor = journal.split_factor(e)
+        entry = float(e["entry_price"]) / factor
         price = rows[-1][1]
         change = (price / entry - 1) * 100
         raw_level = e.get("invalidation_price")
-        level = float(raw_level) if isinstance(raw_level, (int, float)) else 0.0
+        level = float(raw_level) / factor if isinstance(raw_level, (int, float)) else 0.0
         verdict = str(e.get("verdict"))
         broken = level > 0 and (
             (verdict == "bullish" and price <= level) or (verdict == "bearish" and price >= level))

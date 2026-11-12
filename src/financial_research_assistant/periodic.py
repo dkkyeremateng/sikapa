@@ -275,9 +275,9 @@ def _open_calls_moving(threshold: float = 10.0) -> list[dict[str, Any]]:
     series = _fetch_many([str(e.get("symbol")) for e in open_entries], 10)
     for e in open_entries:
         rows = series.get(str(e.get("symbol"))) or []
-        entry = float(e.get("entry_price") or 0)
-        if not rows or entry <= 0:
+        if not rows or not e.get("entry_price"):
             continue
+        entry = journal.comparable_entry_price(e)
         change = (rows[-1][1] / entry - 1) * 100
         if abs(change) >= threshold:
             out.append({**e, "since_entry_pct": change, "priced_on": rows[-1][0]})

@@ -309,13 +309,42 @@ def due_entries(now: date | None = None) -> list[dict[str, Any]]:
     return out
 
 
+def split_factor(entry: dict[str, Any]) -> float:
+    """How many of today's shares one share at entry has become: 4.0 after a
+    4-for-1 split, 1.0 when nothing happened.
+
+    ``entry_price`` is frozen when the call is made, but the price series is
+    split-adjusted after the fact, so after a 4-for-1 split today's price reads as
+    -75% against it: a bullish call scored a miss, a bearish one a hit, and the
+    watcher announced a collapse. Read off the series itself, as the ratio of the
+    stored entry to what the series now says that day closed at. Only a split
+    moves a past close by a clean multiple; anything within 25% is left alone, so
+    ordinary data revisions never touch a score."""
+    stored = float(entry.get("entry_price") or 0)
+    try:
+        opened = date.fromisoformat(str(entry.get("entry_date"))[:10])
+    except ValueError:
+        return 1.0
+    now_view, _ = _price_on(str(entry.get("symbol")), opened)
+    if not stored or not now_view:
+        return 1.0
+    ratio = stored / now_view
+    return ratio if not 0.8 <= ratio <= 1.25 else 1.0
+
+
+def comparable_entry_price(entry: dict[str, Any]) -> float:
+    """The entry price on the same footing as today's prices (see ``split_factor``)."""
+    stored = float(entry.get("entry_price") or 0)
+    return stored / split_factor(entry) if stored else 0.0
+
+
 def score_entry(entry: dict[str, Any], now: date | None = None) -> dict[str, Any] | None:
     """Score one call. Returns the updated entry, or None when it can't be scored
     yet (no price at the horizon) — which leaves it open to retry on a later tick
     rather than burning it as a miss for a data outage."""
     today = now or _now().date()
     sym = str(entry.get("symbol"))
-    entry_price = float(entry.get("entry_price") or 0)
+    entry_price = comparable_entry_price(entry)
     if entry_price <= 0:
         return None
     # Score at the HORIZON, not at whenever the tick happened to run. Scoring is a
