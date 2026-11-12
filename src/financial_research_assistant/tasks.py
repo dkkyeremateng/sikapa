@@ -47,6 +47,7 @@ import calendar
 import json
 import os
 import re
+import secrets
 from contextlib import contextmanager
 from datetime import date, datetime, time as dtime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -76,10 +77,13 @@ _RESULT_SNIPPET = 400
 #: every tick forever.
 MAX_ATTEMPTS = 3
 
-#: How many undeliverable answers to re-attempt before giving up on the channel.
-#: Higher than MAX_ATTEMPTS because a redelivery is FREE — the model call is
-#: already spent — so the only cost of trying again is one HTTP request.
-MAX_DELIVERY_ATTEMPTS = 8
+#: How long an undeliverable answer is retried before it is written to a file
+#: instead. Counted in TIME, not attempts: eight attempts on a one-minute tick was
+#: eight minutes, shorter than most Telegram or network outages. A redelivery is
+#: free (the model call is already spent), so patience costs one HTTP request a try.
+DELIVERY_GIVE_UP_HOURS = 24.0
+#: Retry spacing: a minute, doubling to an hour.
+_DELIVERY_BACKOFF_MIN = (1.0, 60.0)
 
 #: Tasks run per tick. Bounded so a backlog built up while the machine was off
 #: drains over consecutive ticks instead of firing twenty model runs at once.
@@ -171,6 +175,26 @@ def load_tasks() -> list[dict[str, Any]]:
     return [t for t in _read_records() if _is_task(t)]
 
 
+#: A non-task record holding the highest task number ever issued. ``save_tasks``
+#: carries unrecognised records through, so it survives every rewrite.
+_ID_MARK = "id-high-water"
+
+
+def _id_number(record: Any) -> int:
+    tid = str(record.get("id", "")) if isinstance(record, dict) else ""
+    return int(tid[1:]) if tid.startswith("s") and tid[1:].isdigit() else 0
+
+
+def _high_water(records: list[Any]) -> int:
+    for r in records:
+        if isinstance(r, dict) and r.get("meta") == _ID_MARK:
+            try:
+                return int(r.get("last") or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
 def save_tasks(items: list[dict[str, Any]]) -> None:
     """Write the store ``0600``, atomically — a prompt naming holdings is never
     briefly world-readable, and a tick reading a half-written file would see "no
@@ -181,7 +205,12 @@ def save_tasks(items: list[dict[str, Any]]) -> None:
     after a hand-edit that dropped a quote would erase that entry permanently — the
     user's typo silently deleting their task instead of leaving it to be fixed.
     """
-    unknown = [r for r in _read_records() if not _is_task(r)]
+    records = _read_records()
+    unknown = [r for r in records if not _is_task(r)
+               and not (isinstance(r, dict) and r.get("meta") == _ID_MARK)]
+    mark = max([_high_water(records)] + [_id_number(t) for t in items])
+    if mark:
+        unknown.append({"meta": _ID_MARK, "last": mark})
     write_private(
         tasks_file(), json.dumps(items + unknown, indent=2) + "\n", prefix=".tasks-"
     )
@@ -256,13 +285,13 @@ def runner_warning() -> str:
 
 
 def _next_id(items: list[dict[str, Any]]) -> str:
-    """A short stable id (``s1``, ``s2``, …), one past the current max — matching
-    the ``a1``/``a2`` scheme alert rules already use."""
-    n = 0
-    for t in items:
-        tid = str(t.get("id", ""))
-        if tid.startswith("s") and tid[1:].isdigit():
-            n = max(n, int(tid[1:]))
+    """A short stable id (``s1``, ``s2``, …), one past the highest EVER issued —
+    matching the ``a1``/``a2`` scheme alert rules already use.
+
+    One past the current max reissued a cancelled task's id: cancel s2 while it
+    runs, schedule the corrected prompt, get s2 again, and the old run's result
+    landed on the new task and marked it done before it ever ran."""
+    n = max([_high_water(_read_records())] + [_id_number(t) for t in items])
     return f"s{n + 1}"
 
 
@@ -515,7 +544,8 @@ def _add_wall_clock(moment: datetime, step: timedelta, tz: tzinfo | None = None)
 
 
 def next_due(
-    due: datetime, repeat: str, tz: str | None = None, anchor_day: int | None = None
+    due: datetime, repeat: str, tz: str | None = None, anchor_day: int | None = None,
+    clock: str | None = None,
 ) -> datetime | None:
     """The following occurrence after ``due``, or None when the task is done.
 
@@ -538,15 +568,21 @@ def next_due(
     every month that has one, and on the last day of any month that doesn't — so
     a task on the 31st runs Jan 31, Feb 28, Mar 31, rather than drifting to the
     28th for good after the first short month.
+
+    ``clock`` ("HH:MM") is the time of day the task was set for, kept for the same
+    reason. Each occurrence is built from it rather than from the last run's time:
+    a daily 02:30 fell into the spring-forward gap, ran at 03:30, and every later
+    run was computed from 03:30, so it stayed there for good.
     """
     repeat = (repeat or "once").strip().lower()
     if repeat not in REPEATS or repeat == "once":
         return None
     tzi = zone(tz)
     now = now_utc()
+    meant = _clock_of(clock)
     if repeat in ("monthly", "monthly-first-weekday"):
         local = _as_local(due, tzi)
-        clock = dtime(local.hour, local.minute)
+        clock_t = meant or dtime(local.hour, local.minute)
         anchor = int(anchor_day or local.day)
 
         def month_after(moment: datetime) -> datetime:
@@ -554,7 +590,7 @@ def next_due(
             y, mo = _add_months(cur.year, cur.month, 1)
             day = _first_weekday(y, mo) if repeat == "monthly-first-weekday" else (
                 _month_day(y, mo, anchor))
-            return _localize(datetime.combine(day, clock), tzi).astimezone(timezone.utc)
+            return _localize(datetime.combine(day, clock_t), tzi).astimezone(timezone.utc)
 
         nxt = month_after(due)
         while nxt <= now:
@@ -566,9 +602,14 @@ def next_due(
         "weekdays": timedelta(days=1),
         "weekly": timedelta(weeks=1),
     }[repeat]
-    advance = (lambda m: m + step) if repeat == "hourly" else (
-        lambda m: _add_wall_clock(m, step, tzi)
-    )
+    def advance(m: datetime) -> datetime:
+        if repeat == "hourly":
+            return m + step
+        if meant is not None:
+            day = _as_local(m, tzi).date() + step
+            return _localize(datetime.combine(day, meant), tzi).astimezone(timezone.utc)
+        return _add_wall_clock(m, step, tzi)
+
     nxt = advance(due)
     while nxt <= now:
         nxt = advance(nxt)
@@ -578,9 +619,17 @@ def next_due(
     return nxt
 
 
+def _clock_of(text: str | None) -> dtime | None:
+    try:
+        hour, minute = (int(x) for x in str(text or "").split(":"))
+        return dtime(hour, minute)
+    except ValueError:
+        return None
+
+
 def _next_for(task: dict[str, Any], due: datetime) -> datetime | None:
     return next_due(due, str(task.get("repeat") or "once"), task.get("tz") or None,
-                    task.get("anchor_day"))
+                    task.get("anchor_day"), task.get("clock"))
 
 
 def _give_up_on_this_run(t: dict[str, Any], now: datetime) -> bool:
@@ -670,6 +719,17 @@ def add_task(
         tzi = zone(tz or None)
         while _as_local(due, tzi).weekday() >= 5:
             due = _add_wall_clock(due, timedelta(days=1), tzi)
+    if rep == "monthly-first-weekday":
+        # "1st of the month 8am" set up in July gave Saturday 1 August: the first
+        # run is snapped the same way every later one is.
+        tzi = zone(tz or None)
+        local = _as_local(due, tzi)
+        first = _first_weekday(local.year, local.month)
+        if local.date() != first:
+            snapped = _localize(datetime.combine(first, local.time().replace(tzinfo=None)),
+                                tzi).astimezone(timezone.utc)
+            due = snapped if snapped > now_utc() else (
+                next_due(snapped, rep, tz or None) or due)
     knd = (kind or "prompt").strip().lower()
     if knd not in KINDS:
         raise ValueError(f"kind must be one of: {', '.join(KINDS)}")
@@ -696,6 +756,8 @@ def add_task(
             task["tz"] = tz
         if rep == "monthly":
             task["anchor_day"] = _as_local(due, zone(tz or None)).day
+        if rep not in ("once", "hourly"):
+            task["clock"] = _as_local(due, zone(tz or None)).strftime("%H:%M")
         if knd == "job":
             task["kind"] = "job"
             task["job"] = job.strip()
@@ -809,10 +871,28 @@ def claim_due(now: datetime | None = None, limit: int | None = None) -> list[dic
                 continue
             t["status"] = "running"
             t["claimed_at"] = now.isoformat()
+            # Which run this claim belongs to. A result or release carrying another
+            # claim (a run whose claim expired and was taken over, or one that
+            # already recorded) is ignored, not written over the current state.
+            t["claim"] = secrets.token_hex(6)
             claimed.append(dict(t))
         if claimed or changed:
             save_tasks(items)
     return claimed
+
+
+def renew_claim(task_id: str, claim: str, now: datetime | None = None) -> None:
+    """Restart a claim's expiry clock when its run actually begins. ``claim_due``
+    stamps a whole batch at once, and the ones queued behind a long run would
+    otherwise expire while still waiting their turn."""
+    with _locked():
+        items = load_tasks()
+        for t in items:
+            if (str(t.get("id")) == str(task_id) and t.get("status") == "running"
+                    and (not claim or t.get("claim") == claim)):
+                t["claimed_at"] = (now or now_utc()).isoformat()
+                save_tasks(items)
+                return
 
 
 def note_run(task_id: str, due: Any, session: str) -> None:
@@ -839,30 +919,39 @@ def unfinished_run(task: dict[str, Any]) -> str:
     return ""
 
 
-def release(task_id: str) -> None:
+def release(task_id: str, claim: str = "") -> None:
     """Put a claimed task back to pending, unchanged.
 
     For the interrupted case — Ctrl-C, a killed watcher — where the run never
     reached a verdict. Without it the task would sit in "running" forever and never
-    be claimed again.
+    be claimed again. The claim is kept: a timeout cancels the run (which releases
+    it) and THEN records the attempt as failed, under the same claim.
     """
     with _locked():
         items = load_tasks()
         for t in items:
-            if str(t.get("id")) == str(task_id) and t.get("status") == "running":
+            if (str(t.get("id")) == str(task_id) and t.get("status") == "running"
+                    and (not claim or t.get("claim") == claim)):
                 t["status"] = "pending"
                 t.pop("claimed_at", None)
                 save_tasks(items)
                 return
 
 
-def record_result(task_id: str, ok: bool, result: str, now: datetime | None = None) -> dict[str, Any] | None:
+def record_result(task_id: str, ok: bool, result: str, now: datetime | None = None,
+                  claim: str = "") -> dict[str, Any] | None:
     """Write back the outcome of a run and schedule (or retire) the task.
 
     Success: a recurring task moves to its next occurrence, a one-shot is done.
     Failure: retried on the next tick until ``MAX_ATTEMPTS``, then parked as
     ``error`` — a prompt that fails every time (a deleted document, a bad ticker)
     otherwise bills a model run on every tick for the rest of time.
+
+    ``claim`` is the token ``claim_due`` handed this run; a result whose claim is
+    no longer the task's is stale and returns None without writing. Recording
+    consumes the claim, so a run can record once: a timeout that fired during
+    delivery used to record a second time and flip a finished task back to
+    pending, re-running (and re-billing) the whole analysis.
     """
     now = now or now_utc()
     with _locked():
@@ -870,7 +959,10 @@ def record_result(task_id: str, ok: bool, result: str, now: datetime | None = No
         for t in items:
             if str(t.get("id")) != str(task_id):
                 continue
+            if claim and t.get("claim") != claim:
+                return None
             t.pop("claimed_at", None)
+            t.pop("claim", None)
             t["runs"] = int(t.get("runs") or 0) + 1
             t["last_run"] = now.isoformat()
             t["last_ok"] = bool(ok)
@@ -916,16 +1008,31 @@ def record_result(task_id: str, ok: bool, result: str, now: datetime | None = No
 # precisely because it still has to be delivered.
 
 
-def queue_delivery(task_id: str, text: str) -> None:
-    """Park an answer that reached no channel, for a later tick to re-send."""
+def queue_delivery(task_id: str, text: str, now: datetime | None = None) -> None:
+    """Park an answer that reached no channel, for a later tick to re-send.
+
+    A NEW answer starts its own clock (it used to inherit the previous answer's
+    attempt count and could be given up before a single retry); the same answer
+    parked again backs off."""
+    now = now or now_utc()
     with _locked():
         items = load_tasks()
         for t in items:
-            if str(t.get("id")) == str(task_id):
+            if str(t.get("id")) != str(task_id):
+                continue
+            if t.get("pending_delivery") != text:
                 t["pending_delivery"] = text
-                t["delivery_attempts"] = int(t.get("delivery_attempts") or 0) + 1
-                save_tasks(items)
-                return
+                t["delivery_attempts"] = 1
+                t["parked_at"] = now.isoformat()
+                t["next_delivery"] = now.isoformat()
+            else:
+                n = int(t.get("delivery_attempts") or 0) + 1
+                t["delivery_attempts"] = n
+                low, high = _DELIVERY_BACKOFF_MIN
+                wait = min(high, low * 2 ** (n - 2))
+                t["next_delivery"] = (now + timedelta(minutes=wait)).isoformat()
+            save_tasks(items)
+            return
 
 
 def undelivered() -> list[dict[str, Any]]:
@@ -939,24 +1046,49 @@ def delivery_done(task_id: str) -> None:
         items = load_tasks()
         for t in items:
             if str(t.get("id")) == str(task_id) and t.get("pending_delivery"):
-                t.pop("pending_delivery", None)
-                t.pop("delivery_attempts", None)
+                for k in ("pending_delivery", "delivery_attempts", "parked_at", "next_delivery"):
+                    t.pop(k, None)
                 save_tasks(items)
                 return
 
 
-def delivery_exhausted(task: dict[str, Any]) -> bool:
-    return int(task.get("delivery_attempts") or 0) >= MAX_DELIVERY_ATTEMPTS
+def delivery_exhausted(task: dict[str, Any], now: datetime | None = None) -> bool:
+    parked = _parse_due(task.get("parked_at"))
+    if parked is None:  # parked before the clock was kept: one more day from now
+        return False
+    return (now or now_utc()) - parked >= timedelta(hours=DELIVERY_GIVE_UP_HOURS)
 
 
-def purge(keep_errors: bool = True) -> int:
+def delivery_due(task: dict[str, Any], now: datetime | None = None) -> bool:
+    nxt = _parse_due(task.get("next_delivery"))
+    return nxt is None or nxt <= (now or now_utc())
+
+
+def save_undelivered(task: dict[str, Any], now: datetime | None = None) -> Path:
+    """Write a given-up answer to a file, so giving up loses the channel, not the
+    answer (the store keeps only a truncated ``last_result``)."""
+    now = now or now_utc()
+    folder = tasks_file().with_name("undelivered")
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = folder / f"{task.get('id')}-{now:%Y%m%d-%H%M%S}.txt"
+    write_private(path, str(task.get("pending_delivery") or ""), prefix=".undelivered-")
+    return path
+
+
+def purge(keep_errors: bool = True, finished_before: datetime | None = None) -> int:
     """Drop finished tasks; returns how many went. Errors are kept by default so a
-    failure isn't silently swept away before it's been read."""
+    failure isn't silently swept away before it's been read. ``finished_before``
+    keeps the ones that ran since then, so a recent result is still listed."""
+    def recent(t: dict[str, Any]) -> bool:
+        ran = _parse_due(t.get("last_run"))
+        return finished_before is not None and ran is not None and ran >= finished_before
+
     with _locked():
         items = load_tasks()
         kept = [
             t for t in items
-            if t.get("status") not in ("done",) and not (t.get("status") == "error" and not keep_errors)
+            if recent(t) or (t.get("status") not in ("done",)
+                             and not (t.get("status") == "error" and not keep_errors))
         ]
         removed = len(items) - len(kept)
         if removed:

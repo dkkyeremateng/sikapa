@@ -5,6 +5,7 @@ a recorder, so no test here spends a token or sends a message.
 """
 
 import asyncio
+import time
 from datetime import timedelta
 
 import pytest
@@ -426,14 +427,41 @@ def test_redelivery_is_attempted_on_a_tick_with_no_due_work(monkeypatch, answers
     assert calls, "but the parked answer still went out"
 
 
-def test_redelivery_eventually_gives_up(monkeypatch, answers):
-    """Otherwise an answer for a permanently-dead channel is retried forever."""
+def test_redelivery_eventually_gives_up_into_a_file(monkeypatch, answers):
+    """Otherwise an answer for a permanently-dead channel is retried forever. Given
+    up, the answer is kept in a file: the store holds only a truncated snippet."""
     monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
     tasks.add_task("x", "+0m")
     asyncio.run(scheduler.run_due())
-    for _ in range(tasks.MAX_DELIVERY_ATTEMPTS + 1):
-        asyncio.run(scheduler.retry_deliveries())
+    later = tasks.now_utc() + timedelta(hours=tasks.DELIVERY_GIVE_UP_HOURS + 1)
+    asyncio.run(scheduler.retry_deliveries(later))
     assert tasks.undelivered() == []
+    [saved] = list(tasks.tasks_file().with_name("undelivered").glob("s1-*.txt"))
+    assert "answer to x" in saved.read_text()
+
+
+def test_an_outage_of_ten_minutes_does_not_lose_the_answer(monkeypatch, answers):
+    """Eight attempts on a one-minute tick gave up after about eight minutes."""
+    monkeypatch.setattr(channels, "deliver", lambda text, prefer="": ([], ["telegram"]))
+    tasks.add_task("x", "+0m")
+    asyncio.run(scheduler.run_due())
+    start = tasks.now_utc()
+    for minute in range(1, 31):
+        asyncio.run(scheduler.retry_deliveries(start + timedelta(minutes=minute)))
+    tries = int(tasks.get_task("s1")["delivery_attempts"])
+    assert tasks.undelivered() and tries < 10, f"{tries} attempts in 30 minutes: backing off"
+
+
+def test_a_new_answer_gets_its_own_retries():
+    """The count used to carry over, so answer B could be dropped before one retry."""
+    t = tasks.add_task("x", "+1h")
+    now = tasks.now_utc()
+    for i in range(7):
+        tasks.queue_delivery(t["id"], "answer A", now + timedelta(minutes=i))
+    tasks.queue_delivery(t["id"], "answer B", now + timedelta(minutes=8))
+    stored = tasks.get_task(t["id"])
+    assert stored["delivery_attempts"] == 1 and stored["pending_delivery"] == "answer B"
+    assert not tasks.delivery_exhausted(stored, now + timedelta(minutes=9))
 
 
 def test_a_parked_answer_is_visible_in_the_listing(monkeypatch, answers):
@@ -487,7 +515,9 @@ def test_a_toast_does_not_clear_a_parked_answer_either(outage, answers):
     channels.register_channel(channels.Channel(
         "telegram", lambda: True, lambda t: bool(sent.append(t) or True), "Telegram",
     ))
-    assert asyncio.run(scheduler.retry_deliveries()) == ["s1"]
+    # A failed retry backs off a minute before the next.
+    later = tasks.now_utc() + timedelta(minutes=2)
+    assert asyncio.run(scheduler.retry_deliveries(later)) == ["s1"]
     assert "answer to Analyse FISV" in sent[0]
     assert tasks.undelivered() == []
 
@@ -531,10 +561,10 @@ def test_a_store_failure_leaves_only_its_own_task_for_the_claim_timeout(monkeypa
     batch runs regardless."""
     real = tasks.record_result
 
-    def flaky(task_id, ok, result, now=None):
+    def flaky(task_id, ok, result, now=None, claim=""):
         if task_id == "s1":
             raise OSError("no space left on device")
-        return real(task_id, ok, result, now)
+        return real(task_id, ok, result, now, claim=claim)
 
     monkeypatch.setattr(tasks, "record_result", flaky)
     for i in range(3):
@@ -674,3 +704,42 @@ def test_a_task_that_asks_for_a_report_is_still_held_to_it(monkeypatch, delivere
     tasks.add_task("send me a report on NVDA", "+0m")
     asyncio.run(scheduler.run_due())
     assert "no report was produced" in delivered[0][1]
+
+
+# --- claims: one run, one result -----------------------------------------------
+
+
+def test_a_cancelled_tasks_id_is_never_issued_again():
+    """Cancel s2 while it runs, schedule the corrected prompt: it used to be s2
+    again, and the old run's result marked the new task done before it ran."""
+    tasks.add_task("first", "+1h")
+    tasks.add_task("second", "+1h")
+    assert tasks.remove_task("s2")
+    assert tasks.add_task("corrected", "+1h")["id"] == "s3"
+    tasks.remove_task("all")
+    assert tasks.add_task("after clearing", "+1h")["id"] == "s4"
+
+
+def test_a_stale_run_cannot_record_over_the_current_task():
+    t = tasks.add_task("old prompt", "+0m")
+    [claimed] = tasks.claim_due()
+    tasks.remove_task(t["id"])
+    tasks.add_task("new prompt", "+1h")  # s2 now, so no collision to begin with
+    assert tasks.record_result(t["id"], True, "old answer", claim=claimed["claim"]) is None
+
+
+def test_a_timeout_during_delivery_does_not_run_the_task_again(monkeypatch, answers):
+    """run_task records BEFORE delivering. A timeout that fired during delivery
+    recorded a second failure and flipped a finished one-shot back to pending,
+    re-running and re-billing the analysis."""
+    monkeypatch.setattr(scheduler, "job_timeout_seconds", lambda: 0.3)
+
+    def slow_delivery(text, prefer=""):
+        time.sleep(1.0)
+        return (["telegram"], [])
+
+    monkeypatch.setattr(channels, "deliver", slow_delivery)
+    t = tasks.add_task("brief me", "+0m")
+    asyncio.run(scheduler.run_due())
+    stored = tasks.get_task(t["id"])
+    assert stored["status"] == "done" and stored["runs"] == 1, stored
