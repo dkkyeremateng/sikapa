@@ -881,15 +881,23 @@ def realized_gains(year: int = 0, symbol: str = "", account: str = "") -> str:
         )
     scope = f" · {year}" if year else ""
     lines = [f"REALIZED GAINS (FIFO{scope}{_account_scope_note(account)}):"]
+    mixed = len(res.get("by_currency") or {}) > 1
     for sym, v in sorted(res["by_symbol"].items(), key=lambda kv: kv[1]["realized"], reverse=True):
+        cur = f" {v['currency']}" if mixed else ""
         lines.append(
-            f"  {sym:<6} total {v['realized']:+,.2f}  "
+            f"  {sym:<6} total {v['realized']:+,.2f}{cur}  "
             f"(short {v['short_term']:+,.2f} · long {v['long_term']:+,.2f})"
         )
-    lines.append(
-        f"TOTAL {res['total_realized']:+,.2f}  "
-        f"(short-term {res['short_term']:+,.2f} · long-term {res['long_term']:+,.2f})"
-    )
+    if mixed:
+        # One total across currencies would add euros to dollars.
+        for cur, v in sorted(res["by_currency"].items()):
+            lines.append(f"TOTAL {cur} {v['realized']:+,.2f}  "
+                         f"(short-term {v['short_term']:+,.2f} · long-term {v['long_term']:+,.2f})")
+    else:
+        lines.append(
+            f"TOTAL {res['total_realized']:+,.2f}  "
+            f"(short-term {res['short_term']:+,.2f} · long-term {res['long_term']:+,.2f})"
+        )
     if res["unmatched_proceeds"]:
         lines.append(
             f"note: {res['unmatched_proceeds']:,.2f} of sell proceeds had no imported "
