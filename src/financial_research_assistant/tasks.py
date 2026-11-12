@@ -770,15 +770,25 @@ def add_task(
 
 
 def remove_task(task_id: str) -> bool:
-    """Delete one task by id, or every task when given ``all``."""
+    """Delete one task by id; ``all`` deletes every task the user scheduled, and
+    ``everything`` the built-in jobs too.
+
+    ``all`` used to take the jobs with it: one "/cancel all" (or a model clearing
+    "all my reminders") silently ended the daily, weekly and monthly reports, the
+    Flex sync and the check-in, with nothing to bring them back short of
+    ``--reports-setup``."""
     tid = (task_id or "").strip().lower()
     with _locked():
         items = load_tasks()
         if not items:
             return False
-        if tid in ("all", "*"):
+        if tid == "everything":
             save_tasks([])
             return True
+        if tid in ("all", "*"):
+            kept = [t for t in items if t.get("kind") == "job"]
+            save_tasks(kept)
+            return len(kept) != len(items)
         kept = [t for t in items if str(t.get("id", "")).lower() != tid]
         if len(kept) == len(items):
             return False
@@ -1174,11 +1184,15 @@ def list_scheduled_tasks() -> str:
 
 def cancel_scheduled_task(task_id: str) -> str:
     """Cancel a scheduled task by its id (from `list_scheduled_tasks`), or pass
-    ``all`` to clear every one. Use for 'stop watching X / cancel that / never
-    mind about the Friday one'."""
+    ``all`` to clear every task the user scheduled (the built-in report and sync
+    jobs stay). Use for 'stop watching X / cancel that / never mind about the
+    Friday one'."""
     if not (task_id or "").strip():
         return "Which one? `list_scheduled_tasks` shows the ids."
     if remove_task(task_id):
+        if task_id.strip().lower() in ("all", "*"):
+            return ("Cancelled every task you scheduled. The built-in jobs (reports, "
+                    "Flex sync, check-in) are still running.")
         return f"Cancelled {task_id}."
     return f"No scheduled task with id {task_id!r}. Use `list_scheduled_tasks` to see the ids."
 

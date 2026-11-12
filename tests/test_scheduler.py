@@ -743,3 +743,13 @@ def test_a_timeout_during_delivery_does_not_run_the_task_again(monkeypatch, answ
     asyncio.run(scheduler.run_due())
     stored = tasks.get_task(t["id"])
     assert stored["status"] == "done" and stored["runs"] == 1, stored
+
+
+def test_cancel_all_keeps_the_built_in_jobs():
+    """One "/cancel all" ended the daily, weekly and monthly reports for good."""
+    tasks.add_task("remind me Friday", "+1d")
+    tasks.add_task("[job] Daily close report", "+1d", "daily", kind="job", job="report-daily")
+    out = tasks.cancel_scheduled_task("all")
+    assert "still running" in out
+    assert [t["job"] for t in tasks.load_tasks()] == ["report-daily"]
+    assert tasks.remove_task("everything") and tasks.load_tasks() == []
