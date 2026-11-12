@@ -1351,6 +1351,12 @@ async def run_turn(
                         continue  # thinking disabled: drop the reasoning trace
                     if ev.kind == "tool_end":
                         called_tools.add(ev.tool)
+                    if ev.kind == "tool_start":
+                        # Text before a tool call is the model narrating ("Let me
+                        # pull the figures."), not the answer. Kept, it was glued
+                        # onto the real answer with no separator, and that string is
+                        # what Telegram, memory and the claim checks all received.
+                        parts = []
                     if ev.kind == "token":
                         parts.append(ev.text)
                     elif ev.kind == "usage":  # live per-call delta from _stream_events

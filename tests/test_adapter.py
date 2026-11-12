@@ -1371,3 +1371,22 @@ async def test_the_export_and_report_notes_are_independent():
     )
     assert "no report was produced" in out.lower()
     assert "no file was written" not in out.lower()
+
+
+async def test_the_answer_is_what_follows_the_last_tool_call(monkeypatch):
+    """Every model step's text was joined: "Let me pull the latest figures.NVDA
+    revenue was $X." went to Telegram, memory and the claim checks as the answer."""
+    from financial_research_assistant import adapter
+    from financial_research_assistant.events import AgentEvent
+
+    async def stream(graph, inputs, config, stats):
+        yield AgentEvent("token", "Let me pull the latest figures.")
+        yield AgentEvent("tool_start", "", tool="get_quote")
+        yield AgentEvent("tool_end", "", tool="get_quote")
+        yield AgentEvent("token", "NVDA closed at ")
+        yield AgentEvent("token", "$212.40, up 1.2%.")
+
+    monkeypatch.setattr(adapter, "_stream_events", stream)
+    finals = [ev.text async for ev in adapter.run_turn("price of NVDA?", "s-answer", fake=True)
+              if ev.kind == "final"]
+    assert finals == ["NVDA closed at $212.40, up 1.2%."]
