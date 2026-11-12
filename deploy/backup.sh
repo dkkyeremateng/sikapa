@@ -34,6 +34,10 @@ if command -v sqlite3 >/dev/null; then
     for db in "$DATA"/*.db; do
         [ -e "$db" ] || continue
         sqlite3 "$db" ".backup '$tmp/$(basename "$db")'"
+        # The consistent copy needs no journal. The -wal/-shm copied above belong
+        # to the LIVE file; restored next to the snapshot, SQLite would replay
+        # that stale WAL onto it.
+        rm -f "$tmp/$(basename "$db")-wal" "$tmp/$(basename "$db")-shm"
     done
 fi
 
