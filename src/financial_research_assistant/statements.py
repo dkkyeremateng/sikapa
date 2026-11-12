@@ -1068,10 +1068,18 @@ def query_performance_history(account: str | None = None) -> dict[str, Any]:
           "points":  [{date, index, cumulative_return_pct}, ...],  # oldest→newest
           "dropped": [period_str, ...],   # overlapping statements not chained
           "gaps":    [{"after": iso, "before": iso, "days": n}, ...],
+          "daily":   {"from": iso, "to": iso, "sessions": n} | None,
         }
 
+    **Past the last chained statement, the line continues day by day** from the
+    newest Flex file's daily returns. The nightly Flex pull is a rolling trailing
+    twelve months, so each one overlaps the one before and only the first can
+    ever be chained: on the live store, 30 of 34 imports were dropped and the
+    line stopped four months back. The daily rows are what those pulls are made
+    of, so chaining them continues the line without counting any day twice.
+
     Statements lacking a parseable period or TWRR are ignored."""
-    empty = {"points": [], "dropped": [], "gaps": []}
+    empty = {"points": [], "dropped": [], "gaps": [], "daily": None}
     if not db_path().exists():
         return empty
     conn = _connect()
@@ -1110,17 +1118,36 @@ def query_performance_history(account: str | None = None) -> dict[str, Any]:
     points = [{"date": selected[0]["start"], "index": 100.0,
                "cumulative_return_pct": 0.0}]
     index = 100.0
+
+    def add(day: str, twrr: float) -> None:
+        nonlocal index
+        index *= 1.0 + twrr / 100.0
+        points.append({"date": day, "index": round(index, 4),
+                       "cumulative_return_pct": round(index - 100.0, 4)})
+
     for p in selected:
-        index *= 1.0 + p["twrr"] / 100.0
-        points.append({
-            "date": p["end"],
-            "index": round(index, 4),
-            "cumulative_return_pct": round(index - 100.0, 4),
-        })
+        add(p["end"], p["twrr"])
+
+    from .flex import daily_returns
+
+    chained_to = selected[-1]["end"]
+    later = [(d, t) for d, t in daily_returns(account=acct) if d > chained_to]
+    daily = None
+    if later:
+        delta = (date.fromisoformat(later[0][0]) - date.fromisoformat(chained_to)).days
+        # A weekend or holiday between the last statement and the first session is
+        # not a gap; a week with no rows is.
+        if delta > 5:
+            gaps.append({"after": chained_to, "before": later[0][0], "days": delta,
+                         "after_point": len(points) - 1})
+        for d, t in later:
+            add(d, t)
+        daily = {"from": later[0][0], "to": later[-1][0], "sessions": len(later)}
     return {
         "points": points,
         "dropped": [p["period"] for p in dropped],
         "gaps": gaps,
+        "daily": daily,
     }
 
 

@@ -505,6 +505,43 @@ def latest_statement_file() -> Path | None:
     return files[-1] if files else None
 
 
+def _daily_rows(root: ET.Element, account: str = "") -> list[tuple[str, float, ET.Element]]:
+    """``(day, twr %, <ChangeInNAV>)`` per business day in a Breakout-by-Day file,
+    oldest first; only ``account``'s statements when one is named."""
+    rows = []
+    for stmt in root.iter("FlexStatement"):
+        if account and stmt.get("accountId") not in (None, "", account):
+            continue
+        nav = stmt.find("ChangeInNAV")
+        raw = (nav.get("twr") or "").strip() if nav is not None else ""
+        if nav is None or not raw:
+            continue
+        try:
+            rows.append((_iso_date(stmt.get("toDate") or ""), float(raw), nav))
+        except (ValueError, FlexError):
+            continue
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+def daily_returns(account: str = "", xml: str = "") -> list[tuple[str, float]]:
+    """``(day, twr %)`` for every session in the newest saved Flex file, or ``[]``
+    when there is no file or it has no daily breakout. Never raises: callers use
+    it to extend a figure, and a missing file means there is nothing to add."""
+    try:
+        if not xml:
+            path = latest_statement_file()
+            if path is None:
+                return []
+            xml = path.read_text(encoding="utf-8")
+        root = ET.fromstring(xml)
+    except (OSError, ET.ParseError):
+        return []
+    if root.tag != "FlexQueryResponse":
+        return []
+    return [(d, t) for d, t, _nav in _daily_rows(root, account)]
+
+
 def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, Any]:
     """Time-weighted return over an arbitrary window, from the daily Flex file.
 
@@ -554,17 +591,8 @@ def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, An
     flows: dict[str, float] = {}
     navs: dict[str, tuple[float, float]] = {}
     checked = reconciled = 0
-    for stmt in root.iter("FlexStatement"):
-        nav = stmt.find("ChangeInNAV")
-        raw = (nav.get("twr") or "").strip() if nav is not None else ""
-        if not raw:
-            continue
-        try:
-            twr = float(raw)
-            day = _iso_date(stmt.get("toDate") or "")
-            days.append((day, twr))
-        except (ValueError, FlexError):
-            continue
+    for day, twr, nav in _daily_rows(root):
+        days.append((day, twr))
         flows[day] = flows.get(day, 0.0) + _fnum(nav, "depositsWithdrawals")
         navs[day] = (_fnum(nav, "startingValue"), _fnum(nav, "endingValue"))
         start_value = _fnum(nav, "startingValue")
@@ -580,7 +608,6 @@ def period_return(start: str = "", end: str = "", xml: str = "") -> dict[str, An
             "the saved Flex statement carries no daily returns — switch the query's "
             "Period to 'Breakout by Day' so each session reports its own TWR."
         )
-    days.sort()
 
     def chain(rows: list[tuple[str, float]]) -> float:
         factor = 1.0

@@ -1,5 +1,7 @@
 """Statement parser, persistence, and accounting behavior tests."""
 
+import pytest
+
 from .fixtures.statements import BUYSELL_STATEMENT as _BUYSELL_STATEMENT, MULTI_CURRENCY_STATEMENT as _MULTI_CURRENCY_STATEMENT, SAMPLE_STATEMENT as _SAMPLE_STATEMENT, mini_statement as _mini_statement
 from .helpers.fakes import install_stub_fx as _stub_fx
 
@@ -279,8 +281,70 @@ def test_performance_history_drops_overlaps_and_flags_gaps(monkeypatch, tmp_path
     # The tool surfaces both caveats inline for the user.
     import financial_research_assistant.tools as tools
     out = tools.portfolio_performance_chart()
-    assert "dropped 1 overlapping statement" in out
+    assert "1 overlapping statement(s) not chained" in out
     assert "gap in coverage" in out and "break in the line" in out
+
+
+def test_rolling_flex_pulls_extend_the_line_day_by_day(monkeypatch, tmp_path):
+    """The live store: annual statements, then a nightly Flex pull of the trailing
+    twelve months, each overlapping the one before. Only the first pull can be
+    chained, so the line stopped there; the newest file's daily returns carry it
+    to the last session without counting a day twice."""
+    from financial_research_assistant import statements
+    import financial_research_assistant.tools as tools
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_FLEX_DIR", str(tmp_path / "flex"))
+
+    def stmt(period, twrr):
+        return _SAMPLE_STATEMENT.replace(
+            "April 1, 2026 - May 19, 2026", period
+        ).replace("12.5%", twrr)
+
+    statements.import_statement(stmt("January 1, 2026 - June 30, 2026", "10%"))
+    statements.import_statement(stmt("July 1, 2025 - June 30, 2026", "20%"))
+    statements.import_statement(stmt("July 2, 2025 - July 1, 2026", "21%"))
+    statements.import_statement(stmt("July 3, 2025 - July 2, 2026", "22%"))
+
+    before = statements.query_performance_history()
+    assert before["points"][-1]["date"] == "2026-06-30", "the old behaviour: stuck"
+
+    days = [("2026-06-30", 1.0), ("2026-07-01", 2.0), ("2026-07-02", -1.0)]
+    rows = "".join(
+        f'<FlexStatement accountId="U1111111" fromDate="{d}" toDate="{d}">'
+        f'<ChangeInNAV startingValue="100" endingValue="100" twr="{t}" /></FlexStatement>'
+        for d, t in days)
+    (tmp_path / "flex").mkdir()
+    (tmp_path / "flex" / "flex-1-20260702.xml").write_text(
+        f'<FlexQueryResponse><FlexStatements>{rows}</FlexStatements></FlexQueryResponse>')
+
+    hist = statements.query_performance_history()
+    pts = hist["points"]
+    # The first pull (ending 30 June, like the half-year) is chained; the two
+    # later pulls overlap it and are dropped.
+    assert [p["date"] for p in pts] == ["2025-07-01", "2026-06-30", "2026-07-01", "2026-07-02"]
+    assert len(hist["dropped"]) == 3
+    # 100 x 1.20, then only the days after 30 June: x 1.02 x 0.99.
+    assert pts[-1]["index"] == pytest.approx(100 * 1.20 * 1.02 * 0.99, abs=1e-3)
+    assert hist["daily"] == {"from": "2026-07-01", "to": "2026-07-02", "sessions": 2}
+    assert hist["gaps"] == [], "the next session after a statement is not a gap"
+    out = tools.portfolio_performance_chart()
+    assert "2026-07-01 → 2026-07-02 is chained from the latest Flex statement's 2 daily" in out
+    assert "their days are in the daily returns" in out
+
+
+def test_another_accounts_daily_rows_are_not_chained(monkeypatch, tmp_path):
+    from financial_research_assistant import statements
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    monkeypatch.setenv("FINANCIAL_RESEARCH_FLEX_DIR", str(tmp_path / "flex"))
+    statements.import_statement(_SAMPLE_STATEMENT)
+    (tmp_path / "flex").mkdir()
+    (tmp_path / "flex" / "flex-1-20260601.xml").write_text(
+        '<FlexQueryResponse><FlexStatements><FlexStatement accountId="U999" '
+        'fromDate="2026-05-20" toDate="2026-05-20"><ChangeInNAV twr="5.0" />'
+        '</FlexStatement></FlexStatements></FlexQueryResponse>')
+    assert statements.query_performance_history()["daily"] is None
 
 
 def test_parse_pct_handles_percent_strings():
