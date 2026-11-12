@@ -280,8 +280,19 @@ def _flex_datetime(raw: str) -> str:
     for sep in (";", " "):
         if sep in text:
             date_part, _, time_part = text.partition(sep)
-            return f"{_iso_date(date_part)}, {time_part.strip()}"
+            return f"{_iso_date(date_part)}, {_clock(time_part.strip())}"
     return _iso_date(text)
+
+
+def _clock(text: str) -> str:
+    """``HH:MM:SS`` from Flex's time formats. The compact "121423" was kept as is,
+    so the same trade from a CSV ("12:14:23") and from Flex never matched as a
+    duplicate, and an overlapping import counted it twice."""
+    digits = text.replace(":", "")
+    if digits.isdigit() and len(digits) in (4, 6):
+        digits = digits.ljust(6, "0")
+        return f"{digits[:2]}:{digits[2:4]}:{digits[4:]}"
+    return text
 
 
 def _iso_period(start: str, end: str) -> str:
@@ -295,6 +306,23 @@ def _iso_period(start: str, end: str) -> str:
     except ValueError:
         return ""
     return f"{s} - {e}"
+
+
+def _fills_only(elements: list[Any]) -> list[Any]:
+    """The rows that are actual trades, when Trades carries several levels.
+
+    ``_summary_only`` was applied here too, and Trades has no SUMMARY level: with
+    executions and orders both selected every row is tagged EXECUTION or ORDER,
+    so every trade was dropped without a warning. Executions are the fills; orders
+    only when there are none. Summary and closed-lot rows restate them."""
+    tagged = [e for e in elements if e.get("levelOfDetail")]
+    if not tagged:
+        return elements
+    for level in ("EXECUTION", "ORDER"):
+        rows = [e for e in elements if (e.get("levelOfDetail") or "").upper() == level]
+        if rows:
+            return rows
+    return [e for e in elements if not e.get("levelOfDetail")]
 
 
 def _summary_only(elements: list[Any]) -> list[Any]:
@@ -766,8 +794,7 @@ def parse_flex_xml(xml: str) -> dict[str, Any]:
     trades = [
         _flex_trade(el, _stmt_account(stmt))
         for stmt in statements
-        for tag in ("Order", "Trade")
-        for el in _summary_only(list(stmt.iter(tag)))
+        for el in _fills_only([e for tag in ("Order", "Trade") for e in stmt.iter(tag)])
     ]
     cash = [
         row
