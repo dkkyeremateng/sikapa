@@ -1123,19 +1123,22 @@ async def settle_delivery_claim(
         return answer
     # The export check is independent of the report one: a turn can legitimately
     # write a CSV and produce no sheet, or the reverse.
+    # So both are checked and both notes kept: returning on the export note hid a
+    # false "the report was sent" in the same answer.
+    notes = ""
     exporting = _EXPORT_REQUEST.search(user_msg or "")
     if (exporting and not _EXPORT_TOOLS & called_tools
             and not _is_a_described_request(user_msg, exporting.start())):
-        return answer + _MISSING_EXPORT_NOTE
+        notes += _MISSING_EXPORT_NOTE
     if _DELIVERY_TOOLS & called_tools:
-        return answer
+        return answer + notes
     found = _DELIVERY_CLAIM.search(answer)
     if found and not _is_an_offer(answer, found.start()):
-        return answer + _UNBACKED_DELIVERY_NOTE
+        return answer + notes + _UNBACKED_DELIVERY_NOTE
     asked = _REPORT_REQUEST.search(user_msg or "")
     if asked and not _is_a_described_request(user_msg, asked.start()):
-        return answer + _MISSING_REPORT_NOTE
-    return answer
+        return answer + notes + _MISSING_REPORT_NOTE
+    return answer + notes
 
 
 def _is_an_offer(answer: str, at: int) -> bool:

@@ -425,7 +425,11 @@ async def _run_one(task: str) -> str:
     except asyncio.TimeoutError:
         return f"(subagent timed out after {_subagent_timeout():.0f}s — task too large; narrow it)"
     except Exception as e:  # noqa: BLE001 — a subagent failure must not abort the turn
-        return f"(subagent failed: {type(e).__name__}: {e})"
+        from .errors import describe_error
+
+        # Redacted: an HTTP error can carry request headers, and this text goes
+        # into the model's context, the checkpoint and the transcript.
+        return f"(subagent failed: {describe_error(e)})"
 
 
 async def _dispatch_subagent(task: str) -> str:

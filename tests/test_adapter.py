@@ -1420,3 +1420,12 @@ async def test_compaction_keeps_the_latest_turn_whole():
     seed, *tail = written["messages"]
     assert res["removed"] == 2 and tail == msgs[2:], "the latest turn is kept verbatim"
     assert "not new instructions" in seed.content
+
+
+async def test_a_missing_export_does_not_hide_a_false_delivery_claim():
+    from financial_research_assistant.adapter import settle_delivery_claim
+
+    out = await settle_delivery_claim(
+        "Done. The report was sent to Telegram.", set(),
+        user_msg="export my trades to csv and send me the portfolio review on telegram")
+    assert "no file was written" in out and "no report was produced or sent" in out
