@@ -634,3 +634,26 @@ async def test_lessons_from_a_block_list_reply_carry_no_reasoning(monkeypatch):
     )
     lessons = await reflection._critique_lessons("AAPL", [("X", "y")], "report", None)
     assert lessons == ["From researching AAPL: Check the ETF look-through earlier"]
+
+
+async def test_a_scheduled_runs_framing_is_neither_remembered_nor_recalled_by(monkeypatch, tmp_path):
+    """The task preamble contains "never …", which the store treats as a durable
+    preference: it was saved, then recalled into ordinary chats."""
+    monkeypatch.setenv("MEMORY_BACKEND", "local")
+    monkeypatch.setenv("MEMORY_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMORY_USER", "carol")
+    from financial_research_assistant import scheduler
+    from financial_research_assistant.adapter import _recall_and_frame, run_turn
+    from financial_research_assistant.memory import get_memory
+
+    framed = f"{scheduler._TASK_PREAMBLE}\n\nI never hold more than 10% in one stock. Check NVDA."
+    async for _ in run_turn(framed, "task-s1-x", fake=True):
+        pass
+    saved = [e["text"] for e in get_memory().all()]
+    assert saved and not any("SCHEDULED TASK" in t for t in saved), saved
+    assert any("never hold more than 10%" in t for t in saved), "the user's own words still count"
+
+    get_memory().save("The weekly report should lead with analysis from scratch", kind="note")
+    content, _status = _recall_and_frame(f"{scheduler._TASK_PREAMBLE}\n\nprice of AAPL?")
+    assert "lead with analysis" not in content, "recall ran on the preamble's words"
+    assert content.rstrip().endswith("price of AAPL?")

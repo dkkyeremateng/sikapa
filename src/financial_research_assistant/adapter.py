@@ -1163,8 +1163,11 @@ def _recall_and_frame(user_msg: str) -> tuple[str, str | None]:
         return user_msg, None
     from .feedback import format_fewshot, recall_feedback
 
-    facts = recall_facts(user_msg)
-    exemplars, avoids = recall_feedback(user_msg)
+    # Recalled by the user's own words: a scheduled run's preamble would otherwise
+    # rank memories by "report", "analysis" and "scratch" on every task.
+    asked = instruction(user_msg)
+    facts = recall_facts(asked)
+    exemplars, avoids = recall_feedback(asked)
     content = format_fewshot(exemplars, avoids) + inject(facts, user_msg)
     n = len(facts) + len(exemplars) + len(avoids)
     if not n:
@@ -1369,7 +1372,10 @@ async def run_turn(
                 )
             if mem:
                 try:
-                    mem.remember(user_msg, answer)  # persist for future turns
+                    # The user's words only. The task preamble says "never …", which
+                    # reads as a durable preference, and was stored as one and then
+                    # recalled into ordinary chats.
+                    mem.remember(instruction(user_msg), answer)
                 except Exception as e:  # noqa: BLE001 - the answer is already paid for
                     # The turn is DONE and billed; the answer is in hand. Turning
                     # that into an error event would throw it away over a failed
