@@ -1239,7 +1239,9 @@ def filing_tone_trend(symbol: str, years: int = 3) -> str:
         return _no_cik(sym)
     name, filings = _submission_recent(cik)
     years = max(1, min(int(years or 3), 4))
-    tenks = [f for f in filings if f["form"].upper().startswith("10-K")][:years]
+    # Originals only: a 10-K/A is often a Part III cover page, and scored as a year
+    # it put a near-empty document into the trend (_latest_form learned this).
+    tenks = [f for f in filings if f["form"].strip().upper() in ("10-K", "10-K405", "10-KT")][:years]
     if not tenks:
         return f"No recent 10-K filings found for {name or sym} ({sym})."
     rows = []
@@ -1298,11 +1300,20 @@ def sec_metric_rank(symbol: str, concept: str = "Revenue", year: int = 0) -> str
     tags, unit = _resolve_matrix_concept(concept)
     tag = tags[0]
     year = int(year) or (date.today().year - 1)
-    facts = _fetch_frame(tag, unit, year)
+    # Every fallback tag, one value per filer: ranking on the first tag alone left
+    # out every company reporting revenue as `Revenues` (NVDA among them), which
+    # then "didn't report" while the rest were ranked among a subset.
+    by_cik: dict[Any, dict[str, Any]] = {}
+    for t in tags:
+        for e in _fetch_frame(t, unit, year):
+            by_cik.setdefault(e.get("cik"), dict(e, tag=t))
+    facts = list(by_cik.values())
     if not facts:
         return (f"No XBRL frame data for {concept!r} (tag {tag}) in CY{year}. Try a "
                 f"different year, or a us-gaap tag like Revenues / NetIncomeLoss / Assets.")
-    mine = next((e for e in facts if e.get("cik") == int(cik)), None)
+    mine = by_cik.get(int(cik))
+    if mine is not None:
+        tag = str(mine.get("tag") or tag)
     if mine is None:
         return (f"{sym} didn't report us-gaap:{tag} for CY{year} (it may use a different "
                 f"tag or a non-calendar fiscal period). Try another year or concept/tag.")
@@ -1436,7 +1447,9 @@ def insider_transactions(symbol: str, limit: int = 15) -> str:
     if not cik:
         return _no_cik(sym)
     name, filings = _submission_recent(cik)
-    form4s = [f for f in filings if f["form"] in ("4", "4/A")][:max(1, min(int(limit or 15), 40))]
+    # Originals only: a 4/A restates transactions its original already reported,
+    # and counting both doubled them in the net.
+    form4s = [f for f in filings if f["form"] == "4"][:max(1, min(int(limit or 15), 40))]
     if not form4s:
         return f"No recent Form 4 (insider) filings found for {name or sym} ({sym})."
 

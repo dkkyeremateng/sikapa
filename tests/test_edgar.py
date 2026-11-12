@@ -685,3 +685,43 @@ def test_the_document_cache_is_bounded(monkeypatch):
         edgar._fetch_json(f"https://data.sec.gov/x/{i}.json")
     assert len(edgar._JSON_CACHE) == edgar._JSON_CACHE_MAX
     assert "https://data.sec.gov/x/0.json" not in edgar._JSON_CACHE, "oldest evicted"
+
+
+def test_a_company_reporting_revenue_under_another_tag_is_ranked(monkeypatch):
+    """Ranking used only the first revenue tag: NVDA, which reports `Revenues`,
+    "didn't report", and everyone else was ranked among a subset."""
+    edgar._TICKER_CIK.clear()
+    tickers = {"0": {"cik_str": 1, "ticker": "NV", "title": "Nv Co"}}
+    first = {"data": [{"entityName": "Big Co", "cik": 2, "val": 900e9},
+                      {"entityName": "Small Co", "cik": 3, "val": 50e9}]}
+    other = {"data": [{"entityName": "Nv Co", "cik": 1, "val": 130e9},
+                      {"entityName": "Big Co", "cik": 2, "val": 900e9}]}
+
+    def fetch(url, **kw):
+        if "company_tickers.json" in url:
+            return tickers
+        if "frames/us-gaap/Revenues/" in url:
+            return other
+        if "frames/us-gaap/RevenueFromContractWithCustomerExcludingAssessedTax/" in url:
+            return first
+        return {}
+
+    monkeypatch.setattr(edgar, "_fetch_json", fetch)
+    out = edgar.sec_metric_rank("NV", concept="Revenue", year=2024)
+    assert "#2 of 3" in out and "us-gaap:Revenues" in out, out
+
+
+def test_an_amended_form_4_is_not_counted_twice(monkeypatch):
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["4/A", "4"],
+        "filingDate": ["2025-05-02", "2025-04-30"],
+        "accessionNumber": ["0000320193-25-000202", "0000320193-25-000201"],
+        "primaryDocument": ["form4amend.xml", "form4a.xml"],
+        "primaryDocDescription": ["", ""], "items": ["", ""],
+    }}}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs})
+    xml = _form4_xml("Cook Timothy D", "<isOfficer>1</isOfficer><officerTitle>CEO</officerTitle>",
+                     _txn("2025-04-30", "S", 50000, "D", "170.00"))
+    monkeypatch.setattr(edgar, "_fetch_text", lambda url, **kw: xml)
+    out = edgar.insider_transactions("AAPL")
+    assert "last 1 filing" in out, out
