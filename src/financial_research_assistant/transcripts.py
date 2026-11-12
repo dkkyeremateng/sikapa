@@ -68,12 +68,13 @@ _NOT_CONFIGURED = (
     "needs an API key — transcripts have no keyless source, unlike SEC filings, "
     "Yahoo, FRED and Ken French.\n"
     "What you CAN do right now, keyless: a company's 8-K earnings release carries "
-    "management's prepared commentary on the same quarter — use "
-    "`sec_material_events` to find it and `sec_filing_excerpt` to quote it. That "
-    "covers the prepared remarks, though not the analyst Q&A.\n"
-    "To enable transcripts, set EARNINGS_TRANSCRIPT_API_KEY (api-ninjas.com has a "
-    "free tier). Tell the user this plainly rather than implying the data is "
-    "unavailable in principle."
+    "management's prepared commentary on the same quarter — `sec_material_events` "
+    "lists the 8-Ks, and `sec_filing_excerpt(symbol, query, form_type='8-K')` reads the latest earnings "
+    "8-K's press release (exhibit 99) and quotes it. That covers the prepared "
+    "remarks, though not the analyst Q&A.\n"
+    "To enable transcripts, set EARNINGS_TRANSCRIPT_API_KEY (api-ninjas.com; "
+    "transcripts need a paid plan, from about $39/month). Tell the user this "
+    "plainly rather than implying the data is unavailable in principle."
 )
 
 

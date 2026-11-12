@@ -149,3 +149,17 @@ def test_weights_and_the_mix_count_the_accounts_cash(world, monkeypatch):
     keys = {f.key: f.line for f in checkin.findings()}
     assert keys["cap:AAPL"].startswith("AAPL is 50.0% of the account")
     assert "mix:cash" in keys and "mix:bonds" not in keys, "bonds is now inside 5 points"
+
+
+def test_a_call_the_data_could_not_price_is_not_news_next_week(world, monkeypatch):
+    """A price outage skipped the call, its key was pruned, and the next week
+    raised the same call again as new."""
+    journal.save_entries([_call("t1", "UNH", "bearish", 100.0, "2026-09-01")])
+    profile.save({"max_position_pct": 70, "max_sector_pct": 70,
+                  "targets": {"us_equity": 75, "bonds": 25}})
+    assert [f.key for f in checkin.to_raise(checkin.findings(), NOW)] == ["call:t1"]
+    spot = dict(world["spot"])
+    world["spot"].clear()  # the price source is down this week
+    assert checkin.to_raise(checkin.findings(), NOW + timedelta(days=7)) == []
+    world["spot"].update(spot)
+    assert checkin.to_raise(checkin.findings(), NOW + timedelta(days=14)) == [], "seen already"

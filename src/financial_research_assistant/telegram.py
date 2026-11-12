@@ -84,6 +84,22 @@ def is_allowed(chat_id: Any) -> bool:
     return str(chat_id) in allowed_chat_ids()
 
 
+def sender_allowed(msg: dict[str, Any]) -> bool:
+    """Whether the PERSON who sent ``msg`` may drive the agent.
+
+    In a private chat the chat is the person, so the chat allowlist settles it. In
+    a group it does not: allowing the group let every member, and anyone added
+    later, run tasks and ``/cancel all``. There the sender must be allowed too,
+    in ``TELEGRAM_ALLOWED_USER_IDS`` or the chat allowlist itself."""
+    chat = msg.get("chat") or {}
+    if chat.get("type", "private") == "private":
+        return True
+    sender = str((msg.get("from") or {}).get("id") or "")
+    raw = (os.environ.get("TELEGRAM_ALLOWED_USER_IDS") or "").strip()
+    users = {u.strip() for u in raw.split(",") if u.strip()}
+    return bool(sender) and (sender in users or sender in allowed_chat_ids())
+
+
 def _safe(text: str) -> str:
     """Mask the bot token, which sits in the URL path of every request.
 
@@ -377,7 +393,8 @@ def get_updates(timeout: int = POLL_TIMEOUT, commit: bool = True) -> list[dict[s
             msg = upd.get("message") or {}
             chat = (msg.get("chat") or {}).get("id")
             text = (msg.get("text") or "").strip()
-            answerable = bool(text) and chat is not None and is_allowed(chat)
+            answerable = (bool(text) and chat is not None and is_allowed(chat)
+                          and sender_allowed(msg))
             # Uncommitted mode may only step over updates that come BEFORE the
             # first unanswered message; jumping past one would lose it.
             if commit or (not answerable and not out):

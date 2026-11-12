@@ -88,3 +88,21 @@ def test_a_failed_lookup_is_not_cached_as_an_answer(yahoo, monkeypatch):
     monkeypatch.setattr(fund, "_ticker", _down)
     assert fund._fetch_info("AAPL") == {}
     assert "AAPL" not in fund._INFO_CACHE
+
+
+def test_a_pence_quote_is_read_in_pounds(monkeypatch):
+    """VOD.L: currentPrice 117.35 in pence, dividendRate 0.04 in pounds: the yield
+    read 0.03% instead of 3.4%."""
+    from financial_research_assistant import fundamentals
+
+    class T:
+        info = {"currency": "GBp", "currentPrice": 117.35, "dividendRate": 0.04,
+                "marketCap": 30_000_000_000, "fiftyTwoWeekHigh": 130.0}
+
+    fundamentals._INFO_CACHE.clear()
+    monkeypatch.setattr(fundamentals, "_ticker", lambda sym: T())
+    info = fundamentals._fetch_info("VOD.L")
+    assert info["currency"] == "GBP" and info["quoted_in"] == "GBp"
+    assert info["currentPrice"] == pytest.approx(1.1735) and info["fiftyTwoWeekHigh"] == 1.30
+    assert fundamentals._div_yield(info) == pytest.approx(3.41, abs=0.01)
+    assert info["marketCap"] == 30_000_000_000, "already in pounds"

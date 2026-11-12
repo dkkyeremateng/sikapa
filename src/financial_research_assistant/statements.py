@@ -1056,22 +1056,42 @@ def _select_non_overlapping(periods: list[dict[str, Any]]) -> tuple[list[dict[st
     returns can be chained without double-counting any span, and return
     ``(selected, dropped)``.
 
-    Uses classic activity-selection (greedy by earliest end date), which
-    maximizes the number of intervals kept — so if you've imported both a yearly
-    statement and the twelve monthly ones it covers, the monthlies win (finer
-    resolution) and the redundant annual is dropped. Two periods that merely abut
-    (one ends the day before the next begins) do not overlap."""
+    Chosen to cover the MOST DAYS, and among equal coverage the most periods, so
+    the twelve monthlies of a year still beat its annual (finer resolution, same
+    span). The earlier rule kept the most periods outright (greedy by earliest
+    end), so an annual statement overlapping a single March monthly lost to it,
+    and eleven months of returns went with it. Two periods that merely abut (one
+    ends the day before the next begins) do not overlap."""
     ordered = sorted(periods, key=lambda p: (p["end"], p["start"]))
-    selected: list[dict[str, Any]] = []
-    dropped: list[dict[str, Any]] = []
-    coverage_end: str | None = None  # ISO dates compare correctly as strings
-    for p in ordered:
-        if coverage_end is None or p["start"] >= coverage_end:
-            selected.append(p)
-            coverage_end = p["end"]
+    n = len(ordered)
+
+    def days(p: dict[str, Any]) -> int:
+        return (date.fromisoformat(p["end"]) - date.fromisoformat(p["start"])).days + 1
+
+    # Weighted interval scheduling: best[i] is the best (days, count) using the
+    # first i periods; prev[i] the last period ending before period i starts.
+    prev = []
+    for i, p in enumerate(ordered):
+        j = i - 1
+        while j >= 0 and ordered[j]["end"] >= p["start"]:
+            j -= 1
+        prev.append(j)
+    best: list[tuple[int, int]] = [(0, 0)] * (n + 1)
+    take: list[bool] = [False] * n
+    for i, p in enumerate(ordered):
+        with_it = (best[prev[i] + 1][0] + days(p), best[prev[i] + 1][1] + 1)
+        take[i] = with_it > best[i]
+        best[i + 1] = with_it if take[i] else best[i]
+    chosen: set[int] = set()
+    i = n - 1
+    while i >= 0:
+        if take[i]:
+            chosen.add(i)
+            i = prev[i]
         else:
-            dropped.append(p)
-    selected.sort(key=lambda p: p["start"])
+            i -= 1
+    selected = sorted((ordered[i] for i in chosen), key=lambda p: p["start"])
+    dropped = [ordered[i] for i in range(n) if i not in chosen]
     return selected, dropped
 
 
@@ -1355,19 +1375,22 @@ def _trade_split_events(
         if symbol:
             clauses.append("UPPER(symbol) = ?")
             params.append(symbol.upper())
-        if acct:
-            clauses.append("account = ?")
-            params.append(acct)
+        # A consolidated statement is keyed "U7+U8" while each of its rows names
+        # its own account, so matching the key exactly found no trades at all.
+        members = [acct, *acct.split("+")] if acct and "+" in acct else [acct] if acct else []
+        if members:
+            clauses.append(f"account IN ({', '.join('?' * len(members))})")
+            params.extend(members)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(
             f"SELECT import_id, account, symbol, currency, datetime, quantity, trade_price, "
-            f"proceeds, comm_fee, basis FROM trades{where} ORDER BY datetime ASC, id ASC",
+            f"proceeds, comm_fee, basis, code FROM trades{where} ORDER BY datetime ASC, id ASC",
             params,
         ).fetchall()
         ca_clauses, ca_params = [], []
-        if acct:
-            ca_clauses.append("account = ?")
-            ca_params.append(acct)
+        if members:
+            ca_clauses.append(f"account IN ({', '.join('?' * len(members))})")
+            ca_params.extend(members)
         ca_where = (" WHERE " + " AND ".join(ca_clauses)) if ca_clauses else ""
         ca_rows = conn.execute(
             f"SELECT account, report_date, datetime, description "
@@ -1395,6 +1418,96 @@ def _trade_split_events(
     return events
 
 
+def _codes(row: Any) -> set[str]:
+    """IBKR's trade codes ("O;P", "C;FPA") as a set: O opens a position, C closes."""
+    try:
+        raw = row["code"]
+    except (KeyError, IndexError):
+        return set()
+    return {c.strip().upper() for c in str(raw or "").split(";") if c.strip()}
+
+
+def _fifo(events: list[tuple[Any, ...]], year: int | None = None
+          ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], float]:
+    """The one FIFO walk ``realized_gains`` and ``open_lots`` share:
+    ``(gains per symbol, open lots per symbol, unmatched sale proceeds)``.
+
+    It was written twice, so every fix had to land twice and could land once.
+    A lot is ``[qty, price per share, open date, currency]``: positive qty is a
+    long position at its commission-inclusive cost, negative a short position at
+    what it was sold for, net of commission.
+
+    Shorts: a sale coded ``O`` (opening) with no long lot left opens a short lot,
+    and a buy coded ``C`` covers short lots first. Selling a call for $300 and
+    buying it back for $100 used to realize nothing, report $300 as unmatched,
+    and leave a phantom long contract. A sale WITHOUT the opening code that finds
+    no lot is still "unmatched": that is almost always shares bought before the
+    first imported statement, not a short. Gains on shorts are short-term.
+    ``year`` counts only realizations dated that year."""
+    from collections import defaultdict, deque
+
+    lots: dict[str, deque[list[Any]]] = defaultdict(deque)
+    per: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"realized": 0.0, "short_term": 0.0, "long_term": 0.0, "currency": "USD"})
+    unmatched = 0.0
+
+    def realize(sym: str, gain: float, opened: str, closed: str, short: bool, cur: str) -> None:
+        if year is not None and closed[:4] != str(year):
+            return
+        bucket = "short_term" if short or not is_long_term(opened, closed) else "long_term"
+        per[sym]["realized"] += gain
+        per[sym][bucket] += gain
+        per[sym]["currency"] = cur
+
+    for _when, _order, kind, payload in events:
+        if kind == "split":
+            sym, factor = payload
+            for lot in lots.get(sym, ()):  # more shares, proportionally lower price/sh
+                lot[0] *= factor
+                lot[1] /= factor
+            continue
+        r = payload
+        sym, qty = r["symbol"], r["quantity"]
+        dt = (r["datetime"] or "")[:10]
+        cur = r["currency"] or "USD"
+        codes = _codes(r)
+        if qty > 0:
+            # A closing buy's Basis is the short's, not this purchase's cost, so a
+            # cover is costed from the cash it took.
+            cash = -((r["proceeds"] or 0.0) + (r["comm_fee"] or 0.0))
+            cost_ps = ((r["basis"] / qty) if (r["basis"] or 0) > 0 else
+                       (cash / qty) if cash > 0 else r["trade_price"])
+            left = qty
+            while left > 1e-9 and lots[sym] and lots[sym][0][0] < 0:
+                lot = lots[sym][0]
+                take = min(left, -lot[0])
+                realize(sym, (lot[1] - cost_ps) * take, lot[2], dt, True, cur)
+                lot[0] += take
+                left -= take
+                if lot[0] >= -1e-9:
+                    lots[sym].popleft()
+            if left > 1e-9:
+                lots[sym].append([left, cost_ps, dt, cur])
+        elif qty < 0:
+            sell_qty = -qty
+            net = (r["proceeds"] or 0.0) + (r["comm_fee"] or 0.0)
+            price_ps = (net / sell_qty) if sell_qty else r["trade_price"]
+            while sell_qty > 1e-9 and lots[sym] and lots[sym][0][0] > 0:
+                lot = lots[sym][0]
+                take = min(sell_qty, lot[0])
+                realize(sym, (price_ps - lot[1]) * take, lot[2], dt, False, cur)
+                lot[0] -= take
+                sell_qty -= take
+                if lot[0] <= 1e-9:
+                    lots[sym].popleft()
+            if sell_qty > 1e-9:
+                if "O" in codes and "C" not in codes:
+                    lots[sym].append([-sell_qty, price_ps, dt, cur])
+                elif year is None or dt[:4] == str(year):
+                    unmatched += price_ps * sell_qty
+    return per, lots, unmatched
+
+
 def open_lots(
     symbol: str | None = None, account: str | None = None
 ) -> dict[str, list[dict[str, Any]]]:
@@ -1405,39 +1518,16 @@ def open_lots(
     (unsold) lots instead of recording gains. Returns ``{symbol: [{qty,
     cost_per_share, open_date}, …]}`` (oldest lot first), splits already applied so
     each lot's qty and cost/share are split-adjusted. The basis is
-    commission-inclusive (same as ``realized_gains``).
+    commission-inclusive (same as ``realized_gains``). A short position is a lot
+    with a NEGATIVE ``qty`` whose ``cost_per_share`` is what it was sold at.
 
     ``symbol`` scopes the input; ``account`` defaults to the newest import's
     account (``"all"`` pools every account into one book — see
     ``_trade_split_events`` for why that is rarely what you want)."""
-    from collections import defaultdict, deque
-
-    events = _trade_split_events(symbol, account)
-    lots: dict[str, deque[Any]] = defaultdict(deque)
-    for _when, _order, kind, payload in events:
-        if kind == "split":
-            sym, factor = payload
-            for lot in lots.get(sym, ()):
-                lot[0] *= factor
-                lot[1] /= factor
-            continue
-        r = payload
-        sym, qty = r["symbol"], r["quantity"]
-        dt = (r["datetime"] or "")[:10]
-        if qty > 0:
-            cost_per_share = (r["basis"] / qty) if qty else r["trade_price"]
-            lots[sym].append([qty, cost_per_share, dt])
-        elif qty < 0:
-            sell_qty = -qty
-            while sell_qty > 1e-9 and lots[sym]:
-                lot = lots[sym][0]
-                take = min(sell_qty, lot[0])
-                lot[0] -= take
-                sell_qty -= take
-                if lot[0] <= 1e-9:
-                    lots[sym].popleft()
+    _per, lots, _unmatched = _fifo(_trade_split_events(symbol, account))
     return {
-        s: [{"qty": l[0], "cost_per_share": l[1], "open_date": l[2]} for l in dq]
+        s: [{"qty": l[0], "cost_per_share": l[1], "open_date": l[2], "currency": l[3]}
+            for l in dq]
         for s, dq in lots.items() if dq
     }
 
@@ -1564,49 +1654,21 @@ def realized_gains(
     Note: FIFO here; IBKR's own default is also FIFO but the broker's realized
     figures can differ with wash-sale or specific-lot adjustments not in the
     basic Trades section."""
-    from collections import defaultdict, deque
-
-    events = _trade_split_events(symbol, account)
-    lots: dict[str, deque[Any]] = defaultdict(deque)  # sym -> [ [qty, cost/sh, date], ...]
-    per: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"realized": 0.0, "short_term": 0.0, "long_term": 0.0})
-    unmatched = 0.0
-    for _when, _order, kind, payload in events:
-        if kind == "split":
-            sym, factor = payload
-            for lot in lots.get(sym, ()):  # more shares, proportionally lower cost/sh
-                lot[0] *= factor
-                lot[1] /= factor
-            continue
-        r = payload
-        sym, qty = r["symbol"], r["quantity"]
-        dt = (r["datetime"] or "")[:10]
-        if qty > 0:  # buy → open a lot (basis is positive, commission-inclusive)
-            cost_per_share = (r["basis"] / qty) if qty else r["trade_price"]
-            lots[sym].append([qty, cost_per_share, dt])
-        elif qty < 0:  # sell → match FIFO (gross proceeds less the commission)
-            sell_qty = -qty
-            net = r["proceeds"] + (r["comm_fee"] or 0.0)
-            price_per_share = (net / sell_qty) if sell_qty else r["trade_price"]
-            counts = year is None or dt[:4] == str(year)
-            while sell_qty > 1e-9 and lots[sym]:
-                lot = lots[sym][0]
-                take = min(sell_qty, lot[0])
-                gain = (price_per_share - lot[1]) * take
-                if counts:
-                    bucket = "long_term" if is_long_term(lot[2], dt) else "short_term"
-                    per[sym]["realized"] += gain
-                    per[sym][bucket] += gain
-                lot[0] -= take
-                sell_qty -= take
-                if lot[0] <= 1e-9:
-                    lots[sym].popleft()
-            if sell_qty > 1e-9 and counts:  # sold more than any open lot covered
-                unmatched += price_per_share * sell_qty
+    per, _lots, unmatched = _fifo(_trade_split_events(symbol, account), year)
 
     by_symbol = {s: v for s, v in per.items() if abs(v["realized"]) > 1e-9}
+    # Per currency: a EUR gain and a USD gain are not one number. The totals stay
+    # for the single-currency book they are right for; ``by_currency`` is the
+    # figure whenever there is more than one.
+    by_currency: dict[str, dict[str, float]] = {}
+    for v in by_symbol.values():
+        c = by_currency.setdefault(v["currency"], {"realized": 0.0, "short_term": 0.0,
+                                                   "long_term": 0.0})
+        for k in c:
+            c[k] += v[k]
     return {
         "by_symbol": by_symbol,
+        "by_currency": {c: {k: round(x, 2) for k, x in v.items()} for c, v in by_currency.items()},
         "total_realized": round(sum(v["realized"] for v in by_symbol.values()), 2),
         "short_term": round(sum(v["short_term"] for v in by_symbol.values()), 2),
         "long_term": round(sum(v["long_term"] for v in by_symbol.values()), 2),

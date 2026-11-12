@@ -54,9 +54,35 @@ def _fetch_info(symbol: str) -> dict[str, Any]:
         info = _ticker(sym).info or {}
     except Exception:  # noqa: BLE001 — network/parse failure degrades to no-data
         info = {}
+    info = _major_units(info)
     if info:
         _INFO_CACHE[sym] = (info, time.time())
     return info
+
+
+#: Yahoo quotes some listings in MINOR units (London in pence) while dividends
+#: and market cap stay in major units, so VOD.L's 117.35 (pence) against a 0.04
+#: (pounds) dividend read as a 0.03% yield instead of 3.4%.
+_MINOR_UNITS = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ZAC": "ZAR", "ILA": "ILS"}
+_PRICE_FIELDS = (
+    "currentPrice", "regularMarketPrice", "previousClose", "regularMarketPreviousClose",
+    "open", "regularMarketOpen", "dayLow", "dayHigh", "regularMarketDayLow",
+    "regularMarketDayHigh", "fiftyTwoWeekLow", "fiftyTwoWeekHigh", "fiftyDayAverage",
+    "twoHundredDayAverage", "bid", "ask", "targetHighPrice", "targetLowPrice",
+    "targetMeanPrice", "targetMedianPrice",
+)
+
+
+def _major_units(info: dict[str, Any]) -> dict[str, Any]:
+    """``info`` with prices in the currency's major unit (pence → pounds)."""
+    major = _MINOR_UNITS.get(str(info.get("currency") or ""))
+    if not major:
+        return info
+    out = dict(info, currency=major, quoted_in=info["currency"])
+    for k in _PRICE_FIELDS:
+        if isinstance(out.get(k), (int, float)):
+            out[k] = out[k] / 100
+    return out
 
 
 def _fetch_calendar(symbol: str) -> dict[str, Any]:

@@ -25,6 +25,7 @@ than aborting the turn — and the helpers are trivially monkeypatched in tests.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 import html
 import json
@@ -60,6 +61,11 @@ _JSON_CACHE: dict[str, dict[str, Any]] = {}
 #: until a restart, and a chat question weeks later got weeks-old financials.
 _JSON_FETCHED_AT: dict[str, float] = {}
 _TICKER_LOADED_AT: list[float] = []
+#: Documents kept in memory. Unbounded, an always-on process kept every company's
+#: facts (FISV's alone is ~17 MB parsed) and every search for its whole life.
+_JSON_CACHE_MAX = 32
+#: The last fetch that failed outright, for telling an outage from a bad ticker.
+_LAST_FAILURE: list[str] = []
 
 #: How long a cached SEC document stays fresh. The submissions feed is what shows
 #: a new filing, so it is short; company facts only change when something is filed.
@@ -92,6 +98,7 @@ def _fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
     cached = _JSON_CACHE.get(url)
     if isinstance(cached, dict) and _fresh(url):
         return cached
+    error = ""
     for _ in range(2):  # one retry — SEC occasionally 5xx / rate-limits
         try:
             with urllib.request.urlopen(_request(url), timeout=timeout) as resp:  # noqa: S310
@@ -105,12 +112,22 @@ def _fetch_json(url: str, timeout: float = 20.0) -> dict[str, Any]:
                 # appeared on the retry.
                 return {}
             if data:
+                _JSON_CACHE.pop(url, None)  # re-inserted last: newest at the end
                 _JSON_CACHE[url] = data
                 _JSON_FETCHED_AT[url] = time.time()
+                while len(_JSON_CACHE) > _JSON_CACHE_MAX:
+                    oldest = next(iter(_JSON_CACHE))
+                    _JSON_CACHE.pop(oldest, None)
+                    _JSON_FETCHED_AT.pop(oldest, None)
+            _LAST_FAILURE[:] = []
             return data
-        except Exception:  # noqa: BLE001 — degrade to no-data, never abort the turn
+        except Exception as exc:  # noqa: BLE001 — degrade to no-data, never abort the turn
+            error = f"{type(exc).__name__}: {exc}"
             continue
-    return {}
+    _LAST_FAILURE[:] = [error]
+    # A stale copy beats nothing: an outage used to turn a company SEC knew an
+    # hour ago into "no data".
+    return cached if isinstance(cached, dict) else {}
 
 
 def _fetch_text(url: str, max_bytes: int = 6_000_000, timeout: float = 30.0) -> str:
@@ -148,6 +165,24 @@ def _cik_for(symbol: str) -> str | None:
     return _load_ticker_map().get(symbol.strip().upper())
 
 
+def _exhibit_texts(cik: str, accession: str, limit: int = 3) -> list[tuple[str, str]]:
+    """``(file name, text)`` for a filing's EX-99 exhibits (an 8-K's press
+    release), from the filing's index; ``[]`` when there are none."""
+    folder = _filing_url(cik, accession, "")
+    if not folder:
+        return []
+    items = ((_fetch_json(folder + "index.json").get("directory") or {}).get("item") or [])
+    names = [str(i.get("name") or "") for i in items if isinstance(i, dict)]
+    exhibits = [n for n in names if re.search(r"ex-?99", n, re.I)
+                and n.lower().endswith((".htm", ".html", ".txt"))]
+    out = []
+    for n in exhibits[:limit]:
+        body = _fetch_text(folder + n)
+        if body:
+            out.append((n, _html_to_text(body)))
+    return out
+
+
 def _filing_url(cik: str, accession: str, doc: str) -> str:
     """Build the public EDGAR Archives URL for a filing's primary document."""
     acc = accession.replace("-", "")
@@ -177,6 +212,13 @@ def _money(v: Any) -> str:
 
 
 def _no_cik(sym: str) -> str:
+    # With the ticker map unloaded, every lookup fails: that is an outage (or a
+    # rejected User-Agent), not a bad ticker, and saying "use the US ticker"
+    # sent the user hunting for a typo that wasn't there.
+    if not _TICKER_CIK and _LAST_FAILURE:
+        return (f"SEC EDGAR could not be reached ({_LAST_FAILURE[0][:120]}), so {sym!r} "
+                f"could not be looked up. This is the source being down, not the ticker; "
+                f"try again shortly.")
     return (
         f"No SEC CIK found for {sym!r} — SEC EDGAR covers US-listed filers "
         f"(use the US ticker, e.g. AAPL). Foreign/ADR names may differ."
@@ -381,6 +423,21 @@ def _is_annual_period(e: dict[str, Any]) -> bool:
     return dur is not None and 320 <= dur <= 400
 
 
+def fiscal_year_end_month(facts: dict[str, Any]) -> int | None:
+    """The month a company's fiscal year ends in (12 for a calendar year, 1 for
+    NVDA), from its newest annual revenue period; None when there is none."""
+    tags = next(t for label, t, _u in _KEY_CONCEPTS if label == _REVENUE)
+    newest = next(iter(_annual_facts(facts, tags, "USD")), None)
+    if not newest or not newest.get("end"):
+        return None
+    try:
+        # A 52/53-week year ending 1-7 January closes the December fiscal year.
+        end = date.fromisoformat(str(newest["end"])[:10]) - timedelta(days=7)
+    except ValueError:
+        return None
+    return end.month
+
+
 def _annual_facts(facts: dict[str, Any], tags: list[str], unit: str) -> list[dict[str, Any]]:
     """Annual values for a concept as ``[{fy, val, end}]`` newest-first. Merges the
     fallback tags (a company can switch tags across years, e.g. NVDA's revenue
@@ -399,19 +456,39 @@ def _annual_facts(facts: dict[str, Any], tags: list[str], unit: str) -> list[dic
             for y in sorted(by_year, reverse=True)]
 
 
+def _fiscal_label(end: str) -> str:
+    """The fiscal year a period ending on ``end`` is called. A 52/53-week year
+    that ends in the first week of January is the previous year's: fiscal 2021
+    ending 1 January 2022 is "2021"."""
+    try:
+        d = date.fromisoformat(end[:10])
+    except ValueError:
+        return ""
+    return str(d.year - 1 if d.month == 1 and d.day <= 7 else d.year)
+
+
 def _bucket_annual(raw: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Bucket raw XBRL entries by period-end year, keeping the annual (10-K,
-    full-year) value most recently filed for each year."""
-    by_year: dict[str, dict[str, Any]] = {}
+    """Bucket raw XBRL entries into fiscal years, keeping the annual (10-K,
+    full-year) value most recently filed for each period.
+
+    Grouped by the period's END DATE first, then labelled. By the end date's
+    calendar year, a 52/53-week filer's fiscal 2021 (ending 1 January 2022) and
+    fiscal 2022 (ending 31 December 2022) shared the bucket "2022": the later
+    filing won, one year vanished, and growth was measured across two years."""
+    by_end: dict[str, dict[str, Any]] = {}
     for e in raw:
         if not _is_annual_period(e):
             continue
-        year = str(e.get("end") or "")[:4]
-        if not year.isdigit():
+        end = str(e.get("end") or "")[:10]
+        if not end[:4].isdigit():
             continue
-        cur = by_year.get(year)
+        cur = by_end.get(end)
         if cur is None or str(e.get("filed") or "") > str(cur.get("filed") or ""):
-            by_year[year] = e
+            by_end[end] = e
+    by_year: dict[str, dict[str, Any]] = {}
+    for end in sorted(by_end):  # later ends overwrite on a label clash
+        if label := _fiscal_label(end):
+            by_year[label] = by_end[end]
     return by_year
 
 
@@ -882,6 +959,11 @@ def sec_filing_excerpt(symbol: str, query: str, form_type: str = "10-K",
     name, filings = _submission_recent(cik)
     ft = form_type.strip().upper() or "10-K"
     match = _latest_form(filings, ft)
+    if ft == "8-K":
+        # The earnings release when there is one: the newest 8-K is as likely a
+        # director change, and an excerpt request for "guidance" wants results.
+        match = next((f for f in filings if f["form"].strip().upper() == "8-K"
+                      and "2.02" in str(f.get("items") or "")), match)
     if not match:
         return f"No recent {ft} filing found for {name or sym} ({sym})."
     url = _filing_url(cik, match["accession"], match["doc"])
@@ -889,7 +971,14 @@ def sec_filing_excerpt(symbol: str, query: str, form_type: str = "10-K",
     if not doc:
         return (f"Couldn't fetch the {ft} document for {sym} (it may be very large "
                 f"or unavailable). Filing: {url}")
-    passages = _passages(_html_to_text(doc), query, max(1, min(int(max_passages or 3), 5)))
+    text = _html_to_text(doc)
+    if ft == "8-K":
+        # An 8-K's primary document is a cover page; the press release, with
+        # management's commentary on the quarter, is exhibit 99. Reading only the
+        # cover made this the keyless transcript stand-in in name only.
+        for exhibit, body in _exhibit_texts(cik, match["accession"]):
+            text += f"\n\n[{exhibit}]\n{body}"
+    passages = _passages(text, query, max(1, min(int(max_passages or 3), 5)))
     if not passages:
         return (f"No passage in {sym}'s {ft} ({match['date']}) matched {query!r}. "
                 f"Try different terms. Filing: {url}")
@@ -1180,7 +1269,9 @@ def filing_tone_trend(symbol: str, years: int = 3) -> str:
         return _no_cik(sym)
     name, filings = _submission_recent(cik)
     years = max(1, min(int(years or 3), 4))
-    tenks = [f for f in filings if f["form"].upper().startswith("10-K")][:years]
+    # Originals only: a 10-K/A is often a Part III cover page, and scored as a year
+    # it put a near-empty document into the trend (_latest_form learned this).
+    tenks = [f for f in filings if f["form"].strip().upper() in ("10-K", "10-K405", "10-KT")][:years]
     if not tenks:
         return f"No recent 10-K filings found for {name or sym} ({sym})."
     rows = []
@@ -1239,11 +1330,20 @@ def sec_metric_rank(symbol: str, concept: str = "Revenue", year: int = 0) -> str
     tags, unit = _resolve_matrix_concept(concept)
     tag = tags[0]
     year = int(year) or (date.today().year - 1)
-    facts = _fetch_frame(tag, unit, year)
+    # Every fallback tag, one value per filer: ranking on the first tag alone left
+    # out every company reporting revenue as `Revenues` (NVDA among them), which
+    # then "didn't report" while the rest were ranked among a subset.
+    by_cik: dict[Any, dict[str, Any]] = {}
+    for t in tags:
+        for e in _fetch_frame(t, unit, year):
+            by_cik.setdefault(e.get("cik"), dict(e, tag=t))
+    facts = list(by_cik.values())
     if not facts:
         return (f"No XBRL frame data for {concept!r} (tag {tag}) in CY{year}. Try a "
                 f"different year, or a us-gaap tag like Revenues / NetIncomeLoss / Assets.")
-    mine = next((e for e in facts if e.get("cik") == int(cik)), None)
+    mine = by_cik.get(int(cik))
+    if mine is not None:
+        tag = str(mine.get("tag") or tag)
     if mine is None:
         return (f"{sym} didn't report us-gaap:{tag} for CY{year} (it may use a different "
                 f"tag or a non-calendar fiscal period). Try another year or concept/tag.")
@@ -1377,7 +1477,9 @@ def insider_transactions(symbol: str, limit: int = 15) -> str:
     if not cik:
         return _no_cik(sym)
     name, filings = _submission_recent(cik)
-    form4s = [f for f in filings if f["form"] in ("4", "4/A")][:max(1, min(int(limit or 15), 40))]
+    # Originals only: a 4/A restates transactions its original already reported,
+    # and counting both doubled them in the net.
+    form4s = [f for f in filings if f["form"] == "4"][:max(1, min(int(limit or 15), 40))]
     if not form4s:
         return f"No recent Form 4 (insider) filings found for {name or sym} ({sym})."
 

@@ -383,3 +383,39 @@ def test_the_ideas_jobs_and_command_are_registered(world):
     assert rows["ideas-deep"]["repeat"] == "monthly-first-weekday"
     assert asyncio.run(scheduler.run_command("/ideas")).startswith("No ideas yet")
     assert "Investor profile (generic" in asyncio.run(scheduler.run_command("/profile"))
+
+
+def test_an_unpriced_candidates_level_is_checked_against_its_spot(world):
+    """Only momentum and holding candidates carry a price. A quality pick near $123
+    with "bullish, invalidated below 250" was accepted unchecked, and the watcher
+    announced it broken on its next pass."""
+    verdict = {"verdict": "buy-candidate", "conviction": 4, "thesis": "Quality at a fair price.",
+               "key_risks": ["x"], "horizon_days": 120, "evidence_ids": ["E1"],
+               "invalidation": {"price": 250.0, "event": ""}}
+    quality = _cand(symbol="QUAL1", source="quality", facts={})
+    assert recommend.validate_verdict(verdict, quality, {"E1"})[0]["invalidation_price"] is None
+    fine = dict(verdict, invalidation={"price": 110.0, "event": ""})
+    assert recommend.validate_verdict(fine, quality, {"E1"})[0]["invalidation_price"] == 110.0
+
+
+def test_an_excluded_sector_is_excluded_as_a_fund_too(world):
+    prof = {**profile.load(), "exclude_sectors": ["Energy"]}
+    xle = recommend.Idea(candidate=_cand(symbol="XLE", kind="etf", source="watchlist",
+                                         facts={"etf": {"overlap": {}}}),
+                         verdict="buy-candidate", conviction=3, thesis="t", key_risks=[],
+                         horizon_days=90, evidence_ids=["E1"])
+    assert "excluded sector (Energy)" in recommend.fit_check(xle, periodic.load_book(), prof, {})
+
+
+def test_a_reversed_view_closes_the_earlier_call(world):
+    """An "add" older than the cooldown and a new "trim" were both left open, so
+    one of them was certain to score as a hit."""
+    profile.save({"targets": {"us_equity": 60, "intl_equity": 20, "bonds": 20}})
+    opened = (datetime.now() - timedelta(days=40)).isoformat()
+    journal.save_entries([{"id": "t1", "symbol": "BND", "source": "recommender",
+                           "verdict": "bearish", "status": "open", "opened": opened,
+                           "entry_price": 90.0, "due": "2027-03-01"}])
+    run_ = asyncio.run(recommend.run("deep", fake=True))
+    bnd = next(r for r in run_["ideas"] if r["symbol"] == "BND")
+    old = next(e for e in journal.load_entries() if e["id"] == "t1")
+    assert old["status"] == "superseded" and old["superseded_by"] == bnd["journal_id"]

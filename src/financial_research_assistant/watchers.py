@@ -115,7 +115,7 @@ def _load_state() -> dict[str, Any]:
     if not isinstance(data, dict):
         data = {}
     for k, empty in (("seen", {}), ("last_push", {}), ("primed", []), ("held", []),
-                     ("last_run", {})):
+                     ("last_run", {}), ("alerts_on", []), ("redeliver", {})):
         data.setdefault(k, empty)
     return data
 
@@ -125,7 +125,12 @@ def _save_state(state: dict[str, Any], now: datetime | None = None) -> None:
     # short enough that the file doesn't grow for the life of the server. Measured
     # from the pass's own clock, which is what stamped the keys.
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=30)).isoformat()
-    state["seen"] = {k: v for k, v in state["seen"].items() if str(v) >= cutoff}
+    # Except a call's own events: an invalidated or 15%-moved call is still so a
+    # month later, and forgetting the key re-announced it every 30 days for the
+    # life of a 365-day call. There is one or two per journal entry, so they are
+    # bounded by the journal, not by time.
+    state["seen"] = {k: v for k, v in state["seen"].items()
+                     if str(v) >= cutoff or k.startswith("thesis:")}
     write_private(_state_path(), json.dumps(state, indent=1), prefix=".events-")
 
 
@@ -214,14 +219,26 @@ def alert_rules(ctx: dict[str, Any]) -> list[Event]:
         return []
     held = [h["symbol"] for h in ctx["book"]["holdings"]]
     today = market.ny_now(ctx["now"]).date()
+    state = ctx["state"]
+    was_on = set(state["alerts_on"])
+    now_on: set[str] = set()
     out = []
     for line in alerts.evaluate_alerts(held, 5, today):
         rule = line[1:line.index("]")] if line.startswith("[") and "]" in line else "?"
         text = line.split("] ", 1)[-1]
         sym = text.split(" ", 1)[0]
-        out.append(Event(key=f"alert:{rule}:{today.isoformat()}", symbol=sym,
+        # Per symbol: a "*" rule matching AAPL and KO on the same day shared one
+        # key, and KO's alert was dropped without a trace.
+        tag = f"{rule}|{sym}"
+        now_on.add(tag)
+        if tag in was_on:
+            # Fires when it BECOMES true, and re-arms once it clears: "TSLA below
+            # 200" pushed every day it stayed below, an earnings rule 7 days running.
+            continue
+        out.append(Event(key=f"alert:{rule}:{sym}:{today.isoformat()}", symbol=sym,
                          kind="alert_level", severity="medium", title=f"🔔 {text}",
-                         facts={"rule": rule, "text": text}))
+                         facts={"rule": rule, "text": text, "arm": tag}))
+    state["alerts_on"] = sorted(now_on)
     return out
 
 
@@ -365,14 +382,19 @@ def _decide(ev: Event, state: dict[str, Any], now: datetime) -> str:
     if last:
         at, sev = last[0], last[1]
         last_band = int(last[2]) if len(last) > 2 else 0
+        last_kind = str(last[3]) if len(last) > 3 else ""
         try:
             recent = now - datetime.fromisoformat(at) < timedelta(minutes=cooldown_minutes())
         except ValueError:
             recent = False
         # Worse news is never held back by the cooldown: a stock down 6% that is
         # now down 13% is a second message, even though both were "high".
+        # And urgent news of a DIFFERENT kind is news: a call's invalidation was
+        # swallowed by the price push on the same stock minutes before, and only
+        # surfaced as a line in the evening report.
         worse = _RANK[ev.severity] > _RANK.get(sev, 0) or (
-            ev.kind == "price_move" and int(ev.facts.get("band") or 0) > last_band)
+            ev.kind == "price_move" and int(ev.facts.get("band") or 0) > last_band) or (
+            ev.severity == "high" and ev.kind != last_kind)
         if recent and not worse:
             return "cooldown"
     if ev.severity != "high" and guardrails.quiet_now():
@@ -434,6 +456,10 @@ def _log(ev: Event, decision: str, text: str = "") -> None:
     append_jsonl(events_log(), rec)
 
 
+#: Passes an undelivered push is retried on before it is left to the daily report.
+_PUSH_TRIES = 6
+
+
 async def route(events: list[Event], state: dict[str, Any], now: datetime,
                 fake: bool = False) -> list[tuple[Event, str]]:
     """Dedupe, decide, push, log. Returns ``(event, decision)`` for new events."""
@@ -459,9 +485,20 @@ async def route(events: list[Event], state: dict[str, Any], now: datetime,
             delivered, _failed = await asyncio.to_thread(channels.deliver, text)
             if not channels.carried_full_text(delivered):
                 decision = "undelivered"
-            elif ev.symbol:
-                state["last_push"][ev.symbol] = [now.isoformat(), ev.severity,
-                                                 int(ev.facts.get("band") or 0)]
+                # Seen before delivery, so a failed push was lost for good. Un-see
+                # it so a later pass tries again (a few times; after that it is in
+                # the daily report), and re-arm an alert rule that produced it.
+                tries = int(state["redeliver"].get(ev.key) or 0) + 1
+                state["redeliver"][ev.key] = tries
+                if tries < _PUSH_TRIES:
+                    state["seen"].pop(ev.key, None)
+                    if ev.facts.get("arm") in state["alerts_on"]:
+                        state["alerts_on"].remove(ev.facts["arm"])
+            else:
+                state["redeliver"].pop(ev.key, None)
+                if ev.symbol:
+                    state["last_push"][ev.symbol] = [now.isoformat(), ev.severity,
+                                                     int(ev.facts.get("band") or 0), ev.kind]
         elif decision == "held":
             state["held"].append(asdict(ev))
         _log(ev, decision, text)
@@ -550,10 +587,30 @@ def events_on(day: str) -> list[dict[str, Any]]:
             or str(e.get("at", ""))[:10] == day]
 
 
+def _since_last_daily() -> str:
+    """When the previous scheduled daily report went out (UTC ISO), or ""."""
+    from . import jobs
+
+    sent = [e for e in jobs.sent_reports(limit=200)
+            if e.get("report") == "daily" and not e.get("on_demand")]
+    return str(sent[0].get("at") or "") if sent else ""
+
+
 def _daily_section(ctx: dict[str, Any]) -> str:
-    """Events of the session that weren't pushed on their own."""
+    """Events that weren't pushed on their own, since the previous daily report.
+
+    By the session's date alone, a 10-Q filed after Tuesday's 17:15 report was
+    dated Tuesday and Wednesday's report looked only at Wednesday, so it was never
+    listed anywhere; Friday evening and holidays lost events the same way."""
     day = ctx["session"].isoformat()
-    rows = [e for e in events_on(day) if e.get("decision") in ("digest", "held", "cooldown", "shadow")]
+    since = _since_last_daily()
+    quiet = ("digest", "held", "cooldown", "shadow", "undelivered")
+    pool = ([e for e in read_jsonl(events_log()) if str(e.get("detected_at") or "") > since]
+            if since else events_on(day))
+    # The latest record per event: a push retried after a failure is logged once
+    # per attempt, and one that went through on a retry was pushed after all.
+    latest = {str(e.get("key")): e for e in pool}
+    rows = [e for e in latest.values() if e.get("decision") in quiet]
     if not rows:
         return ""
     return "## Also Noticed Today\n" + "\n".join(f"- {e['title']}" for e in rows[:12])

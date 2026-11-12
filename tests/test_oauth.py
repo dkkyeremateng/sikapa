@@ -1312,3 +1312,46 @@ def test_a_claude_subscription_is_offered_only_the_haiku_it_is_served(monkeypatc
                                            {"access_token": "a", "refresh_token": "r"})
     assert [m["name"] for m in cred["models"]] == ["claude-haiku-4-5-20251001"]
     assert cred["models"][0]["context_window"] == 200_000
+
+
+def test_a_failed_refresh_is_logged_not_silent(monkeypatch, capsys):
+    """The old credential is kept on purpose; the failure used to leave no trace,
+    so the next sign of it was a 401 mid-turn."""
+    from financial_research_assistant import auth, oauth
+
+    monkeypatch.setattr(auth, "effective_scope", lambda scope: "default")
+    monkeypatch.setattr(auth, "get", lambda scope: {"provider": "anthropic", "expires": 0})
+    monkeypatch.setattr(oauth, "needs_refresh", lambda cred: True)
+
+    class Broken:
+        def refresh(self, cred):
+            raise RuntimeError("token endpoint returned 400 invalid_grant")
+
+    monkeypatch.setattr(oauth, "get", lambda name: Broken())
+    oauth.ensure_fresh("default")
+    assert "refreshing the anthropic sign-in failed" in capsys.readouterr().err
+
+
+async def test_the_graph_is_built_off_the_event_loop(monkeypatch):
+    """Building the client can refresh a token over HTTP; on the loop it stalled
+    Telegram and every other loop while it waited."""
+    import contextlib
+    import threading
+
+    from financial_research_assistant import graph
+
+    seen = {}
+
+    def build(*a, **k):
+        seen["thread"] = threading.current_thread() is threading.main_thread()
+        return "graph"
+
+    @contextlib.asynccontextmanager
+    async def no_mcp():
+        yield []
+
+    monkeypatch.setattr(graph, "_build_real_graph", build)
+    monkeypatch.setattr(graph, "ibkr_tools_session", no_mcp)
+    async with graph.real_graph_session() as g:
+        assert g == "graph"
+    assert seen["thread"] is False

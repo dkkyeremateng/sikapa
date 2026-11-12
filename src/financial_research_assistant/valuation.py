@@ -39,6 +39,14 @@ _CAPEX = [
     "PaymentsToAcquireProductiveAssets",
     "PaymentsForCapitalImprovements",
 ]
+#: Cash interest paid. Operating cash flow under US GAAP is AFTER interest, so it
+#: is the equity holders' cash; discounting it at a firm-wide rate and then
+#: subtracting net debt charged the debt twice and undervalued every indebted
+#: company. Adding after-tax interest back gives the firm's cash flow (FCFF),
+#: which is what a WACC-style rate and an EV-minus-net-debt bridge are for.
+_INTEREST_PAID = ["InterestPaidNet", "InterestPaid"]
+#: US federal statutory rate, for the interest tax shield.
+_TAX_RATE = 0.21
 
 # --- Assumption defaults (used when the caller passes 0 for that knob) --------
 _DEFAULT_YEARS = 5
@@ -184,9 +192,10 @@ def _sensitivity(
 
 # --- Data gather (network; lazy-imported so tests monkeypatch the source) -----
 def _fcf_history(cik: str, years: int) -> list[dict[str, Any]]:
-    """As-reported FCF per fiscal year, newest-first: operating cash flow − capex.
-    Keeps one extra year beyond ``years`` as a CAGR base. Rows lacking operating
-    cash flow are skipped (capex missing counts as 0 outflow)."""
+    """As-reported free cash flow to the firm per fiscal year, newest-first:
+    operating cash flow + after-tax interest paid − capex. Keeps one extra year
+    beyond ``years`` as a CAGR base. Rows lacking operating cash flow are skipped
+    (capex or interest missing counts as 0)."""
     from . import edgar
 
     facts = edgar._fetch_company_facts(cik)
@@ -194,13 +203,16 @@ def _fcf_history(cik: str, years: int) -> list[dict[str, Any]]:
         return []
     ocf = {r["fy"]: r["val"] for r in edgar._annual_facts(facts, _OPERATING_CASH_FLOW, "USD")}
     capex = {r["fy"]: r["val"] for r in edgar._annual_facts(facts, _CAPEX, "USD")}
+    interest = {r["fy"]: r["val"] for r in edgar._annual_facts(facts, _INTEREST_PAID, "USD")}
     rows = []
     for fy in sorted(ocf, reverse=True):
         o = _num(ocf.get(fy))
         if o is None:
             continue
         c = _num(capex.get(fy)) or 0.0
-        rows.append({"fy": fy, "ocf": o, "capex": c, "fcf": o - c})
+        i = abs(_num(interest.get(fy)) or 0.0) * (1 - _TAX_RATE)
+        rows.append({"fy": fy, "ocf": o, "capex": c, "interest_after_tax": i,
+                     "fcf": o + i - c})
     return rows[: years + 1]
 
 
@@ -316,10 +328,13 @@ def _render(sym: str, snap: dict[str, Any], history: list[dict[str, Any]],
     lines = [f"DCF intrinsic valuation · {snap['name']} ({sym}) — two-stage FCF model", ""]
     lines += _assumptions_block(growth, growth_src, discount, tg, years)
     lines.append("")
-    lines.append("As-reported FCF history (SEC EDGAR XBRL, operating cash flow − capex):")
+    lines.append("As-reported free cash flow to the firm (SEC EDGAR XBRL: operating cash "
+                 f"flow + interest paid after {_TAX_RATE:.0%} tax − capex):")
     for r in history[: years + 1]:
-        lines.append(f"  FY{r['fy']}: OCF {_money(r['ocf'])} − capex {_money(r['capex'])} "
-                     f"= FCF {_money(r['fcf'])}")
+        add_back = r.get("interest_after_tax") or 0.0
+        lines.append(f"  FY{r['fy']}: OCF {_money(r['ocf'])}"
+                     + (f" + interest {_money(add_back)}" if add_back else "")
+                     + f" − capex {_money(r['capex'])} = FCF {_money(r['fcf'])}")
     lines += _projection_block(res, base_fy)
     val_lines, _ = _valuation_block(res, net_debt, snap)
     lines += val_lines

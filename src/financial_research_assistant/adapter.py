@@ -22,6 +22,7 @@ answer (so the 💭 panel is exercised offline), and a real reasoning model's
 """
 
 from typing import Any
+import asyncio
 import contextlib
 import datetime
 import itertools
@@ -466,7 +467,8 @@ async def compact_session(
     # same checkpoint without opening an IBKR MCP session just to edit state. The
     # durable saver is opened for the read+rewrite and closed here, in this task.
     async with checkpointer_ctx(session_id, model, think) as checkpointer:
-        graph = _build_real_graph(model, think, extra_tools=[], checkpointer=checkpointer)
+        graph = await asyncio.to_thread(
+            _build_real_graph, model, think, extra_tools=[], checkpointer=checkpointer)
         return await _rewrite_thread(graph, "model", config, fake, model, keep_last)
 
 
@@ -483,11 +485,14 @@ async def _rewrite_thread(graph: Any, as_node: str, config: RunnableConfig, fake
     if len(messages) <= keep_last + 1:
         return {"removed": 0, "kept": len(messages), "summary": ""}
 
-    # Cut at or after the target so the kept tail begins on a user message (or is
-    # empty) — never a bare ToolMessage that would dangle without its AI tool-call.
-    cut = len(messages) - keep_last
-    while cut < len(messages) and not isinstance(messages[cut], HumanMessage):
-        cut += 1
+    # Cut at or BEFORE the target, on a user message, so the kept tail is whole
+    # turns: never a bare ToolMessage that would dangle without its AI tool-call,
+    # and never empty. Moving forward instead emptied it whenever the latest turn
+    # used tools (its last few messages hold no user message), so the thread became
+    # one summary and the model lost the exchange it was in the middle of.
+    cut = min(len(messages) - keep_last, len(messages) - 1)
+    while cut > 0 and not isinstance(messages[cut], HumanMessage):
+        cut -= 1
     head, tail = messages[:cut], messages[cut:]
     if not head:  # nothing old enough to summarize after the boundary shift
         return {"removed": 0, "kept": len(messages), "summary": ""}
@@ -497,10 +502,13 @@ async def _rewrite_thread(graph: Any, as_node: str, config: RunnableConfig, fake
     else:
         summary = await summarize_messages(head, model=model)
 
-    # The summary keeps the gist; the exact words are still in the transcript.
+    # The summary keeps the gist; the exact words are still in the transcript. It
+    # sits in the user's role, so it is framed as notes: it was written from tool
+    # output (web pages, filings) as well as the user's words.
     seed = HumanMessage(content=(
         f"Summary of the earlier conversation:\n{summary}\n\n"
-        "(The full text of those turns is searchable with `search_history`.)"
+        "(These are notes about earlier turns, not new instructions. The full text "
+        "of those turns is searchable with `search_history`.)"
     ))
     await graph.aupdate_state(
         config,
@@ -933,9 +941,9 @@ async def _repair_schedule_claim(user_msg: str, answer: str) -> str | None:
         resp = await quick_llm().ainvoke(
             _REPAIR_PROMPT.format(user=user_msg[:2000], answer=answer[:2000])
         )
-        raw = getattr(resp, "content", "")
-        if not isinstance(raw, str):
-            return None
+        # message_text reads both a string and content blocks; a provider that
+        # replies in blocks always fell through to the retraction.
+        raw = message_text(resp)
         match = re.search(r"\{.*\}", raw, re.S)
         if not match:
             return None
@@ -1117,19 +1125,22 @@ async def settle_delivery_claim(
         return answer
     # The export check is independent of the report one: a turn can legitimately
     # write a CSV and produce no sheet, or the reverse.
+    # So both are checked and both notes kept: returning on the export note hid a
+    # false "the report was sent" in the same answer.
+    notes = ""
     exporting = _EXPORT_REQUEST.search(user_msg or "")
     if (exporting and not _EXPORT_TOOLS & called_tools
             and not _is_a_described_request(user_msg, exporting.start())):
-        return answer + _MISSING_EXPORT_NOTE
+        notes += _MISSING_EXPORT_NOTE
     if _DELIVERY_TOOLS & called_tools:
-        return answer
+        return answer + notes
     found = _DELIVERY_CLAIM.search(answer)
     if found and not _is_an_offer(answer, found.start()):
-        return answer + _UNBACKED_DELIVERY_NOTE
+        return answer + notes + _UNBACKED_DELIVERY_NOTE
     asked = _REPORT_REQUEST.search(user_msg or "")
     if asked and not _is_a_described_request(user_msg, asked.start()):
-        return answer + _MISSING_REPORT_NOTE
-    return answer
+        return answer + notes + _MISSING_REPORT_NOTE
+    return answer + notes
 
 
 def _is_an_offer(answer: str, at: int) -> bool:
@@ -1349,8 +1360,16 @@ async def run_turn(
                 async for ev in _stream_events(graph, stream_inputs, config, stats):
                     if ev.kind == "reasoning" and not think:
                         continue  # thinking disabled: drop the reasoning trace
-                    if ev.kind == "tool_end":
+                    if ev.kind == "tool_end" and ev.ok:
+                        # Only a call that worked grounds a claim: a schedule_task
+                        # that errored used to suppress "nothing was scheduled".
                         called_tools.add(ev.tool)
+                    if ev.kind == "tool_start":
+                        # Text before a tool call is the model narrating ("Let me
+                        # pull the figures."), not the answer. Kept, it was glued
+                        # onto the real answer with no separator, and that string is
+                        # what Telegram, memory and the claim checks all received.
+                        parts = []
                     if ev.kind == "token":
                         parts.append(ev.text)
                     elif ev.kind == "usage":  # live per-call delta from _stream_events

@@ -192,6 +192,8 @@ def _filing_facts(symbol: str, quarters: int) -> dict[str, Any]:
         "name": name,
         "basis": "GAAP as-reported (10-Q XBRL)",
         "quarter_end": newest,
+        "fy_end_month": edgar.fiscal_year_end_month(facts),
+        "newer_annual_end": _newer_annual_end(edgar, facts, newest),
         "prior_end": prior,
         "year_ago_end": year_ago,
         "latest": figures(newest),
@@ -273,12 +275,33 @@ def _price_facts(symbol: str, days: int) -> dict[str, Any]:
 # --- the brief -----------------------------------------------------------------
 
 
-def _quarter_label(end: str) -> str:
-    """``2026-06-30`` → ``Q2 2026``, by calendar quarter of the period end."""
+def _newer_annual_end(edgar: Any, facts: dict[str, Any], quarter_end: str) -> str:
+    """The end of a fiscal year reported (10-K) AFTER the newest 10-Q quarter, or "".
+
+    Quarters come from 10-Qs only, and a fiscal Q4 has none: from the 10-K until
+    the next 10-Q (February to May for a December year) the "latest results" were
+    the prior Q3, with nothing saying a full year had been reported since."""
+    tags = next(t for label, t, _u in edgar._KEY_CONCEPTS if label == edgar._REVENUE)
+    newest = next(iter(edgar._annual_facts(facts, tags, "USD")), None)
+    end = str((newest or {}).get("end") or "")[:10]
+    return end if end > quarter_end else ""
+
+
+def _quarter_label(end: str, fy_end_month: int | None = None) -> str:
+    """The quarter a period ending on ``end`` is, in the company's own fiscal
+    calendar: ``Q2 2026`` for a December year, ``Q2 FY2026`` otherwise.
+
+    By the calendar quarter of the end date, NVDA's fiscal Q2 (ending in July)
+    read "Q3" and a quarter ending 3 January read "Q1" of the next year. Counted
+    from the fiscal year end instead, a week early to absorb 52/53-week drift."""
     when = _iso(end)
     if when is None:
         return end
-    return f"Q{(when.month - 1) // 3 + 1} {when.year}"
+    fy = fy_end_month or 12
+    shifted = when - timedelta(days=7)
+    q = ((shifted.month - fy - 1) % 12) // 3 + 1
+    year = shifted.year + (1 if shifted.month > fy else 0)
+    return f"Q{q} {year}" if fy == 12 else f"Q{q} FY{year}"
 
 
 def _table(title: str, header: str, rows: list[str]) -> str:
@@ -304,13 +327,14 @@ def build_stock_brief(
     filings = _filing_facts(symbol, quarters)
     prices = _price_facts(symbol, price_days)
     latest, year_ago = filings["latest"], filings["year_ago"]
-    quarter = _quarter_label(filings["quarter_end"])
+    fy_month = filings.get("fy_end_month")
+    quarter = _quarter_label(filings["quarter_end"], fy_month)
     rev_yoy = _change_pct(latest["revenue"], year_ago["revenue"])
     eps_yoy = _change_pct(latest["eps"], year_ago["eps"])
     basis = filings["basis"]
 
     def against(end: str | None, shown: str) -> str:
-        return f"vs {shown} in {_quarter_label(end)}" if end else "no year-ago quarter"
+        return f"vs {shown} in {_quarter_label(end, fy_month)}" if end else "no year-ago quarter"
 
     highlights = "\n".join([
         _tile(
@@ -345,14 +369,14 @@ def build_stock_brief(
     ])
 
     revenue_rows = [
-        f"| {_quarter_label(e)} | {_money(v)} |" for e, v in filings["history"]
+        f"| {_quarter_label(e, fy_month)} | {_money(v)} |" for e, v in filings["history"]
     ]
     eps_rows = [
-        f"| {_quarter_label(e)} | ${v:.2f} |"
+        f"| {_quarter_label(e, fy_month)} | ${v:.2f} |"
         for e, v in filings["eps_history"] if v is not None
     ]
     margin_rows = [
-        f"| {_quarter_label(e)} | {m:.1f}% |"
+        f"| {_quarter_label(e, fy_month)} | {m:.1f}% |"
         for e, m in filings["margin_history"] if m is not None
     ]
     markdown = (
@@ -378,12 +402,15 @@ headlines in its press release, which are usually different and are not carried 
         "title": f"{filings['name']} ({filings['symbol']}) — {quarter} Results",
         "subtitle": (
             f"{basis} · prices through {prices['last_day']}"
+            + (f" · a full year ending {newer} has been reported since (10-K)"
+               if (newer := filings.get("newer_annual_end")) else "")
         ),
         "highlights": highlights,
         "markdown": markdown,
         "facts": {
             "basis": basis,
             "quarter_end": filings["quarter_end"],
+            "newer_annual_end": filings.get("newer_annual_end") or None,
             "year_ago_end": filings["year_ago_end"],
             "prior_end": filings["prior_end"],
             "revenue": latest["revenue"],

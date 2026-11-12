@@ -511,3 +511,31 @@ def test_period_return_states_the_without_the_best_month_counterfactual():
     # what is left.
     assert r["months"] == 2
     assert round(r["return_excluding_best_month_pct"], 6) == -1.0
+
+
+def test_a_compact_flex_time_matches_the_csvs():
+    """"20260401;121423" kept "121423", so the same trade from the CSV ("12:14:23")
+    never matched as a duplicate and an overlapping import counted it twice."""
+    from financial_research_assistant import flex
+
+    assert flex._flex_datetime("20260401;121423") == "2026-04-01, 12:14:23"
+    assert flex._flex_datetime("2026-04-01;12:14:23") == "2026-04-01, 12:14:23"
+    assert flex._flex_datetime("20260401 1214") == "2026-04-01, 12:14:00"
+
+
+def test_trades_with_executions_and_orders_are_not_all_dropped():
+    """The positions rule (keep SUMMARY) was applied to trades, which have no
+    SUMMARY level: with executions and orders both selected, every trade row was
+    dropped, with no warning."""
+    import re
+
+    from financial_research_assistant import flex
+
+    plain = flex.parse_flex_xml(_FLEX)["trades"]
+    tagged = _FLEX.replace("<Order accountId=", '<Order levelOfDetail="EXECUTION" accountId=')
+    # The same fills restated at order level, which must not be counted again.
+    orders = re.sub(r'<Order levelOfDetail="EXECUTION"([^>]*)/>',
+                    r'<Order levelOfDetail="EXECUTION"\1/><Order levelOfDetail="ORDER"\1/>', tagged)
+    assert orders.count('levelOfDetail="ORDER"') == len(plain) > 0
+    got = flex.parse_flex_xml(orders)["trades"]
+    assert [(t["symbol"], t["quantity"]) for t in got] == [(t["symbol"], t["quantity"]) for t in plain]

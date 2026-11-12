@@ -613,3 +613,141 @@ def test_the_filings_feed_is_refetched_once_it_is_stale(monkeypatch):
     finally:
         edgar._JSON_CACHE.pop(url, None)
         edgar._JSON_FETCHED_AT.pop(url, None)
+
+
+def test_a_52_53_week_filers_years_do_not_collide():
+    """Fiscal 2021 ended 1 Jan 2022 and fiscal 2022 on 31 Dec 2022: by calendar
+    year both were "2022", fiscal 2021 vanished, and the FY2023 10-K's comparative
+    of 2021 (filed later) won the bucket."""
+    from financial_research_assistant import edgar
+
+    def fy(start, end, val, filed):
+        return {"start": start, "end": end, "val": val, "form": "10-K", "filed": filed}
+
+    raw = [fy("2021-01-03", "2022-01-01", 100, "2022-02-20"),
+           fy("2022-01-02", "2022-12-31", 110, "2023-02-20"),
+           fy("2023-01-01", "2023-12-30", 120, "2024-02-20"),
+           fy("2021-01-03", "2022-01-01", 100, "2024-02-20")]  # comparative, filed later
+    years = edgar._bucket_annual(raw)
+    assert {y: e["val"] for y, e in years.items()} == {"2021": 100, "2022": 110, "2023": 120}
+
+
+def test_a_late_january_year_end_keeps_its_own_label():
+    from financial_research_assistant import edgar
+
+    assert edgar._fiscal_label("2025-01-26") == "2025"   # NVDA calls this fiscal 2025
+    assert edgar._fiscal_label("2022-01-01") == "2021"
+
+
+def test_an_sec_outage_is_not_reported_as_a_bad_ticker(monkeypatch):
+    import urllib.error
+
+    from financial_research_assistant import edgar
+
+    def refused(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(edgar.urllib.request, "urlopen", refused)
+    monkeypatch.setattr(edgar, "_TICKER_CIK", {})
+    monkeypatch.setattr(edgar, "_TICKER_LOADED_AT", [])
+    monkeypatch.setattr(edgar, "_JSON_CACHE", {})
+    assert edgar._cik_for("AAPL") is None
+    msg = edgar._no_cik("AAPL")
+    assert "could not be reached" in msg and "403" in msg and "use the US ticker" not in msg
+
+
+def test_a_failed_refetch_serves_the_last_good_copy(monkeypatch):
+    from financial_research_assistant import edgar
+
+    url = "https://data.sec.gov/submissions/CIK0000000001.json"
+    monkeypatch.setattr(edgar, "_JSON_CACHE", {url: {"name": "Acme"}})
+    monkeypatch.setattr(edgar, "_JSON_FETCHED_AT", {url: 0.0})  # long stale
+    monkeypatch.setattr(edgar.urllib.request, "urlopen",
+                        lambda req, timeout=0: (_ for _ in ()).throw(OSError("down")))
+    assert edgar._fetch_json(url) == {"name": "Acme"}
+
+
+def test_the_document_cache_is_bounded(monkeypatch):
+    import io
+    import json as _json
+
+    from financial_research_assistant import edgar
+
+    class Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(edgar, "_JSON_CACHE", {})
+    monkeypatch.setattr(edgar, "_JSON_FETCHED_AT", {})
+    monkeypatch.setattr(edgar.urllib.request, "urlopen",
+                        lambda req, timeout=0: Resp(_json.dumps({"u": req.full_url}).encode()))
+    for i in range(edgar._JSON_CACHE_MAX + 10):
+        edgar._fetch_json(f"https://data.sec.gov/x/{i}.json")
+    assert len(edgar._JSON_CACHE) == edgar._JSON_CACHE_MAX
+    assert "https://data.sec.gov/x/0.json" not in edgar._JSON_CACHE, "oldest evicted"
+
+
+def test_a_company_reporting_revenue_under_another_tag_is_ranked(monkeypatch):
+    """Ranking used only the first revenue tag: NVDA, which reports `Revenues`,
+    "didn't report", and everyone else was ranked among a subset."""
+    edgar._TICKER_CIK.clear()
+    tickers = {"0": {"cik_str": 1, "ticker": "NV", "title": "Nv Co"}}
+    first = {"data": [{"entityName": "Big Co", "cik": 2, "val": 900e9},
+                      {"entityName": "Small Co", "cik": 3, "val": 50e9}]}
+    other = {"data": [{"entityName": "Nv Co", "cik": 1, "val": 130e9},
+                      {"entityName": "Big Co", "cik": 2, "val": 900e9}]}
+
+    def fetch(url, **kw):
+        if "company_tickers.json" in url:
+            return tickers
+        if "frames/us-gaap/Revenues/" in url:
+            return other
+        if "frames/us-gaap/RevenueFromContractWithCustomerExcludingAssessedTax/" in url:
+            return first
+        return {}
+
+    monkeypatch.setattr(edgar, "_fetch_json", fetch)
+    out = edgar.sec_metric_rank("NV", concept="Revenue", year=2024)
+    assert "#2 of 3" in out and "us-gaap:Revenues" in out, out
+
+
+def test_an_amended_form_4_is_not_counted_twice(monkeypatch):
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["4/A", "4"],
+        "filingDate": ["2025-05-02", "2025-04-30"],
+        "accessionNumber": ["0000320193-25-000202", "0000320193-25-000201"],
+        "primaryDocument": ["form4amend.xml", "form4a.xml"],
+        "primaryDocDescription": ["", ""], "items": ["", ""],
+    }}}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs})
+    xml = _form4_xml("Cook Timothy D", "<isOfficer>1</isOfficer><officerTitle>CEO</officerTitle>",
+                     _txn("2025-04-30", "S", 50000, "D", "170.00"))
+    monkeypatch.setattr(edgar, "_fetch_text", lambda url, **kw: xml)
+    out = edgar.insider_transactions("AAPL")
+    assert "last 1 filing" in out, out
+
+
+def test_an_8k_excerpt_reads_the_press_release_exhibit(monkeypatch):
+    """An 8-K's primary document is a cover page; the release is EX-99.1. Reading
+    only the cover made the keyless transcript stand-in one in name only."""
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["8-K", "8-K"],
+        "filingDate": ["2026-02-10", "2026-01-29"],
+        "accessionNumber": ["0000320193-26-000020", "0000320193-26-000010"],
+        "primaryDocument": ["d1.htm", "d2.htm"],
+        "primaryDocDescription": ["", ""], "items": ["5.02", "2.02,9.01"],
+    }}}
+    index = {"directory": {"item": [{"name": "d2.htm"}, {"name": "aapl-ex991.htm"},
+                                    {"name": "R1.xml"}]}}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs,
+                                "000032019326000010/index.json": index})
+    pages = {"d2.htm": "<p>Item 2.02 Results of Operations. See Exhibit 99.1.</p>",
+             "aapl-ex991.htm": "<p>Revenue grew 8% year over year on strong services "
+                               "demand, and for the March quarter we expect gross margin "
+                               "guidance of 47 to 48 percent, with operating expenses "
+                               "between 15.6 and 15.8 billion dollars.</p>"}
+    monkeypatch.setattr(edgar, "_fetch_text",
+                        lambda url, **kw: next((v for k, v in pages.items() if url.endswith(k)), ""))
+    out = edgar.sec_filing_excerpt("AAPL", "gross margin guidance", form_type="8-K")
+    assert "filed 2026-01-29" in out, "the earnings 8-K, not the newer director change"
+    assert "47 to 48 percent" in out

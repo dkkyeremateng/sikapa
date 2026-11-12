@@ -267,13 +267,12 @@ def test_performance_history_drops_overlaps_and_flags_gaps(monkeypatch, tmp_path
 
     hist = statements.query_performance_history()
     kept_dates = [p["date"] for p in hist["points"]]
-    # The annual 2024 overlaps the March 2024 slice, so one of them is dropped.
-    assert len(hist["dropped"]) == 1
-    # Activity-selection keeps the finer (shorter) March slice over the full year.
-    assert "January 1, 2024 - December 31, 2024" in hist["dropped"]
+    # The annual 2024 overlaps the March 2024 slice, so one of them is dropped:
+    # the one covering less. Keeping March lost the other eleven months.
+    assert hist["dropped"] == ["March 1, 2024 - March 31, 2024"]
     # 2025 is missing entirely -> a multi-hundred-day gap is reported.
     assert hist["gaps"] and hist["gaps"][0]["days"] > 300
-    assert "2024-03-31" in kept_dates and "2026-06-30" in kept_dates
+    assert "2024-12-31" in kept_dates and "2026-06-30" in kept_dates
 
     # The gap is tagged with the point index the break falls after.
     assert "after_point" in hist["gaps"][0]
@@ -972,3 +971,109 @@ def test_history_is_covered_only_back_to_a_gap(monkeypatch, tmp_path):
         "February 1, 2025 - February 28, 2025",
         'Trades,Data,Order,Stocks,USD,U1,VOO,"2025-02-10, 10:00:00",1,500,500,-500,0,500,0,0,\n'))
     assert s.covered_since() == "2025-01-01"
+
+
+def _trade(sym, when, qty, price, proceeds, comm, basis, code, currency="USD"):
+    return {"asset_category": "Stocks", "currency": currency, "account": "U1", "symbol": sym,
+            "datetime": f"{when}, 10:00:00", "quantity": qty, "trade_price": price,
+            "close_price": 0, "proceeds": proceeds, "comm_fee": comm, "basis": basis,
+            "realized_pl": 0, "mtm_pl": 0, "code": code}
+
+
+def _store(trades):
+    from financial_research_assistant import statements as s
+
+    s.store_statement({"account": "U1", "period": "January 1, 2026 - June 30, 2026",
+                       "twrr": "", "trades": trades, "cash": [], "positions": [],
+                       "instruments": [], "nav": [], "corporate_actions": []})
+
+
+def test_a_short_sale_and_its_cover_realize_the_gain(monkeypatch, tmp_path):
+    """Sell a call for $300, buy it back for $100: it realized 0, reported $300 as
+    unmatched, and left a phantom long contract."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    _store([_trade("XYZ C50", "2026-02-02", -1, 3.0, 300.0, -0.65, -299.35, "O"),
+            _trade("XYZ C50", "2026-03-02", 1, 1.0, -100.0, -0.65, 100.65, "C")])
+    g = s.realized_gains()
+    assert g["total_realized"] == pytest.approx(198.70) and g["unmatched_proceeds"] == 0.0
+    assert g["by_symbol"]["XYZ C50"]["short_term"] == pytest.approx(198.70)
+    assert s.open_lots() == {}, "no phantom position"
+
+
+def test_an_open_short_is_a_negative_lot(monkeypatch, tmp_path):
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    _store([_trade("XYZ", "2026-02-02", -10, 50.0, 500.0, -1.0, -499.0, "O")])
+    [lot] = s.open_lots()["XYZ"]
+    assert lot["qty"] == -10 and lot["cost_per_share"] == pytest.approx(49.9)
+
+
+def test_a_sale_before_the_imported_history_is_still_unmatched(monkeypatch, tmp_path):
+    """Without the opening code a lot-less sale is shares bought before the first
+    statement, not a short: reported as unmatched, never as a short position."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    _store([_trade("OLD", "2026-02-02", -10, 50.0, 500.0, -1.0, -400.0, "C;P")])
+    assert s.realized_gains()["unmatched_proceeds"] == pytest.approx(499.0)
+    assert s.open_lots() == {}
+
+
+def test_gains_in_two_currencies_are_totalled_per_currency(monkeypatch, tmp_path):
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    _store([_trade("SAP", "2026-02-02", 10, 100.0, -1000.0, 0.0, 1000.0, "O", "EUR"),
+            _trade("SAP", "2026-03-02", -10, 110.0, 1100.0, 0.0, -1000.0, "C", "EUR"),
+            _trade("KO", "2026-02-02", 10, 60.0, -600.0, 0.0, 600.0, "O"),
+            _trade("KO", "2026-03-02", -10, 65.0, 650.0, 0.0, -600.0, "C")])
+    g = s.realized_gains()
+    assert g["by_currency"] == {"EUR": {"realized": 100.0, "short_term": 100.0, "long_term": 0.0},
+                                "USD": {"realized": 50.0, "short_term": 50.0, "long_term": 0.0}}
+
+
+def test_the_tool_does_not_add_euros_to_dollars(monkeypatch, tmp_path):
+    import financial_research_assistant.tools as tools
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    _store([_trade("SAP", "2026-02-02", 10, 100.0, -1000.0, 0.0, 1000.0, "O", "EUR"),
+            _trade("SAP", "2026-03-02", -10, 110.0, 1100.0, 0.0, -1000.0, "C", "EUR"),
+            _trade("KO", "2026-02-02", 10, 60.0, -600.0, 0.0, 600.0, "O"),
+            _trade("KO", "2026-03-02", -10, 65.0, 650.0, 0.0, -600.0, "C")])
+    out = tools.realized_gains()
+    assert "TOTAL EUR +100.00" in out and "TOTAL USD +50.00" in out
+    assert "TOTAL +150.00" not in out
+
+
+def test_a_consolidated_statement_has_lots_and_gains(monkeypatch, tmp_path):
+    """Its key is "U7+U8" but each trade names U7 or U8, so both came back empty."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+    buy = dict(_trade("KO", "2026-02-02", 10, 60.0, -600.0, 0.0, 600.0, "O"), account="U7")
+    sell = dict(_trade("KO", "2026-03-02", -4, 65.0, 260.0, 0.0, -240.0, "C"), account="U7")
+    other = dict(_trade("MSFT", "2026-02-02", 1, 400.0, -400.0, 0.0, 400.0, "O"), account="U8")
+    s.store_statement({"account": "U7+U8", "accounts": ["U7", "U8"],
+                       "period": "January 1, 2026 - June 30, 2026", "twrr": "",
+                       "trades": [buy, sell, other], "cash": [], "positions": [],
+                       "instruments": [], "nav": [], "corporate_actions": []})
+    assert s.realized_gains()["total_realized"] == pytest.approx(20.0)
+    assert set(s.open_lots()) == {"KO", "MSFT"}
+
+
+
+def test_monthlies_covering_a_year_still_beat_its_annual(monkeypatch, tmp_path):
+    """Equal coverage: the finer periods win, as they always did."""
+    import calendar
+
+    from financial_research_assistant import statements
+
+    periods = [{"start": f"2025-{m:02d}-01",
+                "end": f"2025-{m:02d}-{calendar.monthrange(2025, m)[1]:02d}",
+                "twrr": 1.0, "period": f"m{m}"} for m in range(1, 13)]
+    annual = {"start": "2025-01-01", "end": "2025-12-31", "twrr": 12.0, "period": "annual"}
+    selected, dropped = statements._select_non_overlapping(periods + [annual])
+    assert [p["period"] for p in dropped] == ["annual"] and len(selected) == 12
