@@ -319,6 +319,19 @@ def _open_call(symbol: str, direction: str) -> dict[str, Any] | None:
                  and e.get("symbol") == symbol.upper() and e.get("verdict") == direction), None)
 
 
+def _supersede(old_id: str, new_id: str) -> None:
+    """Close ``old_id`` as replaced by ``new_id``. Not scored: the view it took is
+    no longer the agent's, and scoring it would count a reversal as a result."""
+    from . import journal
+
+    with journal._locked():  # pyright: ignore[reportPrivateUsage]
+        items = journal.load_entries()
+        for e in items:
+            if e.get("id") == old_id and e.get("status") == "open":
+                e["status"], e["superseded_by"] = "superseded", new_id
+        journal.save_entries(items)
+
+
 def candidates(book: dict[str, Any], prof: dict[str, Any], mode: str = "light",
                focus: str = "") -> tuple[list[Candidate], list[tuple[str, str]], str]:
     """``(kept, dropped, universe label)``: ranked candidates to evaluate, and
@@ -485,6 +498,15 @@ def validate_verdict(data: dict[str, Any], c: Candidate, evidence_ids: set[str])
         level = float(level) if level is not None else None
     except (TypeError, ValueError):
         level = None
+    if level is not None and not price:
+        # Only momentum and holding candidates carry a price. A quality pick at $100
+        # with a "bullish, invalidated below 250" level went in unchecked, and the
+        # next watcher pass announced the call broken minutes after it was made.
+        from . import journal
+
+        price, _ = journal._spot(c.symbol)  # pyright: ignore[reportPrivateUsage]
+        if not price:
+            level = None  # a level nobody can check is not recorded
     if level is not None and price:
         positive = _DIRECTION.get(verdict) == "bullish"
         wrong_side = (positive and level >= price) or (not positive and level <= price)
@@ -555,6 +577,17 @@ def _sector_weights(book: dict[str, Any]) -> dict[str, float]:
     return out
 
 
+def _excluded(prof: dict[str, Any], label: str) -> str:
+    """The excluded sector ``label`` falls in, or "". Compared without spaces or
+    case, so "Health care" in a profile matches "Healthcare" from Yahoo."""
+    flat = "".join(label.split()).lower()
+    for banned in prof.get("exclude_sectors") or []:
+        key = "".join(str(banned).split()).lower()
+        if key and key in flat:
+            return str(banned)
+    return ""
+
+
 def fit_check(idea: Idea, book: dict[str, Any], prof: dict[str, Any],
               sectors: dict[str, float]) -> str:
     """Why this idea doesn't fit the book, or ""."""
@@ -565,9 +598,8 @@ def fit_check(idea: Idea, book: dict[str, Any], prof: dict[str, Any],
     if c.kind == "stock":
         info = _info(c.symbol)
         sector = str(info.get("sector") or "")
-        for banned in prof.get("exclude_sectors") or []:
-            if banned and banned.lower() in f"{sector} {info.get('industry', '')}".lower():
-                return f"in an excluded sector ({sector})"
+        if hit := _excluded(prof, f"{sector} {info.get('industry', '')}"):
+            return f"in an excluded sector ({hit})"
         if sector and sectors.get(sector, 0.0) >= float(prof["max_sector_pct"]):
             return (f"{sector} is already {sectors[sector]:.1f}% of the book, at or over your "
                     f"{float(prof['max_sector_pct']):g}% sector cap")
@@ -575,6 +607,12 @@ def fit_check(idea: Idea, book: dict[str, Any], prof: dict[str, Any],
             return (f"already {c.facts['weight_pct']:.1f}% of the book, at or over your "
                     f"{float(prof['max_position_pct']):g}% position cap")
     else:
+        # A sector fund is that sector: XLE passed a profile excluding Energy.
+        from . import universes
+
+        sleeve = f"{c.sleeve} {(universes.fund(c.symbol) or {}).get('sleeve', '')}"
+        if hit := _excluded(prof, sleeve):
+            return f"in an excluded sector ({hit})"
         etf = c.facts.get("etf") or {}
         er = etf.get("expense_ratio_pct")
         if er is not None and er > float(prof["max_expense_ratio_pct"]):
@@ -654,6 +692,11 @@ async def run(mode: str = "light", fake: bool = False, focus: str = "",
                 # would restart its clock at today's price and score it twice.
                 idea.journal_id, idea.due = earlier["id"], earlier["due"]
                 continue
+            # The opposite view on the same symbol replaces the earlier call: kept
+            # open beside it, one of the two was certain to score as a hit.
+            opposite = await asyncio.to_thread(
+                _open_call, idea.candidate.symbol,
+                "bearish" if direction == "bullish" else "bullish")
             try:
                 entry = await asyncio.to_thread(
                     journal.record_call, idea.candidate.symbol, direction, idea.thesis,
@@ -665,6 +708,8 @@ async def run(mode: str = "light", fake: bool = False, focus: str = "",
                     recommendation=idea.verdict, shadow=shadow() or None,
                 )
                 idea.journal_id, idea.due = entry["id"], entry["due"]
+                if opposite:
+                    await asyncio.to_thread(_supersede, str(opposite["id"]), str(entry["id"]))
             except ValueError as exc:
                 dropped.append((idea.candidate.symbol, f"not recorded: {exc}"))
     record_ = {
