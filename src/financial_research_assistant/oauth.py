@@ -1208,7 +1208,15 @@ def ensure_fresh(scope: str = "default") -> None:
             return
         try:
             fresh = provider.refresh(cred)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - keep the old credential (see above)
+            import sys
+
+            from .errors import describe_error
+
+            # Logged: silent, the next sign of it was a 401 mid-turn with nothing
+            # to say the refresh had been failing.
+            print(f"oauth: refreshing the {cred.get('provider')} sign-in failed: "
+                  f"{describe_error(exc)}", file=sys.stderr)
             return
         if fresh and fresh != cred:
             _store_refreshed(target, fresh)

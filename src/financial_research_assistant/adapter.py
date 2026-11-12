@@ -22,6 +22,7 @@ answer (so the 💭 panel is exercised offline), and a real reasoning model's
 """
 
 from typing import Any
+import asyncio
 import contextlib
 import datetime
 import itertools
@@ -466,7 +467,8 @@ async def compact_session(
     # same checkpoint without opening an IBKR MCP session just to edit state. The
     # durable saver is opened for the read+rewrite and closed here, in this task.
     async with checkpointer_ctx(session_id, model, think) as checkpointer:
-        graph = _build_real_graph(model, think, extra_tools=[], checkpointer=checkpointer)
+        graph = await asyncio.to_thread(
+            _build_real_graph, model, think, extra_tools=[], checkpointer=checkpointer)
         return await _rewrite_thread(graph, "model", config, fake, model, keep_last)
 
 

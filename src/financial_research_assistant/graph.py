@@ -16,6 +16,7 @@ in-memory checkpointer (``MemorySaver``), so every invocation that reuses a
 """
 
 from typing import Any, Literal
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -812,8 +813,12 @@ async def real_graph_session(
     shutdown). The adapter enters this once per turn; the warm session is reused
     for every tool call within that turn."""
     async with ibkr_tools_session() as ibkr_tools:
-        yield _build_real_graph(
-            model, think, extra_tools=ibkr_tools, checkpointer=checkpointer
+        # Built in a thread: building the model client may refresh an OAuth token
+        # (a locked HTTP call of up to 30s) or run a `!cmd` key helper, and on the
+        # always-on server that stalled Telegram and every other loop meanwhile.
+        yield await asyncio.to_thread(
+            _build_real_graph, model, think, extra_tools=ibkr_tools,
+            checkpointer=checkpointer,
         )
 
 
