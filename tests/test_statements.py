@@ -428,8 +428,32 @@ def test_history_queries_are_account_scoped(monkeypatch, tmp_path):
     # NAV history for AAA has its own points and doesn't include BBB's 500.
     navs_a = [p["nav"] for p in s.query_nav_history(account="AAA")]
     assert 500.0 not in navs_a and 1300.0 in navs_a
-    # Default account = newest import's account (BBB was imported last).
-    assert s.query_performance_history()["points"][-1]["index"] == b
+    # Default account = the one with the newest statement: AAA reaches 2025,
+    # although BBB's 2024 statement was imported after it.
+    assert s.default_account() == "AAA"
+    assert s.query_performance_history()["points"][-1]["index"] == a
+
+
+def test_backfilling_an_old_statement_does_not_replace_todays_positions(monkeypatch, tmp_path):
+    """lot_coverage tells the user to import older statements. Doing so made the
+    2025 annual the "newest" import, and its positions became today's."""
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_STATEMENTS_DB", str(tmp_path / "s.db"))
+
+    def with_position(period, sym):
+        return (f'Statement,Data,Period,"{period}"\n'
+                "Open Positions,Header,DataDiscriminator,Asset Category,Currency,Symbol,"
+                "Quantity,Mult,Cost Price,Cost Basis,Close Price,Value,Unrealized P/L,Code\n"
+                f"Open Positions,Data,Summary,Stocks,USD,{sym},10,1,50,500,60,600,100,\n"
+                "Dividends,Header,Currency,Account,Date,Description,Amount\n"
+                "Dividends,Data,USD,U1,2025-06-01,X Cash Dividend,1\n")
+
+    s.import_statement(with_position("January 1, 2026 - October 31, 2026", "NOW"))
+    s.import_statement(with_position("January 1, 2025 - December 31, 2025", "OLD"))
+    assert [p["symbol"] for p in s.query_positions()] == ["NOW"]
+    assert s.positions_as_of() == "2026-10-31"
+    assert s.list_imports()[0]["period"].startswith("January 1, 2026")
 
 
 def test_query_transactions_limit_is_recency_across_types(monkeypatch, tmp_path):
