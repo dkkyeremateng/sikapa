@@ -47,6 +47,7 @@ import calendar
 import json
 import os
 import re
+import secrets
 from contextlib import contextmanager
 from datetime import date, datetime, time as dtime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -171,6 +172,26 @@ def load_tasks() -> list[dict[str, Any]]:
     return [t for t in _read_records() if _is_task(t)]
 
 
+#: A non-task record holding the highest task number ever issued. ``save_tasks``
+#: carries unrecognised records through, so it survives every rewrite.
+_ID_MARK = "id-high-water"
+
+
+def _id_number(record: Any) -> int:
+    tid = str(record.get("id", "")) if isinstance(record, dict) else ""
+    return int(tid[1:]) if tid.startswith("s") and tid[1:].isdigit() else 0
+
+
+def _high_water(records: list[Any]) -> int:
+    for r in records:
+        if isinstance(r, dict) and r.get("meta") == _ID_MARK:
+            try:
+                return int(r.get("last") or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
 def save_tasks(items: list[dict[str, Any]]) -> None:
     """Write the store ``0600``, atomically — a prompt naming holdings is never
     briefly world-readable, and a tick reading a half-written file would see "no
@@ -181,7 +202,12 @@ def save_tasks(items: list[dict[str, Any]]) -> None:
     after a hand-edit that dropped a quote would erase that entry permanently — the
     user's typo silently deleting their task instead of leaving it to be fixed.
     """
-    unknown = [r for r in _read_records() if not _is_task(r)]
+    records = _read_records()
+    unknown = [r for r in records if not _is_task(r)
+               and not (isinstance(r, dict) and r.get("meta") == _ID_MARK)]
+    mark = max([_high_water(records)] + [_id_number(t) for t in items])
+    if mark:
+        unknown.append({"meta": _ID_MARK, "last": mark})
     write_private(
         tasks_file(), json.dumps(items + unknown, indent=2) + "\n", prefix=".tasks-"
     )
@@ -256,13 +282,13 @@ def runner_warning() -> str:
 
 
 def _next_id(items: list[dict[str, Any]]) -> str:
-    """A short stable id (``s1``, ``s2``, …), one past the current max — matching
-    the ``a1``/``a2`` scheme alert rules already use."""
-    n = 0
-    for t in items:
-        tid = str(t.get("id", ""))
-        if tid.startswith("s") and tid[1:].isdigit():
-            n = max(n, int(tid[1:]))
+    """A short stable id (``s1``, ``s2``, …), one past the highest EVER issued —
+    matching the ``a1``/``a2`` scheme alert rules already use.
+
+    One past the current max reissued a cancelled task's id: cancel s2 while it
+    runs, schedule the corrected prompt, get s2 again, and the old run's result
+    landed on the new task and marked it done before it ever ran."""
+    n = max([_high_water(_read_records())] + [_id_number(t) for t in items])
     return f"s{n + 1}"
 
 
@@ -809,6 +835,10 @@ def claim_due(now: datetime | None = None, limit: int | None = None) -> list[dic
                 continue
             t["status"] = "running"
             t["claimed_at"] = now.isoformat()
+            # Which run this claim belongs to. A result or release carrying another
+            # claim (a run whose claim expired and was taken over, or one that
+            # already recorded) is ignored, not written over the current state.
+            t["claim"] = secrets.token_hex(6)
             claimed.append(dict(t))
         if claimed or changed:
             save_tasks(items)
@@ -839,30 +869,39 @@ def unfinished_run(task: dict[str, Any]) -> str:
     return ""
 
 
-def release(task_id: str) -> None:
+def release(task_id: str, claim: str = "") -> None:
     """Put a claimed task back to pending, unchanged.
 
     For the interrupted case — Ctrl-C, a killed watcher — where the run never
     reached a verdict. Without it the task would sit in "running" forever and never
-    be claimed again.
+    be claimed again. The claim is kept: a timeout cancels the run (which releases
+    it) and THEN records the attempt as failed, under the same claim.
     """
     with _locked():
         items = load_tasks()
         for t in items:
-            if str(t.get("id")) == str(task_id) and t.get("status") == "running":
+            if (str(t.get("id")) == str(task_id) and t.get("status") == "running"
+                    and (not claim or t.get("claim") == claim)):
                 t["status"] = "pending"
                 t.pop("claimed_at", None)
                 save_tasks(items)
                 return
 
 
-def record_result(task_id: str, ok: bool, result: str, now: datetime | None = None) -> dict[str, Any] | None:
+def record_result(task_id: str, ok: bool, result: str, now: datetime | None = None,
+                  claim: str = "") -> dict[str, Any] | None:
     """Write back the outcome of a run and schedule (or retire) the task.
 
     Success: a recurring task moves to its next occurrence, a one-shot is done.
     Failure: retried on the next tick until ``MAX_ATTEMPTS``, then parked as
     ``error`` — a prompt that fails every time (a deleted document, a bad ticker)
     otherwise bills a model run on every tick for the rest of time.
+
+    ``claim`` is the token ``claim_due`` handed this run; a result whose claim is
+    no longer the task's is stale and returns None without writing. Recording
+    consumes the claim, so a run can record once: a timeout that fired during
+    delivery used to record a second time and flip a finished task back to
+    pending, re-running (and re-billing) the whole analysis.
     """
     now = now or now_utc()
     with _locked():
@@ -870,7 +909,10 @@ def record_result(task_id: str, ok: bool, result: str, now: datetime | None = No
         for t in items:
             if str(t.get("id")) != str(task_id):
                 continue
+            if claim and t.get("claim") != claim:
+                return None
             t.pop("claimed_at", None)
+            t.pop("claim", None)
             t["runs"] = int(t.get("runs") or 0) + 1
             t["last_run"] = now.isoformat()
             t["last_ok"] = bool(ok)

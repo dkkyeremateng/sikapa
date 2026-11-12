@@ -367,7 +367,7 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
     except asyncio.CancelledError:
         # Ctrl-C or a killed watcher: hand the task back rather than leaving it
         # stuck in "running", which nothing would ever claim again.
-        tasks.release(tid)
+        tasks.release(tid, str(task.get("claim") or ""))
         raise
     except Exception as exc:  # noqa: BLE001 - a task must not take down the tick
         from .adapter import describe_error
@@ -388,7 +388,7 @@ async def run_task(task: dict[str, Any], fake: bool = False) -> dict[str, Any]:
 
     # Record BEFORE delivering: whether this is the last attempt decides whether
     # the user hears about the failure now or after the retries are exhausted.
-    record = tasks.record_result(tid, ok, reason or answer)
+    record = tasks.record_result(tid, ok, reason or answer, claim=str(task.get("claim") or ""))
     if (record is not None and not ok and record.get("status") == "pending"
             and not record.get("exhausted")):
         # Silent on purpose: three phone notifications for one task that is still
@@ -554,7 +554,7 @@ async def run_due(
     results = []
     for task in claimed:
         if stop is not None and stop.is_set():
-            tasks.release(str(task.get("id")))
+            tasks.release(str(task.get("id")), str(task.get("claim") or ""))
             continue
         try:
             results.append(
@@ -570,7 +570,10 @@ async def run_due(
             reason = f"timed out after {job_timeout_seconds() / 60:.0f} minutes"
             _log(f"  ✗ task {tid}: {reason}")
             try:
-                tasks.record_result(tid, False, reason)
+                # Under the run's claim: if the run had already recorded (the
+                # timeout fired during delivery), the claim is spent and this is
+                # ignored instead of turning a finished task back into a retry.
+                tasks.record_result(tid, False, reason, claim=str(task.get("claim") or ""))
             except Exception:  # noqa: BLE001 - the store may be what's stuck
                 pass
             results.append(
@@ -593,7 +596,7 @@ async def run_due(
                 # back to pending and pay for the same analysis a second time.
                 stored = tasks.get_task(tid)
                 if stored is not None and stored.get("status") == "running":
-                    tasks.record_result(tid, False, reason)
+                    tasks.record_result(tid, False, reason, claim=str(task.get("claim") or ""))
             except Exception:  # noqa: BLE001 - the store itself may be what failed
                 _log(f"  could not record the failure for task {tid}; its claim "
                      "will expire and the task will be retried")
