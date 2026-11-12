@@ -40,6 +40,7 @@ try:  # aggregates token usage across the model invocation(s) in the turn
 except Exception:  # pragma: no cover - older langchain-core
     get_usage_metadata_callback = None
 
+from .errors import describe_error  # noqa: F401 - re-exported; callers import it from here
 from .events import AgentEvent, format_duration
 from .graph import build_graph, message_text, real_graph_session, summarize_messages
 from .graph import _build_real_graph  # no-MCP graph for state read/rewrite
@@ -47,36 +48,6 @@ from .pricing import context_cap
 from .memory import get_memory, inject, recall_facts
 
 AGENT_NAME = "Agent"  # single-agent scaffold: one name, depth stays 0
-
-
-def describe_error(exc: BaseException) -> str:
-    """Flatten an exception to something a user can act on.
-
-    The graph runs inside anyio task groups (the MCP session), so a failure
-    anywhere arrives wrapped: ``str()`` gives "unhandled errors in a TaskGroup
-    (1 sub-exception)", which is true and useless — the actual 404 or auth error
-    is a leaf several levels down. Walk to the leaves and report those, keeping
-    the type name because "NotFoundError" vs "AuthenticationError" is usually the
-    whole diagnosis. Credentials are masked: an httpx error can carry the request
-    headers.
-    """
-    from .auth import redact
-
-    leaves: list[str] = []
-
-    def walk(e: BaseException, depth: int = 0) -> None:
-        subs = getattr(e, "exceptions", None)  # ExceptionGroup / anyio group
-        if subs and depth < 5:
-            for sub in subs:
-                walk(sub, depth + 1)
-            return
-        text = str(e).strip()
-        leaves.append(f"{type(e).__name__}: {text}" if text else type(e).__name__)
-
-    walk(exc)
-    # dict.fromkeys dedupes while keeping order — a fan-out often fails identically
-    # in several tasks at once.
-    return redact("; ".join(dict.fromkeys(leaves)) or type(exc).__name__)
 
 # Fake graphs are cached (cheap, and their MemorySaver keeps fake-mode history).
 # Real turns build the graph PER TURN inside a per-turn IBKR MCP session (see

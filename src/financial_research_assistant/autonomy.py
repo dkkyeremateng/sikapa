@@ -52,7 +52,7 @@ async def _note_failure(exc: BaseException, purpose: str) -> None:
     expired key quietly turned every report into the commentary-free fallback and
     every event note into bare facts, with nothing in the log or /status. Logged
     each time, recorded for /status, and pushed once a day while it lasts."""
-    from .adapter import describe_error
+    from .errors import describe_error
     from .remedies import advice
 
     error = describe_error(exc)
