@@ -364,3 +364,13 @@ def test_dispatch_tools_registered_with_async_impl():
     assert all(t.coroutine is not None for t in by_name.values())
     names = {getattr(t, "name", None) or getattr(t, "__name__", "") for t in catalog.TOOLS}
     assert {"dispatch_subagent", "dispatch_subagents"} <= names
+
+
+def test_tools_that_send_or_write_are_withheld_from_subagents():
+    """render_review and render_stock_report render AND send; export_data writes
+    wherever it is told. A task matching no group falls back to the full pool."""
+    from financial_research_assistant import subagents
+
+    names = {getattr(t, "name", getattr(t, "__name__", "")) for t in
+             subagents._subagent_tools("Write up NVDA and send it to me")}
+    assert not names & {"render_review", "render_stock_report", "export_data"}

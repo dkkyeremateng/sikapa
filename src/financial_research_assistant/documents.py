@@ -327,6 +327,26 @@ def _cite(r: dict[str, Any]) -> str:
 
 
 # --- Tools -------------------------------------------------------------------
+#: What ingest reads. Anything else was read as text too, so ``~/.env`` or the
+#: assistant's own credential stores could be ingested and quoted back.
+DOCUMENT_SUFFIXES = frozenset({".txt", ".md", ".markdown", ".html", ".htm", ".pdf"})
+
+
+def _refuse(p: Path) -> str:
+    """Why ``p`` may not be ingested, or "" when it may."""
+    from .storage import state_dir
+
+    if p.suffix.lower() not in DOCUMENT_SUFFIXES:
+        return (f"{p.name} isn't a supported document type. Ingest reads "
+                f"{', '.join(sorted(DOCUMENT_SUFFIXES))} files.")
+    resolved = p.resolve()
+    if any(part.startswith(".") for part in resolved.parts[1:]):
+        return f"{p.name} is in a hidden file or folder, which ingest does not read."
+    if resolved.is_relative_to(state_dir().resolve()):
+        return "That file is part of the assistant's own state, which ingest does not read."
+    return ""
+
+
 def ingest_document(path: str) -> str:
     """Ingest a local document so it can be queried with ``ask_document``. Give a
     file path; supported types are plain text (.txt), Markdown (.md), HTML
@@ -340,6 +360,8 @@ def ingest_document(path: str) -> str:
     p = Path(raw)
     if not p.exists() or not p.is_file():
         return f"File not found: {path}. Give a path to a local .txt/.md/.html/.pdf file."
+    if refused := _refuse(p):
+        return refused
     try:
         pages = _extract_pages(p)
     except DocumentSupportError as e:
