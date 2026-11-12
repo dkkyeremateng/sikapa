@@ -213,3 +213,19 @@ def test_dcf_valuation_registered():
     names = {getattr(t, "name", getattr(t, "__name__", "")) for t in catalog.TOOLS}
     assert "dcf_valuation" in names
     assert valuation.dcf_valuation in valuation.VALUATION_TOOLS
+
+
+def test_debt_is_not_charged_twice(monkeypatch):
+    """Operating cash flow is after interest. Discounting it at a firm-wide rate
+    and then subtracting net debt charged the debt twice."""
+    from financial_research_assistant import valuation
+
+    facts = _facts({2024: 1000.0, 2025: 1100.0}, {2024: 200.0, 2025: 220.0})
+    def units(by_year):
+        return [{"form": "10-K", "fy": fy, "fp": "FY", "start": f"{fy}-01-01",
+                 "end": f"{fy}-12-31", "filed": f"{fy + 1}-02-01", "val": v}
+                for fy, v in by_year.items()]
+    facts["facts"]["us-gaap"]["InterestPaidNet"] = {"units": {"USD": units({2024: 100.0, 2025: 100.0})}}
+    monkeypatch.setattr(edgar, "_fetch_company_facts", lambda cik: facts)
+    [newest, *_rest] = valuation._fcf_history("0000000001", 5)
+    assert newest["fcf"] == pytest.approx(1100.0 + 100.0 * 0.79 - 220.0)
