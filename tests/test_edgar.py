@@ -725,3 +725,29 @@ def test_an_amended_form_4_is_not_counted_twice(monkeypatch):
     monkeypatch.setattr(edgar, "_fetch_text", lambda url, **kw: xml)
     out = edgar.insider_transactions("AAPL")
     assert "last 1 filing" in out, out
+
+
+def test_an_8k_excerpt_reads_the_press_release_exhibit(monkeypatch):
+    """An 8-K's primary document is a cover page; the release is EX-99.1. Reading
+    only the cover made the keyless transcript stand-in one in name only."""
+    subs = {"name": "Apple Inc.", "filings": {"recent": {
+        "form": ["8-K", "8-K"],
+        "filingDate": ["2026-02-10", "2026-01-29"],
+        "accessionNumber": ["0000320193-26-000020", "0000320193-26-000010"],
+        "primaryDocument": ["d1.htm", "d2.htm"],
+        "primaryDocDescription": ["", ""], "items": ["5.02", "2.02,9.01"],
+    }}}
+    index = {"directory": {"item": [{"name": "d2.htm"}, {"name": "aapl-ex991.htm"},
+                                    {"name": "R1.xml"}]}}
+    _with_tickers(monkeypatch, {"submissions/CIK0000320193": subs,
+                                "000032019326000010/index.json": index})
+    pages = {"d2.htm": "<p>Item 2.02 Results of Operations. See Exhibit 99.1.</p>",
+             "aapl-ex991.htm": "<p>Revenue grew 8% year over year on strong services "
+                               "demand, and for the March quarter we expect gross margin "
+                               "guidance of 47 to 48 percent, with operating expenses "
+                               "between 15.6 and 15.8 billion dollars.</p>"}
+    monkeypatch.setattr(edgar, "_fetch_text",
+                        lambda url, **kw: next((v for k, v in pages.items() if url.endswith(k)), ""))
+    out = edgar.sec_filing_excerpt("AAPL", "gross margin guidance", form_type="8-K")
+    assert "filed 2026-01-29" in out, "the earnings 8-K, not the newer director change"
+    assert "47 to 48 percent" in out

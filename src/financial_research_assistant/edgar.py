@@ -165,6 +165,24 @@ def _cik_for(symbol: str) -> str | None:
     return _load_ticker_map().get(symbol.strip().upper())
 
 
+def _exhibit_texts(cik: str, accession: str, limit: int = 3) -> list[tuple[str, str]]:
+    """``(file name, text)`` for a filing's EX-99 exhibits (an 8-K's press
+    release), from the filing's index; ``[]`` when there are none."""
+    folder = _filing_url(cik, accession, "")
+    if not folder:
+        return []
+    items = ((_fetch_json(folder + "index.json").get("directory") or {}).get("item") or [])
+    names = [str(i.get("name") or "") for i in items if isinstance(i, dict)]
+    exhibits = [n for n in names if re.search(r"ex-?99", n, re.I)
+                and n.lower().endswith((".htm", ".html", ".txt"))]
+    out = []
+    for n in exhibits[:limit]:
+        body = _fetch_text(folder + n)
+        if body:
+            out.append((n, _html_to_text(body)))
+    return out
+
+
 def _filing_url(cik: str, accession: str, doc: str) -> str:
     """Build the public EDGAR Archives URL for a filing's primary document."""
     acc = accession.replace("-", "")
@@ -941,6 +959,11 @@ def sec_filing_excerpt(symbol: str, query: str, form_type: str = "10-K",
     name, filings = _submission_recent(cik)
     ft = form_type.strip().upper() or "10-K"
     match = _latest_form(filings, ft)
+    if ft == "8-K":
+        # The earnings release when there is one: the newest 8-K is as likely a
+        # director change, and an excerpt request for "guidance" wants results.
+        match = next((f for f in filings if f["form"].strip().upper() == "8-K"
+                      and "2.02" in str(f.get("items") or "")), match)
     if not match:
         return f"No recent {ft} filing found for {name or sym} ({sym})."
     url = _filing_url(cik, match["accession"], match["doc"])
@@ -948,7 +971,14 @@ def sec_filing_excerpt(symbol: str, query: str, form_type: str = "10-K",
     if not doc:
         return (f"Couldn't fetch the {ft} document for {sym} (it may be very large "
                 f"or unavailable). Filing: {url}")
-    passages = _passages(_html_to_text(doc), query, max(1, min(int(max_passages or 3), 5)))
+    text = _html_to_text(doc)
+    if ft == "8-K":
+        # An 8-K's primary document is a cover page; the press release, with
+        # management's commentary on the quarter, is exhibit 99. Reading only the
+        # cover made this the keyless transcript stand-in in name only.
+        for exhibit, body in _exhibit_texts(cik, match["accession"]):
+            text += f"\n\n[{exhibit}]\n{body}"
+    passages = _passages(text, query, max(1, min(int(max_passages or 3), 5)))
     if not passages:
         return (f"No passage in {sym}'s {ft} ({match['date']}) matched {query!r}. "
                 f"Try different terms. Filing: {url}")
