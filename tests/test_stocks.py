@@ -309,3 +309,26 @@ def test_quarters_are_named_in_the_companys_fiscal_calendar():
     assert stocks._quarter_label("2026-01-03", 12) == "Q4 2025"
     assert stocks._quarter_label("2026-06-30", 12) == "Q2 2026"
     assert stocks._quarter_label("2026-06-30") == "Q2 2026", "no fiscal year known: calendar"
+
+
+def test_a_full_year_reported_after_the_quarter_is_said(monkeypatch):
+    """Quarters come from 10-Qs and a fiscal Q4 has none, so after the 10-K the
+    "latest results" were the prior Q3 with nothing saying a year had been
+    reported since."""
+    facts = _facts()
+    facts["facts"]["us-gaap"]["Revenues"]["units"]["USD"].append(
+        {"form": "10-K", "start": "2026-01-01", "end": "2026-12-31", "val": 21e9,
+         "filed": "2027-02-20"})
+    edgar._TICKER_CIK.clear()
+    payloads = {"company_tickers.json": _TICKERS, "companyfacts": facts}
+    monkeypatch.setattr(edgar, "_fetch_json",
+                        lambda url, timeout=20.0: next((v for k, v in payloads.items() if k in url), {}))
+    monkeypatch.setattr(tools, "_fetch_daily", lambda sym, days, **kw: _prices())
+    b = stocks.build_stock_brief("FISV")
+    assert b["facts"]["newer_annual_end"] == "2026-12-31"
+    assert "a full year ending 2026-12-31 has been reported since" in b["subtitle"]
+
+
+def test_no_note_when_the_quarter_is_the_newest(brief):
+    assert brief["facts"]["newer_annual_end"] is None
+    assert "reported since" not in brief["subtitle"]

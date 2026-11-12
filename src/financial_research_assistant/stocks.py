@@ -193,6 +193,7 @@ def _filing_facts(symbol: str, quarters: int) -> dict[str, Any]:
         "basis": "GAAP as-reported (10-Q XBRL)",
         "quarter_end": newest,
         "fy_end_month": edgar.fiscal_year_end_month(facts),
+        "newer_annual_end": _newer_annual_end(edgar, facts, newest),
         "prior_end": prior,
         "year_ago_end": year_ago,
         "latest": figures(newest),
@@ -272,6 +273,18 @@ def _price_facts(symbol: str, days: int) -> dict[str, Any]:
 
 
 # --- the brief -----------------------------------------------------------------
+
+
+def _newer_annual_end(edgar: Any, facts: dict[str, Any], quarter_end: str) -> str:
+    """The end of a fiscal year reported (10-K) AFTER the newest 10-Q quarter, or "".
+
+    Quarters come from 10-Qs only, and a fiscal Q4 has none: from the 10-K until
+    the next 10-Q (February to May for a December year) the "latest results" were
+    the prior Q3, with nothing saying a full year had been reported since."""
+    tags = next(t for label, t, _u in edgar._KEY_CONCEPTS if label == edgar._REVENUE)
+    newest = next(iter(edgar._annual_facts(facts, tags, "USD")), None)
+    end = str((newest or {}).get("end") or "")[:10]
+    return end if end > quarter_end else ""
 
 
 def _quarter_label(end: str, fy_end_month: int | None = None) -> str:
@@ -389,12 +402,15 @@ headlines in its press release, which are usually different and are not carried 
         "title": f"{filings['name']} ({filings['symbol']}) — {quarter} Results",
         "subtitle": (
             f"{basis} · prices through {prices['last_day']}"
+            + (f" · a full year ending {newer} has been reported since (10-K)"
+               if (newer := filings.get("newer_annual_end")) else "")
         ),
         "highlights": highlights,
         "markdown": markdown,
         "facts": {
             "basis": basis,
             "quarter_end": filings["quarter_end"],
+            "newer_annual_end": filings.get("newer_annual_end") or None,
             "year_ago_end": filings["year_ago_end"],
             "prior_end": filings["prior_end"],
             "revenue": latest["revenue"],
