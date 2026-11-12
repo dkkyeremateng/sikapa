@@ -39,6 +39,10 @@ class Finding:
     line: str
     value: float   # the size of the problem, in the finding's own unit
     step: float    # how much worse it must get to be raised again early
+    #: False for a call the data could not price this time. Never raised, but it
+    #: keeps its place: dropping it pruned the key, and the next week raised the
+    #: same call again as if it were new.
+    measured: bool = True
 
 
 def state_path():
@@ -113,6 +117,7 @@ def _calls_behind() -> list[Finding]:
         b0, _ = journal._price_on(bench, opened)  # pyright: ignore[reportPrivateUsage]
         b1, _ = journal._spot(bench)  # pyright: ignore[reportPrivateUsage]
         if not (entry and price and b0 and b1):
+            out.append(Finding(f"call:{e.get('id')}", "", 0.0, 0.0, measured=False))
             continue
         move, bench_move = (price / entry - 1) * 100, (b1 / b0 - 1) * 100
         behind = bench_move - move if verdict == "bullish" else move - bench_move
@@ -153,6 +158,8 @@ def to_raise(found: list[Finding], now: datetime | None = None) -> list[Finding]
     state = state if isinstance(state, dict) else {}
     out = []
     for f in found:
+        if not f.measured:
+            continue
         last = state.get(f.key)
         if isinstance(last, dict):
             try:
@@ -189,7 +196,7 @@ async def _job(task: dict[str, Any], fake: bool) -> jobs.JobResult:
 
 
 async def _cmd_checkin(_arg: str, _fake: bool) -> str:
-    found = await asyncio.to_thread(findings)
+    found = [f for f in await asyncio.to_thread(findings) if f.measured]
     if not found:
         return "Nothing to raise: the book is inside your caps and targets, and no open call is far behind."
     return message(found).replace("this week", "now")
