@@ -58,12 +58,12 @@ def _caps(book: dict[str, Any], prof: dict[str, Any],
         sym = h["symbol"]
         if (universes.asset_class_of(sym) == "us_equity" and not universes.fund(sym)
                 and h["weight_pct"] > cap):
-            out.append(Finding(f"cap:{sym}", f"{sym} is {h['weight_pct']:.1f}% of the book, "
+            out.append(Finding(f"cap:{sym}", f"{sym} is {h['weight_pct']:.1f}% of the account, "
                                f"over your {cap:g}% position cap.", h["weight_pct"], 1.0))
     sector_cap = float(prof["max_sector_pct"])
     for sector, weight in sorted(sectors.items(), key=lambda kv: -kv[1]):
         if weight > sector_cap:
-            out.append(Finding(f"sector:{sector}", f"{sector} is {weight:.1f}% of the book, "
+            out.append(Finding(f"sector:{sector}", f"{sector} is {weight:.1f}% of the account, "
                                f"over your {sector_cap:g}% sector cap.", weight, 2.0))
     return out
 
@@ -80,7 +80,7 @@ def _mix(book: dict[str, Any], prof: dict[str, Any]) -> list[Finding]:
             name = profile.ASSET_CLASSES.get(cls, cls)
             side = "over" if actual > target else "under"
             out.append(Finding(f"mix:{cls}", f"{name[:1].upper()}{name[1:]}: {actual:.0f}% of "
-                               f"the book against a {target:g}% target ({side} by "
+                               f"the account against a {target:g}% target ({side} by "
                                f"{abs(actual - target):.0f} points).",
                                abs(actual - target), 3.0))
     return out
@@ -103,7 +103,7 @@ def _calls_behind() -> list[Finding]:
         earliest[k] = e
     out = []
     for (sym, verdict), e in earliest.items():
-        entry = float(e.get("entry_price") or 0)
+        entry = journal.comparable_entry_price(e)
         try:
             opened = date.fromisoformat(str(e.get("entry_date"))[:10])
         except ValueError:

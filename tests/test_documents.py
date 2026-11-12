@@ -225,3 +225,28 @@ def test_a_chunk_without_an_embedding_stays_searchable(tmp_path, monkeypatch):
     monkeypatch.setattr(embeddings, "embed_query", lambda q: [1.0, 0.0])
     out = documents.ask_document("hydroelectric capacity")
     assert "[outage]" in out and "Hydroelectric" in out
+
+
+def test_ingest_reads_documents_not_secrets(tmp_path, monkeypatch):
+    """Any path used to be read as text, so ~/.env or the assistant's own token
+    stores could be ingested and then quoted back."""
+    from financial_research_assistant import documents, storage
+
+    monkeypatch.setenv("FINANCIAL_RESEARCH_HOME", str(tmp_path / "state"))
+    (tmp_path / "state").mkdir()
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=secret")
+    auth = storage.state_dir() / "notes.md"
+    auth.write_text("refresh_token: secret")
+    key = tmp_path / "id_ed25519"
+    key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----")
+    hidden = tmp_path / ".config" / "notes.md"
+    hidden.parent.mkdir()
+    hidden.write_text("secret")
+    assert "isn't a supported document type" in documents.ingest_document(str(env))
+    assert "isn't a supported document type" in documents.ingest_document(str(key))
+    assert "assistant's own state" in documents.ingest_document(str(auth))
+    assert "hidden file or folder" in documents.ingest_document(str(hidden))
+    ok = tmp_path / "letter.md"
+    ok.write_text("The fund returned nine percent over the year after fees.")
+    assert documents.ingest_document(str(ok)).startswith("Ingested 'letter'")

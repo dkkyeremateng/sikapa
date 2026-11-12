@@ -182,7 +182,14 @@ def load_book(account: str = "") -> dict[str, Any]:
 
     ``units`` is value / close price rather than the stored quantity, so a
     multiplier (options, some futures) is already inside it. Stocks, ETFs and
-    crypto are priced; anything else is counted in ``unpriced_value``."""
+    crypto are priced; anything else is counted in ``unpriced_value``.
+
+    ``weight_pct`` is a share of the whole ACCOUNT: priced holdings, unpriced
+    positions and the statement's cash. It used to be a share of the priced
+    holdings alone, so with 6% of the account in cash every weight read about 6%
+    high, and position caps, the target mix and the push threshold all measured
+    against a book smaller than the one held. ``total`` stays the priced
+    holdings, the figure reports show."""
     from . import statements
 
     account = account or statements.default_account() or ""
@@ -204,14 +211,21 @@ def load_book(account: str = "") -> dict[str, Any]:
         entry["units"] += value / close
         entry["value"] += value
     total = sum(e["value"] for e in book.values())
+    cash = sum(float(r.get("current_total") or 0.0)
+               for r in statements.query_nav(account=account or None)["rows"]
+               if str(r.get("asset_class") or "").strip().lower() == "cash")
+    whole = total + other_value + cash
+    base = whole if whole > 0 else total  # a margin loan bigger than the rest
     for e in book.values():
-        e["weight_pct"] = e["value"] / total * 100 if total else 0.0
+        e["weight_pct"] = e["value"] / base * 100 if base else 0.0
     return {
         "account": account,
         "as_of": _positions_as_of(account),
         "holdings": sorted(book.values(), key=lambda e: e["value"], reverse=True),
         "total": total,
         "unpriced_value": other_value,
+        "cash": cash,
+        "account_value": base,
     }
 
 
@@ -275,9 +289,9 @@ def _open_calls_moving(threshold: float = 10.0) -> list[dict[str, Any]]:
     series = _fetch_many([str(e.get("symbol")) for e in open_entries], 10)
     for e in open_entries:
         rows = series.get(str(e.get("symbol"))) or []
-        entry = float(e.get("entry_price") or 0)
-        if not rows or entry <= 0:
+        if not rows or not e.get("entry_price"):
             continue
+        entry = journal.comparable_entry_price(e)
         change = (rows[-1][1] / entry - 1) * 100
         if abs(change) >= threshold:
             out.append({**e, "since_entry_pct": change, "priced_on": rows[-1][0]})
@@ -725,7 +739,18 @@ _NAMED_NUMBERS = re.compile(
 _FIGURE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?")
 
 
+#: What turns a number into a measured figure: a percent, a currency sign, a unit.
+_UNIT_AFTER = re.compile(r"\s*(?:%|percent\b|pc\b|bps?\b|basis points?\b|points?\b|pts?\b|"
+                         r"[kmb]n?\b|x\b|times\b)", re.IGNORECASE)
+_UNIT_BEFORE = re.compile(r"[$€£¥]\s*$")
+
+
 def _numbers(text: str) -> list[tuple[str, float, int]]:
+    return [(t, v, d) for t, v, d, _unit in _numbers_with_units(text)]
+
+
+def _numbers_with_units(text: str) -> list[tuple[str, float, int, bool]]:
+    """``(text, value, decimals, has_unit)`` for every number in ``text``."""
     out = []
     for m in _FIGURE.finditer(text):
         raw = m.group(0).replace(",", "")
@@ -734,7 +759,9 @@ def _numbers(text: str) -> list[tuple[str, float, int]]:
         except ValueError:
             continue
         decimals = len(raw.split(".", 1)[1]) if "." in raw else 0
-        out.append((m.group(0), value, decimals))
+        unit = bool(_UNIT_AFTER.match(text, m.end())
+                    or _UNIT_BEFORE.search(text, max(0, m.start() - 3), m.start()))
+        out.append((m.group(0), value, decimals, unit))
     return out
 
 
@@ -743,15 +770,21 @@ def unsupported_figures(commentary: str, brief: Brief) -> list[str]:
 
     A figure is supported when some number on the sheet rounds to it at the
     precision it was written with — "0.8%" is the sheet's 0.84 — so the model may
-    round, but not compute. Small whole numbers (counts: "3 of 5 holdings") and
-    the digits of names and dates pass.
+    round, but not compute. Small whole numbers pass as counts ("3 of 5
+    holdings") only when bare: "fell 7%" or "$5" is a figure, and exempting it let
+    "your holdings fell 7%" through against a sheet showing +0.84%. The digits of
+    names and dates pass.
+
+    Direction is not checked: sheets write many moves as words ("down 1.2%"), so
+    a signed comparison would withhold good commentary more often than it caught
+    a bad one.
     """
     sheet = "\n".join([brief.highlights, brief.markdown, brief.message,
                        json.dumps(brief.facts, default=str)])
     allowed = [abs(v) for _s, v, _d in _numbers(_NAMED_NUMBERS.sub(" ", sheet))]
     bad = []
-    for text, value, decimals in _numbers(_NAMED_NUMBERS.sub(" ", commentary)):
-        if decimals == 0 and value <= 12:
+    for text, value, decimals, unit in _numbers_with_units(_NAMED_NUMBERS.sub(" ", commentary)):
+        if decimals == 0 and value <= 12 and not unit:
             continue
         if any(round(a, decimals) == round(value, decimals) for a in allowed):
             continue

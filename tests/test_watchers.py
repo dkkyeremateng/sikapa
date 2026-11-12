@@ -297,3 +297,15 @@ def test_what_was_not_pushed_appears_in_the_daily_report(world):
                   "digest")
     section = watchers._daily_section({"session": TODAY})
     assert section.startswith("## Also Noticed Today") and "KO: 3 insider" in section
+
+
+def test_a_split_is_not_announced_as_a_collapse(world, monkeypatch):
+    """After a 4-for-1 split the series reads a quarter of the entry price: the
+    watcher pushed "-75% since the bullish call" and "invalidated"."""
+    world["prices"]["AAPL"] = _series(1.0, 0.1)
+    world["prices"]["NVDA"] = [("2026-09-01", 100.0), ("2026-09-28", 104.0), ("2026-09-29", 106.0)]
+    journal.save_entries([{"id": "t1", "symbol": "NVDA", "verdict": "bullish",
+                           "status": "open", "entry_price": 400.0, "entry_date": "2026-09-01",
+                           "invalidation_price": 350.0}])
+    kinds = [e.kind for e, _d in _pass()]
+    assert "thesis_break" not in kinds and "thesis_move" not in kinds, kinds

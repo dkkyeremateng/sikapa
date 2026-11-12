@@ -8,6 +8,7 @@ fully exercised offline in tests by monkeypatching that fetch.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
 
@@ -20,6 +21,11 @@ def _current_price(sym: str, fallback: float | None = None) -> float | None:
     if series:
         return series[-1][1]
     return fallback
+
+
+#: Asset categories whose lot cost is per contract: IBKR writes "OPT"/"FOP"/"FUT"
+#: in Flex and "Equity and Index Options"/"Futures" in the CSV.
+_CONTRACT = re.compile(r"\b(?:OPT|FOP|FUT|FSFOP|options?|futures?)\b", re.IGNORECASE)
 
 
 def tax_loss_harvest(
@@ -52,16 +58,21 @@ def tax_loss_harvest(
         )
     today = today or date.today()
     # Snapshot prices as a fallback when Yahoo has no live data for a symbol.
-    snap = {
-        (p.get("symbol") or "").upper(): p.get("close_price")
-        for p in statements.query_positions(account=account or None)
-    }
+    positions = statements.query_positions(account=account or None)
+    snap = {(p.get("symbol") or "").upper(): p.get("close_price") for p in positions}
+    # A lot's cost is per CONTRACT (×100 for an equity option) while the price is
+    # per share, so an option bought at $2.50 and still worth it read as a $248
+    # loss with a tax benefit to match. Listed as not assessed instead.
+    contracts = {(p.get("symbol") or "").upper() for p in positions
+                 if _CONTRACT.search(str(p.get("asset_category") or ""))}
     cutoff = today.toordinal() - 30
 
     results = []
     total_loss = total_benefit = 0.0
     no_price = []
     for sym, lots in lots_by_sym.items():
+        if sym.upper() in contracts:
+            continue
         price = _current_price(sym, snap.get(sym))
         if not price:
             no_price.append(sym)
@@ -122,6 +133,9 @@ def tax_loss_harvest(
     )
     if no_price:
         lines.append(f"note: no price data for {', '.join(no_price)} — skipped.")
+    if contracts & set(lots_by_sym):
+        lines.append(f"note: options/futures not assessed ({', '.join(sorted(contracts & set(lots_by_sym)))})"
+                     " — their cost is per contract, not per share.")
     lines.append(
         "(Estimate only — a loss is realized only if you sell; wash-sale rules also "
         "apply to repurchases within 30 days AFTER a sale. Not tax advice.)"

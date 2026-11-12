@@ -29,6 +29,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.messages import BaseMessage
@@ -179,9 +180,23 @@ async def checkpointer_ctx(session_id: str, model: str | None, think: bool):
         return
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    db.parent.mkdir(parents=True, exist_ok=True)
+    _private_db(db)
     async with AsyncSqliteSaver.from_conn_string(str(db)) as saver:
         yield saver
+
+
+def _private_db(db: Path) -> None:
+    """Create the checkpoint DB owner-only before SQLite opens it. It holds every
+    message of every conversation, account tool results included, and was created
+    0644 in a 0755 directory while the transcripts beside it are 0600. SQLite gives
+    its -wal and -shm files the database file's mode, so the file is what matters;
+    existing ones are tightened too."""
+    db.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not db.exists():
+        os.close(os.open(db, os.O_CREAT | os.O_WRONLY, 0o600))
+    for f in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+        if f.exists():
+            f.chmod(0o600)
 
 
 @contextlib.asynccontextmanager

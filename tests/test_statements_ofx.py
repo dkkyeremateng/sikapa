@@ -129,10 +129,11 @@ def test_parse_ofx_maps_trades_dividend_position_instrument():
     buy = next(t for t in parsed["trades"] if t["quantity"] > 0)
     sell = next(t for t in parsed["trades"] if t["quantity"] < 0)
     assert buy["symbol"] == "AMZN" and buy["quantity"] == 10.0
-    assert buy["proceeds"] == -1801.05 and buy["comm_fee"] == -1.05  # buy spends cash
+    # Gross, as IBKR reports it, with the commission alongside (TOTAL is net).
+    assert buy["proceeds"] == pytest.approx(-1800.0) and buy["comm_fee"] == -1.05
     # Sell is sign-normalized to negative shares / positive proceeds regardless of
     # the raw units sign the broker reported.
-    assert sell["quantity"] == -4.0 and sell["proceeds"] == 759.0
+    assert sell["quantity"] == -4.0 and sell["proceeds"] == 760.0 and sell["comm_fee"] == -1.0
 
     kinds = sorted(c["kind"] for c in parsed["cash"])
     assert kinds == ["deposit_withdrawal", "dividend"]

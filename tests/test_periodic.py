@@ -235,6 +235,15 @@ def test_commentary_may_round_the_sheets_figures_but_not_invent_one():
     assert periodic.unsupported_figures("You beat the market by 2.11 points.", b) == ["2.11"]
 
 
+def test_a_small_whole_number_with_a_unit_is_a_figure():
+    """Every whole number up to 12 passed as a "count", so "fell 7%" sailed through
+    against a sheet showing +0.84% and +1.20%."""
+    b = _brief()
+    assert periodic.unsupported_figures("Your holdings fell 7% while SPY dropped 1.3%.", b) == ["7"]
+    assert periodic.unsupported_figures("It cost you $5 and 8 points.", b) == ["5", "8"]
+    assert periodic.unsupported_figures("3 of 5 holdings rose; 2 fell.", b) == [], "bare counts"
+
+
 def test_commentary_that_invents_figures_is_retried_then_withheld(monkeypatch):
     replies = iter(["Beat the market by 2.11 points.", "Holdings rose 0.84%."])
 

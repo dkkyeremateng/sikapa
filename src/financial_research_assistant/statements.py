@@ -674,7 +674,10 @@ def parse_ofx(source: str | Path) -> dict[str, Any]:
                     "quantity": units if is_buy else -units,
                     "trade_price": _ofx_num(txn.unitprice),
                     "close_price": 0.0,
-                    "proceeds": -total if is_buy else total,
+                    # GROSS, as IBKR's CSV and Flex report it, so one rule turns
+                    # every importer's row into net proceeds: proceeds + comm_fee.
+                    # OFX's TOTAL is net of commission and fees.
+                    "proceeds": -(total - comm - fees) if is_buy else total + comm + fees,
                     "comm_fee": -(comm + fees),  # IBKR stores fees negative
                     "basis": total,
                     "realized_pl": 0.0,
@@ -858,29 +861,57 @@ def query_transactions(
         conn.close()
 
 
+def _period_end(period: str) -> str:
+    """The last date a period string names (ISO), or "" when it names none. Takes
+    ranges and single days ("August 3, 2026") alike."""
+    dates = []
+    for text in re.findall(r"[A-Z][a-z]+ \d{1,2}, \d{4}", period or ""):
+        try:
+            dates.append(datetime.strptime(text, "%B %d, %Y").date())
+        except ValueError:
+            continue
+    return max(dates).isoformat() if dates else ""
+
+
+def _newest_first(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    """Imports ordered by the date their period REACHES, newest first; the later
+    import wins a tie (a re-pull of the same day).
+
+    "Newest" used to mean most recently imported. Backfilling a 2025 annual
+    after the current statement then made 2025's positions "today's", which is
+    exactly what ``lot_coverage`` asks the user to do."""
+    return sorted(rows, key=lambda r: (_period_end(r["period"] or ""), r["id"]), reverse=True)
+
+
+def _newest_import(conn: sqlite3.Connection, account: str | None = None) -> sqlite3.Row | None:
+    rows = conn.execute(
+        "SELECT id, account, period, twrr FROM imports"
+        + (" WHERE account = ?" if account else ""), (account,) if account else (),
+    ).fetchall()
+    ordered = _newest_first(rows)
+    return ordered[0] if ordered else None
+
+
 def list_accounts() -> list[str]:
-    """Distinct accounts present in the store, newest-import first. (A combined
-    ``U1+U2`` entry denotes a consolidated multi-account statement.)"""
+    """Distinct accounts present in the store, the one with the newest statement
+    first. (A combined ``U1+U2`` entry denotes a consolidated multi-account
+    statement.)"""
     if not db_path().exists():
         return []
     conn = _connect()
     try:
-        rows = conn.execute(
-            "SELECT account FROM imports GROUP BY account ORDER BY MAX(id) DESC"
-        ).fetchall()
-        return [r["account"] for r in rows]
+        rows = _newest_first(conn.execute("SELECT id, account, period FROM imports").fetchall())
+        return list(dict.fromkeys(r["account"] for r in rows))
     finally:
         conn.close()
 
 
 def _resolve_account(conn: sqlite3.Connection, account: str | None) -> str | None:
     """Which account a query scopes to: the one asked for, else the account of
-    the newest import (so single-account stores behave exactly as before)."""
+    the newest statement (so single-account stores behave exactly as before)."""
     if account:
         return account
-    row = conn.execute(
-        "SELECT account FROM imports ORDER BY id DESC LIMIT 1"
-    ).fetchone()
+    row = _newest_import(conn)
     return row["account"] if row else None
 
 
@@ -909,12 +940,10 @@ def query_positions(symbol: str | None = None, account: str | None = None) -> li
         acct = _resolve_account(conn, account)
         if acct is None:
             return []
-        newest = conn.execute(
-            "SELECT MAX(id) AS m FROM imports WHERE account = ?", (acct,)
-        ).fetchone()
-        if not newest or newest["m"] is None:
+        newest = _newest_import(conn, acct)
+        if newest is None:
             return []
-        import_id = newest["m"]
+        import_id = newest["id"]
         q = (
             "SELECT p.*, i.description, i.security_id, i.listing_exch, i.type "
             "FROM positions p LEFT JOIN instruments i "
@@ -942,10 +971,7 @@ def query_nav(account: str | None = None) -> dict[str, Any]:
         acct = _resolve_account(conn, account)
         if acct is None:
             return {"twrr": "", "rows": []}
-        newest = conn.execute(
-            "SELECT id, twrr FROM imports WHERE account = ? ORDER BY id DESC LIMIT 1",
-            (acct,),
-        ).fetchone()
+        newest = _newest_import(conn, acct)
         if not newest:
             return {"twrr": "", "rows": []}
         rows = conn.execute(
@@ -1335,7 +1361,7 @@ def _trade_split_events(
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(
             f"SELECT import_id, account, symbol, currency, datetime, quantity, trade_price, "
-            f"proceeds, basis FROM trades{where} ORDER BY datetime ASC, id ASC",
+            f"proceeds, comm_fee, basis FROM trades{where} ORDER BY datetime ASC, id ASC",
             params,
         ).fetchall()
         ca_clauses, ca_params = [], []
@@ -1520,10 +1546,12 @@ def realized_gains(
 
     Walks every trade chronologically, opening a lot on each buy and matching
     sells against the oldest open lots. For each matched slice it records the
-    gain ``(sell_price − lot_cost) × qty`` and classifies it **short-term**
-    (held < 365 days) or **long-term** (≥ 365). Per-share amounts use the
-    commission-inclusive ``basis``/``proceeds`` fields, so gains are net of
-    commissions.
+    gain ``(sell_price − lot_cost) × qty`` and classifies it **short-term** or
+    **long-term** by calendar year (``is_long_term``). Both sides carry their
+    commission: a lot's cost is the commission-inclusive ``basis``, and a sale's
+    price is ``proceeds + comm_fee``. Every importer stores proceeds GROSS (IBKR's
+    CSV and Flex do; the OFX importer converts), and reading them as net left
+    each sale's commission out of the gain.
 
     ``year`` counts only realizations *sold* in that calendar year (lots may open
     earlier). ``symbol`` scopes the input; ``account`` defaults to the newest
@@ -1556,9 +1584,10 @@ def realized_gains(
         if qty > 0:  # buy → open a lot (basis is positive, commission-inclusive)
             cost_per_share = (r["basis"] / qty) if qty else r["trade_price"]
             lots[sym].append([qty, cost_per_share, dt])
-        elif qty < 0:  # sell → match FIFO (proceeds positive, net of commission)
+        elif qty < 0:  # sell → match FIFO (gross proceeds less the commission)
             sell_qty = -qty
-            price_per_share = (r["proceeds"] / sell_qty) if sell_qty else r["trade_price"]
+            net = r["proceeds"] + (r["comm_fee"] or 0.0)
+            price_per_share = (net / sell_qty) if sell_qty else r["trade_price"]
             counts = year is None or dt[:4] == str(year)
             while sell_qty > 1e-9 and lots[sym]:
                 lot = lots[sym][0]
@@ -1746,19 +1775,13 @@ def positions_as_of(account: str | None = None) -> str:
     for imp in list_imports():
         if account and imp.get("account") != account:
             continue
-        dates = []
-        for text in re.findall(r"[A-Z][a-z]+ \d{1,2}, \d{4}", str(imp.get("period") or "")):
-            try:
-                dates.append(datetime.strptime(text, "%B %d, %Y").date())
-            except ValueError:
-                continue
-        if dates:
-            return max(dates).isoformat()
+        if end := _period_end(str(imp.get("period") or "")):
+            return end
     return ""
 
 
 def list_imports() -> list[dict[str, Any]]:
-    """Every stored import (account, period, counts), newest first."""
+    """Every stored import (account, period, counts), newest statement first."""
     if not db_path().exists():
         return []
     conn = _connect()
@@ -1771,8 +1794,8 @@ def list_imports() -> list[dict[str, Any]]:
             "(SELECT COUNT(*) FROM instruments n WHERE n.import_id = i.id) AS instruments, "
             "(SELECT COUNT(*) FROM nav v WHERE v.import_id = i.id) AS nav, "
             "(SELECT COUNT(*) FROM corporate_actions a WHERE a.import_id = i.id) AS corporate_actions "
-            "FROM imports i ORDER BY i.id DESC"
+            "FROM imports i"
         ).fetchall()
-        return [{k: r[k] for k in r.keys()} for r in rows]
+        return [{k: r[k] for k in r.keys()} for r in _newest_first(rows)]
     finally:
         conn.close()

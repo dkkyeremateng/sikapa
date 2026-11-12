@@ -62,6 +62,10 @@ _SIDE_EFFECT_NAMES = {
     "add_alert", "remove_alert",
     "record_thesis",
     "render_report", "periodic_report",
+    # These two render AND send (deliver=True by default), and export_data writes
+    # a file wherever it is told. Missing here, a subagent could send the user a
+    # report the primary turn never knew about.
+    "render_review", "render_stock_report", "export_data",
     "recommend_ideas",
     "add_to_watchlist", "update_investor_profile",
     "import_ibkr_statement",

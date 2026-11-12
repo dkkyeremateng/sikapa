@@ -5,6 +5,7 @@ points the store at a throwaway file. Nothing here reaches a model: scoring is t
 price lookups and a subtraction, which is the point of it.
 """
 
+import pytest
 from datetime import date, timedelta
 
 from financial_research_assistant import journal
@@ -357,3 +358,36 @@ async def test_a_scoring_failure_does_not_sink_the_tick(monkeypatch):
 
     monkeypatch.setattr(journal, "score_due", boom)
     assert await scheduler.run_due(fake=True) == []  # returned normally, no raise
+
+
+def test_a_split_during_the_horizon_is_not_a_75_percent_fall(monkeypatch):
+    """The entry price is frozen at the call; the series is split-adjusted after
+    the fact. A 4-for-1 split read as -75%: a bullish call scored as a miss."""
+    from datetime import date
+
+    from financial_research_assistant import journal
+
+    # As the series reads AFTER the split: the entry day's 400 close is now 100.
+    closes = {("NVDA", date(2026, 3, 2)): 100.0, ("NVDA", date(2026, 6, 1)): 110.0,
+              ("SPY", date(2026, 3, 2)): 500.0, ("SPY", date(2026, 6, 1)): 510.0}
+    monkeypatch.setattr(journal, "_price_on",
+                        lambda sym, when: (closes.get((sym, when)), when.isoformat()))
+    entry = {"id": "t1", "symbol": "NVDA", "verdict": "bullish", "status": "open",
+             "entry_price": 400.0, "entry_date": "2026-03-02", "due": "2026-06-01",
+             "benchmark": "SPY", "horizon_days": 91}
+    assert journal.split_factor(entry) == 4.0
+    scored = journal.score_entry(entry, now=date(2026, 6, 1))
+    assert scored["change_pct"] == pytest.approx(10.0) and scored["hit"] is True
+    assert scored["alpha_pct"] == pytest.approx(8.0)
+
+
+def test_no_split_leaves_the_entry_alone(monkeypatch):
+    """A revised close a few cents off is not a split: the stored entry stands."""
+    from datetime import date
+
+    from financial_research_assistant import journal
+
+    monkeypatch.setattr(journal, "_price_on", lambda sym, when: (100.4, when.isoformat()))
+    entry = {"symbol": "KO", "entry_price": 100.0, "entry_date": "2026-03-02"}
+    assert journal.split_factor(entry) == 1.0
+    assert journal.comparable_entry_price(entry) == 100.0

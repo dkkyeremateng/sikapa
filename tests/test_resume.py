@@ -167,3 +167,20 @@ def test_a_thread_is_mid_run_only_while_the_graph_owes_a_step():
     assert stop([q]) and stop([q, call]) and stop([q, call, result])
     assert not stop([q, call, result, AIMessage(content="answer")])
     assert not stop([])
+
+
+def test_the_checkpoint_db_is_owner_only(tmp_path):
+    """It holds every conversation, account figures included; it was created 0644."""
+    import stat
+
+    from financial_research_assistant.adapter import _private_db
+
+    db = tmp_path / "state" / "checkpoints.db"
+    _private_db(db)
+    assert stat.S_IMODE(db.stat().st_mode) == 0o600
+    assert stat.S_IMODE(db.parent.stat().st_mode) == 0o700
+    wal = tmp_path / "state" / "checkpoints.db-wal"
+    wal.write_text("")
+    wal.chmod(0o644)
+    _private_db(db)
+    assert stat.S_IMODE(wal.stat().st_mode) == 0o600, "an existing loose file is tightened"

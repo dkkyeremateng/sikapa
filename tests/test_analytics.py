@@ -627,3 +627,25 @@ def test_etf_exposure(monkeypatch):
 
     monkeypatch.setattr(f, "_fetch_fund_data", lambda sym: {})
     assert "No fund look-through" in f.etf_exposure("AAPL")
+
+
+def test_an_option_lot_is_not_a_fake_loss(monkeypatch):
+    """Lot cost is per contract (x100), the price per share: one call bought at
+    $2.50 and still marked there read as -$248 with an $86.85 "tax benefit"."""
+    import datetime as _dt
+
+    import financial_research_assistant.analytics as a
+    from financial_research_assistant import statements as s
+
+    monkeypatch.setattr(s, "open_lots", lambda account=None: {
+        "AAPL 261218C00250000": [{"qty": 1.0, "cost_per_share": 251.05, "open_date": "2026-01-02"}],
+        "KO": [{"qty": 10.0, "cost_per_share": 70.0, "open_date": "2026-01-02"}]})
+    monkeypatch.setattr(s, "query_positions", lambda account=None: [
+        {"symbol": "AAPL 261218C00250000", "asset_category": "Equity and Index Options",
+         "close_price": 2.5},
+        {"symbol": "KO", "asset_category": "Stocks", "close_price": 60.0}])
+    monkeypatch.setattr(a, "_current_price", lambda sym, fallback=None: fallback)
+    out = a.tax_loss_harvest(today=_dt.date(2026, 6, 1))
+    assert "KO" in out and "loss -100.00" in out
+    assert "AAPL 261218C00250000  loss" not in out and "-248" not in out
+    assert "options/futures not assessed (AAPL 261218C00250000)" in out

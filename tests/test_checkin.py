@@ -50,11 +50,11 @@ def _call(id_, sym, verdict, price, on):
 
 def test_what_breaks_the_profile_is_found(world):
     keys = {f.key: f.line for f in checkin.findings()}
-    assert keys["cap:AAPL"] == "AAPL is 60.0% of the book, over your 12% position cap."
+    assert keys["cap:AAPL"] == "AAPL is 60.0% of the account, over your 12% position cap."
     assert "cap:UNH" in keys and "cap:BND" not in keys, "a bond fund is not a single stock"
-    assert keys["sector:Technology"].startswith("Technology is 60.0% of the book, over your 35%")
+    assert keys["sector:Technology"].startswith("Technology is 60.0% of the account, over your 35%")
     assert "sector:Healthcare" not in keys
-    assert keys["mix:us_equity"].endswith("75% of the book against a 60% target (over by 15 points).")
+    assert keys["mix:us_equity"].endswith("75% of the account against a 60% target (over by 15 points).")
     assert "under by 20 points" in keys["mix:intl_equity"]
     assert "mix:bonds" in keys, "25% against 20% is a 5-point drift"
 
@@ -129,3 +129,23 @@ def test_it_is_scheduled_and_has_a_command(world):
     out = asyncio.run(handler("", False))
     assert out.startswith("🧭 Worth a look now:") and "cap:" not in out
     assert checkin.to_raise(checkin.findings(), NOW), "the command does not use up a finding"
+
+
+def test_weights_and_the_mix_count_the_accounts_cash(world, monkeypatch):
+    """With cash in the account, weights against the priced holdings alone read
+    high: AAPL is 60% of the holdings but 50% of the account."""
+    from financial_research_assistant import periodic, universes
+
+    monkeypatch.setattr(statements, "query_nav", lambda account=None: {"twrr": "", "rows": [
+        {"asset_class": "Cash", "current_total": 2000.0},
+        {"asset_class": "Stocks", "current_total": 7500.0}]})
+    book = periodic.load_book()
+    aapl = next(h for h in book["holdings"] if h["symbol"] == "AAPL")
+    assert book["account_value"] == 12000.0 and book["total"] == 10000.0
+    assert aapl["weight_pct"] == pytest.approx(50.0)
+    mix = universes.allocation(book)
+    assert mix["cash"] == pytest.approx(16.67, abs=0.01)
+    assert mix["us_equity"] == pytest.approx(62.5) and mix["bonds"] == pytest.approx(20.83, abs=0.01)
+    keys = {f.key: f.line for f in checkin.findings()}
+    assert keys["cap:AAPL"].startswith("AAPL is 50.0% of the account")
+    assert "mix:cash" in keys and "mix:bonds" not in keys, "bonds is now inside 5 points"
