@@ -132,6 +132,29 @@ def read_jsonl(path: Path, limit: int = 0) -> list[dict[str, Any]]:
     return out
 
 
+def prune_jsonl(path: Path, keep_since: str, field: str = "at") -> int:
+    """Drop the records of a JSONL log whose ``field`` sorts before ``keep_since``
+    (ISO), atomically; returns how many went. Records without the field are kept.
+    Appends don't take the lock, so one landing mid-prune can be lost: acceptable
+    for logs, which is all this is for."""
+    if not path.exists():
+        return 0
+    with locked(path):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and str(rec.get(field) or "9") < keep_since:
+                continue
+            kept.append(line)
+        if len(kept) != len(lines):
+            write_private(path, "".join(f"{line}\n" for line in kept), prefix=".prune-")
+        return len(lines) - len(kept)
+
+
 def write_private(path: Path, text: str, prefix: str = ".tmp-") -> None:
     """Write ``text`` to ``path`` as a ``0600`` file, atomically.
 

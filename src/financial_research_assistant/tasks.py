@@ -1042,14 +1042,20 @@ def save_undelivered(task: dict[str, Any], now: datetime | None = None) -> Path:
     return path
 
 
-def purge(keep_errors: bool = True) -> int:
+def purge(keep_errors: bool = True, finished_before: datetime | None = None) -> int:
     """Drop finished tasks; returns how many went. Errors are kept by default so a
-    failure isn't silently swept away before it's been read."""
+    failure isn't silently swept away before it's been read. ``finished_before``
+    keeps the ones that ran since then, so a recent result is still listed."""
+    def recent(t: dict[str, Any]) -> bool:
+        ran = _parse_due(t.get("last_run"))
+        return finished_before is not None and ran is not None and ran >= finished_before
+
     with _locked():
         items = load_tasks()
         kept = [
             t for t in items
-            if t.get("status") not in ("done",) and not (t.get("status") == "error" and not keep_errors)
+            if recent(t) or (t.get("status") not in ("done",)
+                             and not (t.get("status") == "error" and not keep_errors))
         ]
         removed = len(items) - len(kept)
         if removed:
